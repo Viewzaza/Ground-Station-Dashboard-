@@ -65,8 +65,9 @@
       "globe"
       "graf";
   }
-  .wall > * { min-height: 240px; }
-  .hdr { min-height: 0; }
+  /* Panels want room on a phone; the header and the Grafana strip do not,
+     and forcing it on them just wastes the first screenful. */
+  .wall > *:not(.hdr):not(.graf) { min-height: 240px; }
   .track-col { overflow: visible; }
   /* the globe is the heaviest thing on the page; let the browser skip it
      entirely until it is scrolled near */
@@ -110,6 +111,26 @@
 .chip.ok       { color: var(--ok);   border-color: rgba(61,220,132,.35); }
 .chip.degraded { color: var(--warn); border-color: rgba(255,176,32,.35); }
 .chip.down     { color: var(--bad);  border-color: rgba(255,77,94,.35); }
+
+/* On a phone the header's fixed-width blocks overlap each other. These rules
+   must live AFTER the base .hdr rules above: same specificity, so source order
+   is what decides. */
+@media (max-width: 1000px) {
+  .hdr {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: start;
+    gap: 4px 12px;
+    padding: 10px 12px;
+    height: auto;
+  }
+  .hdr-id { grid-column: 1 / -1; flex-wrap: wrap; gap: 4px 8px; }
+  .hdr-id h1 { font-size: 14px; }
+  .hdr-clocks { gap: 14px; }
+  .hdr-aos { text-align: right; }
+  .hdr-aos b { font-size: 16px; }
+  .hdr-chips { grid-column: 1 / -1; margin-left: 0; }
+}
 
 /* ---------- grafana strip ---------- */
 .graf {

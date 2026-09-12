@@ -30,8 +30,23 @@ from fastapi.staticfiles import StaticFiles        # noqa: E402
 
 from app.main import app                           # noqa: E402
 
+
+class NoCacheStatic(StaticFiles):
+    """Serve the frontend with caching off.
+
+    Without this the browser holds on to css/js between edits and you end up
+    debugging a stale stylesheet — which is exactly as much fun as it sounds.
+    Production is the opposite: Caddy should cache these aggressively.
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        return resp
+
+
 # Mounted last so every /api route still wins.
-app.mount("/", StaticFiles(directory=str(ROOT / "frontend"), html=True), name="frontend")
+app.mount("/", NoCacheStatic(directory=str(ROOT / "frontend"), html=True), name="frontend")
 
 
 if __name__ == "__main__":
