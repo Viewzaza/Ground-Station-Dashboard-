@@ -1,0 +1,49 @@
+/* Design tokens. Everything else references these — change a colour here and
+   the whole console follows. */
+
+:root {
+  --bg:        #080b10;
+  --panel:     #10161f;
+  --panel-2:   #0b1119;
+  --line:      #1e2836;
+  --line-soft: #161e29;
+
+  --text:  #dce5f0;
+  --muted: #7a8ba3;
+  --dim:   #46566d;
+
+  --accent:  #37d2f0;   /* live / selected */
+  --accent-2:#8b7cf6;   /* orbit path */
+  --ok:      #3ddc84;
+  --warn:    #ffb020;
+  --bad:     #ff4d5e;
+  --night:   rgba(6, 10, 18, 0.55);
+
+  --mono: "SF Mono", ui-monospace, "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+
+  --gap: 10px;
+  --hdr-h: 62px;
+  --graf-h: 190px;
+  --radius: 6px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 var(--mono);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;            /* wall display: released below 1000px */
+}
+
+h1, h2 { margin: 0; font-weight: 600; }
+
+.muted { color: var(--muted); }
+.hint  { margin-left: auto; color: var(--dim); font-weight: 400; letter-spacing: 0; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }

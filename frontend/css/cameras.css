@@ -1,0 +1,57 @@
+/* Camera tiles. These are the centre of the display, so they get the space and
+   everything else works around them. */
+
+.panel.cam { padding-bottom: 9px; }
+
+.cam-slot {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #05080d;
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* go2rtc's custom element renders a <video> inside itself. */
+.cam-slot video-stream,
+.cam-slot video,
+.cam-slot img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #05080d;
+}
+
+.cam-slot .cam-placeholder {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-align: center;
+  padding: 12px;
+}
+
+.cam-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 9px;
+  letter-spacing: .12em;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: rgba(8, 11, 16, .8);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  pointer-events: none;
+}
+.cam-badge.live     { color: var(--ok);   border-color: rgba(61,220,132,.4); }
+.cam-badge.fallback { color: var(--warn); border-color: rgba(255,176,32,.4); }
+.cam-badge.down     { color: var(--bad);  border-color: rgba(255,77,94,.4); }
+
+/* Double-click a tile to fill the screen with it. */
+.cam-slot:fullscreen { background: #000; }
+.cam-slot:fullscreen video { object-fit: contain; }

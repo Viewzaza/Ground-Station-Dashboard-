@@ -1,0 +1,138 @@
+/* The whole layout is one grid. Every reflow is a grid-template-areas swap —
+   no JavaScript is involved in responsiveness.
+
+   The cameras are the middle column and the widest track, because that is the
+   operator's primary view. */
+
+.wall {
+  display: grid;
+  height: 100vh;
+  gap: var(--gap);
+  padding: var(--gap);
+  grid-template-columns: minmax(340px, 4fr) minmax(520px, 5fr) minmax(360px, 3fr);
+  grid-template-rows: var(--hdr-h) 1fr 1fr minmax(160px, var(--graf-h));
+  grid-template-areas:
+    "hdr   hdr   hdr"
+    "map   cam1  track"
+    "globe cam2  track"
+    "graf  graf  graf";
+}
+
+.track-col {
+  grid-area: track;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-height: 0;
+  overflow: hidden;
+}
+.track-col .panel { flex: none; }
+.track-col .panel.grow { flex: 1 1 auto; min-height: 0; }
+
+/* ---------- 4K wall: more Grafana, taller globe ---------- */
+@media (min-width: 2400px) {
+  :root { --hdr-h: 74px; --graf-h: 240px; --gap: 12px; }
+  .wall { grid-template-rows: var(--hdr-h) 1fr 1.15fr minmax(200px, var(--graf-h)); }
+}
+
+/* ---------- laptop: cameras go full width under the header ---------- */
+@media (max-width: 1400px) {
+  .wall {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: var(--hdr-h) minmax(220px, 1.1fr) 1fr 1fr minmax(150px, var(--graf-h));
+    grid-template-areas:
+      "hdr   hdr"
+      "cam1  cam2"
+      "map   track"
+      "globe track"
+      "graf  graf";
+  }
+}
+
+/* ---------- tablet and phone: one scrolling column ---------- */
+@media (max-width: 1000px) {
+  html, body { overflow: auto; }
+  .wall {
+    height: auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-template-areas:
+      "hdr"
+      "cam1"
+      "cam2"
+      "track"
+      "map"
+      "globe"
+      "graf";
+  }
+  .wall > * { min-height: 240px; }
+  .hdr { min-height: 0; }
+  .track-col { overflow: visible; }
+  /* the globe is the heaviest thing on the page; let the browser skip it
+     entirely until it is scrolled near */
+  [style*="grid-area:globe"] { content-visibility: auto; contain-intrinsic-size: 320px; }
+}
+
+/* ---------- header ---------- */
+.hdr {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 0 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.hdr-id { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.hdr-id h1 { font-size: 16px; letter-spacing: .14em; white-space: nowrap; }
+.hdr-id .norad { color: var(--accent); font-size: 11px; letter-spacing: .1em; }
+.hdr-id .station { color: var(--muted); font-size: 11px; letter-spacing: .08em; white-space: nowrap; }
+
+.hdr-clocks { display: flex; gap: 18px; }
+.clock { display: flex; flex-direction: column; line-height: 1.15; }
+.clock span { font-size: 9px; letter-spacing: .16em; color: var(--muted); }
+.clock b { font-size: 17px; font-variant-numeric: tabular-nums; font-weight: 500; }
+
+.hdr-aos { display: flex; flex-direction: column; line-height: 1.15; }
+.hdr-aos > span:first-child { font-size: 9px; letter-spacing: .16em; color: var(--muted); }
+.hdr-aos b { font-size: 20px; font-variant-numeric: tabular-nums; color: var(--accent); }
+.hdr-aos.imminent b { color: var(--warn); }
+.hdr-aos.in-pass b { color: var(--ok); }
+.aos-sub { font-size: 10px; color: var(--dim); }
+
+.hdr-chips { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+.chip {
+  font-size: 10px; letter-spacing: .1em; padding: 3px 8px; border-radius: 3px;
+  border: 1px solid var(--line); color: var(--dim); background: #0a0f16;
+  white-space: nowrap;
+}
+.chip.ok       { color: var(--ok);   border-color: rgba(61,220,132,.35); }
+.chip.degraded { color: var(--warn); border-color: rgba(255,176,32,.35); }
+.chip.down     { color: var(--bad);  border-color: rgba(255,77,94,.35); }
+
+/* ---------- grafana strip ---------- */
+.graf {
+  display: flex; gap: var(--gap); align-items: stretch;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 8px; min-height: 0;
+}
+.graf-strip {
+  display: grid; gap: var(--gap); flex: 1; min-width: 0;
+  grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+}
+.graf-strip iframe {
+  width: 100%; height: 100%; border: 1px solid var(--line-soft);
+  border-radius: 4px; background: var(--panel-2);
+}
+.graf-open {
+  align-self: flex-start; color: var(--muted); text-decoration: none;
+  font-size: 11px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 3px;
+  white-space: nowrap;
+}
+.graf-open:hover { color: var(--accent); border-color: var(--accent); }
+
+@media (max-width: 1400px) { .graf-strip { grid-auto-columns: minmax(200px, 1fr); } }
+@media (max-width: 1000px) {
+  .graf-strip { grid-auto-flow: row; grid-auto-rows: 160px; }
+}
