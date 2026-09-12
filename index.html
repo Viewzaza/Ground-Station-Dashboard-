@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ground Station</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot" id="link-dot"></span>
+    <h1>GROUND STATION</h1>
+    <span class="vehicle" id="vehicle-id">—</span>
+  </div>
+
+  <div class="clock">
+    <span class="clock-label">MET</span>
+    <span class="clock-value" id="met">T+00:00:00</span>
+  </div>
+
+  <div class="link">
+    <div class="link-item"><span>LINK</span><b id="link-state">OFFLINE</b></div>
+    <div class="link-item"><span>RSSI</span><b id="rssi">—</b></div>
+    <div class="link-item"><span>RATE</span><b id="rate">0 Hz</b></div>
+    <div class="link-item"><span>LOST</span><b id="lost">0</b></div>
+  </div>
+
+  <div class="controls">
+    <button id="btn-connect" class="btn btn-primary">Connect</button>
+    <button id="btn-pause" class="btn" disabled>Pause</button>
+    <button id="btn-export" class="btn">Export CSV</button>
+    <button id="btn-clear" class="btn">Clear</button>
+  </div>
+</header>
+
+<div class="statebar" id="statebar">
+  <ol class="states">
+    <li data-state="IDLE">IDLE</li>
+    <li data-state="ARMED">ARMED</li>
+    <li data-state="BOOST">BOOST</li>
+    <li data-state="COAST">COAST</li>
+    <li data-state="APOGEE">APOGEE</li>
+    <li data-state="DROGUE">DROGUE</li>
+    <li data-state="MAIN">MAIN</li>
+    <li data-state="LANDED">LANDED</li>
+  </ol>
+  <div class="alerts" id="alerts"></div>
+</div>
+
+<main class="grid">
+
+  <section class="panel tiles" aria-label="Key telemetry">
+    <div class="tile"><span class="t-label">ALTITUDE</span><span class="t-value" id="v-alt">—</span><span class="t-unit">m AGL</span>
+      <span class="t-sub">max <b id="v-altmax">—</b></span></div>
+    <div class="tile"><span class="t-label">VERT SPEED</span><span class="t-value" id="v-vz">—</span><span class="t-unit">m/s</span>
+      <span class="t-sub">max <b id="v-vzmax">—</b></span></div>
+    <div class="tile"><span class="t-label">GROUND SPEED</span><span class="t-value" id="v-gs">—</span><span class="t-unit">m/s</span>
+      <span class="t-sub">hdg <b id="v-hdg">—</b></span></div>
+    <div class="tile"><span class="t-label">BATTERY</span><span class="t-value" id="v-volt">—</span><span class="t-unit">V</span>
+      <span class="t-sub"><span class="bar"><i id="v-voltbar"></i></span></span></div>
+    <div class="tile"><span class="t-label">TEMP</span><span class="t-value" id="v-temp">—</span><span class="t-unit">°C</span>
+      <span class="t-sub">press <b id="v-press">—</b> hPa</span></div>
+    <div class="tile"><span class="t-label">GPS</span><span class="t-value" id="v-sats">—</span><span class="t-unit">sats</span>
+      <span class="t-sub" id="v-fix">no fix</span></div>
+  </section>
+
+  <section class="panel chart-panel">
+    <h2>Altitude</h2>
+    <canvas id="chart-alt" class="chart"></canvas>
+  </section>
+
+  <section class="panel chart-panel">
+    <h2>Vertical speed</h2>
+    <canvas id="chart-vz" class="chart"></canvas>
+  </section>
+
+  <section class="panel">
+    <h2>Attitude</h2>
+    <div class="attitude">
+      <canvas id="adi" width="260" height="260" aria-label="Attitude indicator"></canvas>
+      <canvas id="compass" width="260" height="260" aria-label="Heading"></canvas>
+    </div>
+    <div class="rpy">
+      <span>ROLL <b id="v-roll">—</b></span>
+      <span>PITCH <b id="v-pitch">—</b></span>
+      <span>YAW <b id="v-yaw">—</b></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Ground track</h2>
+    <canvas id="track" class="track" aria-label="Ground track"></canvas>
+    <div class="coords">
+      <span>LAT <b id="v-lat">—</b></span>
+      <span>LON <b id="v-lon">—</b></span>
+      <span>DIST <b id="v-dist">—</b> m</span>
+    </div>
+  </section>
+
+  <section class="panel log-panel">
+    <h2>Packet log <span class="count" id="pkt-count">0</span></h2>
+    <div class="log-wrap">
+      <table class="log">
+        <thead><tr><th>SEQ</th><th>MET</th><th>STATE</th><th>ALT</th><th>VZ</th><th>V</th><th>RSSI</th></tr></thead>
+        <tbody id="log-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script src="js/telemetry.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
