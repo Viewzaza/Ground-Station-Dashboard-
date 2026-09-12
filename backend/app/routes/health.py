@@ -39,6 +39,7 @@ async def config(request: Request) -> dict:
             "alt_m": s.station_alt_m,
             "grid": s.station_grid,
             "min_elevation_deg": s.min_elevation_deg,
+            "min_culmination_deg": s.min_culmination_deg,
             "timezone": s.timezone,
         },
         "default_norad": s.default_norad,

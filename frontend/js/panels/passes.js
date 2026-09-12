@@ -41,8 +41,15 @@ function render() {
   el.appendChild(row('LOS', `${shortTime(pass.los, tz)}  ${countdown((los - now) / 1000)}`));
 
   const maxEl = row('MAX EL', deg(pass.max_el, 1));
-  maxEl.querySelector('b').classList.add('pass-el');
-  if (pass.max_el < 20) maxEl.querySelector('b').classList.add('low');
+  const maxElValue = maxEl.querySelector('b');
+  maxElValue.classList.add('pass-el');
+  // Below the station's culmination threshold SatNOGS will not schedule the
+  // pass, so flag it rather than letting it look like a normal opportunity.
+  const floor = store.config?.station?.min_culmination_deg ?? 10;
+  if (pass.max_el < floor) {
+    maxElValue.classList.add('low');
+    maxElValue.title = `below the station's ${floor}° scheduling threshold`;
+  }
   el.appendChild(maxEl);
 
   el.appendChild(row('AZ', `${deg(pass.aos_az, 0)} → ${deg(pass.los_az, 0)}`));

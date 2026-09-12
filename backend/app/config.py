@@ -33,7 +33,13 @@ class Settings(BaseSettings):
     station_lon: float = 100.51295302800892
     station_alt_m: float = 60.0
     station_grid: str = "OK03gt"
-    min_elevation_deg: float = 5.0
+    # Station 5024 reports min_horizon=0 and min_culmination=10 on SatNOGS.
+    # Matching its horizon is what makes our AOS/LOS agree with the schedule
+    # SatNOGS actually records to — at 5 deg we were consistently ~80 s late.
+    min_elevation_deg: float = 0.0
+    # Below this peak elevation SatNOGS will not schedule a pass; we still
+    # show them, marked, because a manual observation may still be wanted.
+    min_culmination_deg: float = 10.0
     timezone: str = "Asia/Bangkok"
 
     # --- satellites ---------------------------------------------------------

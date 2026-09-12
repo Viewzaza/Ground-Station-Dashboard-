@@ -21,6 +21,7 @@ import { mountGrafana } from './panels/grafana.js';
 let orbit = null;
 let map = null;
 let polar = null;
+let globe = null;
 
 async function boot() {
   // --- config ------------------------------------------------------------
@@ -43,13 +44,26 @@ async function boot() {
   map = new Map2D(document.getElementById('map2d'));
   polar = new PolarPlot(document.getElementById('polar'));
 
+  // Cesium is 23 MB. Load it after the panels that matter are already up,
+  // and only when this display is wide enough to be showing the globe.
+  if (store.config.features?.globe3d && window.innerWidth > 1000) {
+    import('./panels/globe3d.js').then(async (mod) => {
+      globe = mod;
+      await mod.mountGlobe();
+    }).catch((err) => console.warn('[globe3d]', err));
+  }
+
   await mountSatSelect(selectSatellite);
   await selectSatellite(store.config.default_norad);
 
   // --- loops -------------------------------------------------------------
   setInterval(tick, 1000);
   setInterval(refreshPass, 60_000);
-  window.addEventListener('resize', debounce(() => { map?.draw(); polar?.draw(); }, 150));
+  window.addEventListener('resize', debounce(() => {
+    map?.draw();
+    polar?.draw();
+    globe?.resizeGlobe();
+  }, 150));
   tick();
 }
 
@@ -107,6 +121,7 @@ function tick() {
   }
   map?.draw();
   polar?.draw();
+  globe?.updateGlobe(orbit);
   paintRotatorReadout();
 }
 

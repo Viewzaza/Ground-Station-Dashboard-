@@ -19,6 +19,7 @@ const SLOTS = ['cam-slot-0', 'cam-slot-1'];
 const STATE_LABELS = ['cam1-state', 'cam2-state'];
 const FALLBACK_AFTER_MS = 15000;
 const SNAPSHOT_INTERVAL_MS = 1000;
+const SNAPSHOT_RETRY_MS = 15000;     // after repeated failures, stop hammering
 
 let elementLoaded = null;
 
@@ -47,7 +48,7 @@ class CameraTile {
   }
 
   clear() {
-    clearInterval(this.snapshotTimer);
+    clearTimeout(this.snapshotTimer);
     clearTimeout(this.fallbackTimer);
     this.snapshotTimer = this.fallbackTimer = null;
     this.slot.replaceChildren();
@@ -121,14 +122,43 @@ class CameraTile {
     this.setBadge(reason, 'fallback');
     setStatus('cam', 'degraded', reason);
 
+    // A tile that cannot fetch a frame must not keep asking once a second
+    // forever — that is a request storm against a camera that is already in
+    // trouble. Back off to a slow retry and say so.
+    let failures = 0;
+    let interval = SNAPSHOT_INTERVAL_MS;
+
+    const schedule = () => {
+      clearTimeout(this.snapshotTimer);
+      this.snapshotTimer = setTimeout(tick, interval);
+    };
+
     const tick = () => {
       // Without a cache-buster the browser shows the first frame forever.
       img.src = `${camera.snapshot_url}?t=${Date.now()}`;
     };
-    tick();
-    this.snapshotTimer = setInterval(tick, SNAPSHOT_INTERVAL_MS);
 
-    img.onerror = () => this.setBadge('CAMERA DOWN', 'down');
+    img.onload = () => {
+      if (failures) {
+        failures = 0;
+        interval = SNAPSHOT_INTERVAL_MS;
+        this.setBadge(reason, 'fallback');
+        setStatus('cam', 'degraded', reason);
+      }
+      schedule();
+    };
+
+    img.onerror = () => {
+      failures += 1;
+      if (failures >= 3) {
+        interval = SNAPSHOT_RETRY_MS;
+        this.setBadge('CAMERA DOWN', 'down');
+        setStatus('cam', 'down', 'no frames from the bridge or the camera');
+      }
+      schedule();
+    };
+
+    tick();
   }
 }
 

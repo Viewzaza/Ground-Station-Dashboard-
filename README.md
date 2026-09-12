@@ -1,122 +1,210 @@
-# Ground Station Dashboard
+# KNACKSAT-2 Ground Station Dashboard
 
-A browser telemetry dashboard for a small rocket / CanSat-class vehicle. No
-build step, no dependencies — open `index.html` and it runs.
+An operator display for the KNACKSAT-2 ground control station run by **SatNOGS
+station 5024 — INSTED-Ground Station (UHF)**, grid OK03gt, 60 m ASL.
 
-It ships with a flight simulator so the whole dashboard works with nothing
-attached. Point it at a real radio by swapping one line (see
-[Attaching a real feed](#attaching-a-real-feed)).
+Two camera feeds sit in the centre of the screen, with live satellite tracking
+to their left, pass and antenna information to their right, and KNACKSAT-2
+telemetry along the bottom. It is built for a wall-mounted display that is left
+running, and reflows down to a phone.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ KNACKSAT-2 · 67683 │ UTC / ICT │ NEXT AOS -00:14:22 │ ● API ● CAM ● ROT ● TLE │
+├─────────────────┬────────────────────────────────┬───────────────────────────┤
+│  GROUND TRACK   │          CAMERA 1              │ SATELLITE (amateur cat.)  │
+│  footprint,     │                                │ NEXT PASS  AOS/TCA/LOS    │
+│  terminator     ├────────────────────────────────┤ ROTATOR    polar plot     │
+│  ORBIT (3D)     │          CAMERA 2              │ SATNOGS    5024 activity  │
+├─────────────────┴────────────────────────────────┴───────────────────────────┤
+│ GRAFANA  [last beacon] [battery V] [solar W] [battery °C]      open full ↗    │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Status
+
+| Area | State |
+|---|---|
+| Layout, health chips, config-driven frontend | done |
+| Camera tiles (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, awaiting real camera |
+| 2D ground track, footprint, terminator | done |
+| 3D orbit globe (CesiumJS, offline) | done |
+| Satellite selector, pass prediction, next-pass card | done |
+| Rotator **read-out** (polar plot, predicted arc) | plot done; rotctld bridge pending |
+| Rotator **control** behind the SatNOGS interlock | pending |
+| SatNOGS 5024 activity feed | pending |
+| Grafana telemetry strip | done |
 
 ## Running it
 
-Open `index.html` directly, or serve the folder:
+### On this machine, without Docker
 
 ```bash
-python -m http.server 8099
+python -m venv backend/.venv
+backend/.venv/Scripts/python -m pip install -r backend/requirements.txt
+sh tools/fetch_vendor.sh            # CesiumJS, ~23 MB, not committed
+backend/.venv/Scripts/python tools/dev_server.py
 ```
 
-Then open <http://localhost:8099> and press **Connect**. The simulator flies a
-sounding-rocket profile — pad, boost, coast, apogee, drogue, main, landing —
-in about 90 seconds.
+Then open <http://localhost:8000>. The API and the frontend are served from one
+origin, so there is no CORS anywhere. The camera tiles will report the bridge as
+unreachable unless go2rtc is also running — that is a real state the UI is built
+to show, not a failure.
 
-## What it shows
+### With Docker
 
-| Panel | Contents |
+```bash
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+```
+
+Development uses generated video test patterns. In production:
+
+```bash
+cp .env.example .env      # set GS_MOCK=0 and fill in the real values
+echo -n 'camera-password' > deploy/secrets/camera_password.txt
+chmod 600 deploy/secrets/camera_password.txt
+docker compose up -d
+```
+
+Four services: `caddy` (single origin, `tls internal`), `backend`, `video`
+(go2rtc) and `groundstation` — the separate `sgoudelis/ground-station` suite,
+started only with `--profile sdr`.
+
+## Architecture
+
+```
+browser ──HTTPS──▶ Caddy ──┬── /            frontend (static, no build step)
+                           ├── /api, /ws    backend   (FastAPI + Skyfield)
+                           ├── /video/*     go2rtc    (RTSP → WebRTC)
+                           └── /sdr/*       ground-station suite (separate, GPL)
+                                  │
+                    rotctld 10.90.36.140 ── ONE socket, 1 Hz
+                    camera  10.90.36.130 ── RTSP over TCP
+                    SatNOGS · Celestrak · Grafana (iframes only)
+```
+
+**Skyfield owns pass prediction, not the browser.** The schedule has to keep
+running with no browser open, and it is the same schedule the antenna will be
+driven from. The browser runs its own SGP4 (satellite.js) purely for the smooth
+1 Hz render of where the satellite is now.
+
+**Everything the frontend knows comes from `/api/config`** — station
+coordinates, Grafana panel ids, camera stream names, feature flags. Deploying to
+a different station is an `.env` edit.
+
+## Things that are the way they are for a reason
+
+Each of these cost time to find. Please read before changing them.
+
+- **Celestrak enforces its fetch etiquette.** Repeating a download before the
+  data has changed returns HTTP 403, and 50 errors in two hours puts your IP in
+  their firewall. `tle_store.py` never touches the network while the cache is
+  under `GS_TLE_TTL_S` (7200 s) old and treats any non-200 as terminal. Do not
+  lower that TTL, and do not add a retry loop.
+
+- **Match the station's horizon mask.** Station 5024 publishes
+  `min_horizon = 0`. With a plausible-looking 5° default our AOS ran a
+  consistent 74–96 seconds late against SatNOGS's own schedule; at 0° the two
+  agree to within a few seconds. `tests/test_satnogs_oracle.py` asserts this
+  against the live API.
+
+- **`satellite__norad_cat_id` does not filter the SatNOGS Network API.** It is
+  silently ignored and you get every satellite. Use `norad_cat_id`. Network API
+  pagination is cursor-based through the `Link: rel="next"` *header* — there is
+  no `?page=`.
+
+- **The antimeridian.** A ground track stepping from lon 179 to −179 draws a
+  line across the entire map unless the path is split and the crossing latitude
+  interpolated. Every path goes through `split_antimeridian()`. The same applies
+  to the footprint ring, which additionally does not close at all when it
+  contains a pole.
+
+- **Cesium's `requestRenderMode` starves its own tile loader.** It looks ideal
+  for a display that runs for months, but the globe surface never finishes
+  loading and you get markers floating in a black void. Cesium's default loop is
+  also driven by `requestAnimationFrame`, which a browser may throttle to zero
+  when the window is occluded — a wall display that silently stops repainting is
+  worse than a slow one. `globe3d.js` drives rendering itself: fast while tiles
+  settle, 1 Hz once idle.
+
+- **Grafana sends no CORS headers**, so their telemetry cannot be fetched, only
+  embedded. Their panels also need `var-DS_INFLUXDB` or they render empty. The
+  embeds work because that instance has anonymous access enabled — if the
+  KNACKSAT team turns it off, the panels go blank and `GS_GRAFANA_TOKEN` plus a
+  backend proxy become necessary.
+
+- **The camera password never reaches the browser.** Snapshots are proxied
+  through `/api/cameras/{id}/snapshot.jpg` rather than linked, because the
+  camera speaks plain HTTP with Digest auth: a direct URL would be blocked as
+  mixed content and would expose the credentials in page source.
+
+- **One rotctld socket, process-wide.** rotctld spawns a thread per connection
+  with no mutex around the shared rotator handle, so concurrent clients can
+  interleave writes mid-frame and corrupt an in-progress track. N browser tabs
+  must produce exactly one connection. Poll at 1 Hz — a 600-baud ROT2PROG
+  cannot sustain 2 Hz.
+
+## Rotator control
+
+Control is **off by default** (`GS_ROTATOR_CONTROL_ENABLED=0`) and, when
+enabled, is refused unless all four gates pass:
+
+| Gate | Source |
 |---|---|
-| Header | link state, RSSI, packet rate, lost-packet count, mission elapsed time |
-| State bar | flight phase, plus caution/alarm flags for battery, temperature, GPS and signal |
-| Tiles | altitude, vertical speed, ground speed, battery, temperature/pressure, GPS |
-| Charts | altitude and vertical speed against mission time, 150 s window |
-| Attitude | artificial horizon (roll/pitch) and heading rose |
-| Ground track | downrange trail with range rings, launch site at the origin |
-| Packet log | last 200 frames, newest first |
+| SatNOGS client is down | station 5024 reports `is_connected = false` |
+| No imminent pass | no scheduled job within `GS_GATE_GUARD_S` of now |
+| Operator armed | an explicit arm, expiring after `GS_CONTROL_LEASE_S` |
+| Kill switch | `GS_ROTATOR_CONTROL_ENABLED=1` |
 
-**Export CSV** writes the whole received history — every field, not just what
-is on screen. **Pause** freezes the display without dropping the link;
-**Clear** discards the history and starts a fresh log.
+The station's own `is_connected` flag is used as the signal that satnogs-client
+is running, rather than mounting the Docker socket, so the backend keeps minimal
+privilege. If the reference `ground-station` suite is also deployed, its rotator
+integration must stay disabled — this backend is the single writer.
 
-## Packet format
+## Tests
 
-Every source emits one flat JSON object per packet:
-
-```json
-{
-  "seq": 412, "t": 41.2, "state": "COAST",
-  "alt": 1127.6, "vz": -17.5, "gs": 6.5,
-  "lat": 13.75662, "lon": 100.50214,
-  "roll": 9, "pitch": -59, "yaw": 170,
-  "temp": 17.3, "press": 888.8,
-  "volt": 8.30, "sats": 9, "rssi": -67
-}
+```bash
+cd backend
+.venv/Scripts/python -m pytest              # offline
+.venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
 
-| Field | Meaning |
-|---|---|
-| `seq` | packet counter from the vehicle — gaps are counted as lost packets |
-| `t` | mission elapsed time, seconds |
-| `state` | `IDLE` `ARMED` `BOOST` `COAST` `APOGEE` `DROGUE` `MAIN` `LANDED` |
-| `alt` | altitude above the launch site, m |
-| `vz` | vertical speed, m/s, positive up |
-| `gs` | ground speed, m/s |
-| `lat` / `lon` | degrees; the first fix with `sats >= 4` becomes the track origin |
-| `roll` / `pitch` / `yaw` | degrees |
-| `temp` / `press` | °C / hPa |
-| `volt` | battery volts |
-| `sats` | GPS satellites; below 4 the dashboard reports no fix |
-| `rssi` | dBm |
+## Development on a machine that cannot reach the station LAN
 
-## Attaching a real feed
+`GS_MOCK=1` is the only flag. It selects implementations at construction time,
+so there are no `if mock:` branches in the business logic.
 
-A browser page cannot open a serial port directly, so a small bridge process
-reads the receiver and forwards JSON over a WebSocket. Then, at the bottom of
-`js/app.js`, replace the simulator:
+- **Cameras** — `deploy/go2rtc/go2rtc.mock.yaml` declares the *same stream
+  names* as production, backed by generated video. No frontend or backend code
+  differs between the two.
+- **Rotator** — a simulator driven by the real predictor, so it tracks an actual
+  KNACKSAT-2 pass, crosses 360° into the cable-wrap range and injects link
+  faults. `tools/fake_rotctld.py` additionally speaks the real wire protocol, so
+  the actual parser can be exercised without hardware.
+- **SatNOGS, Celestrak and Grafana** are public, so development exercises the
+  production path. `GS_OFFLINE=1` falls back to fixtures.
 
-```js
-station.setSource(new WebSocketSource('ws://localhost:8081'));
-```
+## Commissioning on site
 
-A minimal bridge (Node, with `npm i ws serialport`):
+See `deploy/commissioning/`. The open questions it settles:
 
-```js
-const { WebSocketServer } = require('ws');
-const { SerialPort, ReadlineParser } = require('serialport');
+1. **Is the rotator on 4532 or 4533?** rigctld defaults to 4532 (a *radio*),
+   rotctld to 4533. Probe both with `+\dump_caps`, which is answered from
+   compiled capabilities and does not touch the serial line, so it is safe
+   during a pass. `Rot type: AzEl` means rotctld; `RX freq ranges` means you
+   have found the radio.
+2. **SPID model 901 or 903?** The same dump says. It determines the legal
+   azimuth range, and 901-against-MD-01 produces laggy, wrong readings.
+3. **Is the camera H.264 or H.265?** WebRTC cannot carry H.265 at all. Check
+   `/ISAPI/Streaming/channels` and change the encoding before going further.
+4. **One camera or two?** "Two streams" is usually main + sub of one device.
 
-const wss = new WebSocketServer({ port: 8081 });
-const port = new SerialPort({ path: 'COM5', baudRate: 57600 });
+## Licence
 
-port.pipe(new ReadlineParser({ delimiter: '\n' })).on('data', line => {
-  // Reshape your frame into the packet format above, then broadcast it.
-  for (const client of wss.clients) client.send(line);
-});
-```
+MIT — see `LICENSE`. The `sgoudelis/ground-station` suite referenced in
+`docker-compose.yml` is GPL-3.0 and runs as a **separate container**; no code
+from it is present in this repository.
 
-If your radio sends something other than one JSON object per line — a CSV
-frame, or a packed binary struct — do the conversion in `_decode()` in
-`js/telemetry.js` rather than changing the UI.
-
-## Layout
-
-```
-index.html        markup and panel structure
-css/styles.css    dark console theme; all colours are CSS variables
-js/telemetry.js   packet sources: SimSource (built-in flight), WebSocketSource
-js/charts.js      canvas drawing: strip charts, ADI, compass, ground track
-js/app.js         history, panel updates, controls, CSV export
-```
-
-The UI never talks to a source directly — it reads `station.history` and the
-latest packet. Anything that can produce packets in the format above works
-without touching the panels.
-
-## Tuning
-
-| Where | Value | Meaning |
-|---|---|---|
-| `js/app.js` | `LIMITS` | caution/alarm thresholds for battery, temperature, signal |
-| `js/app.js` | `MAX_POINTS` | packets kept in memory (6000 ≈ 10 min at 10 Hz) |
-| `js/app.js` | `STALE_MS` | silence before the link is flagged stale |
-| `js/app.js` | `StripChart` `window` | seconds of history visible on the charts |
-| `js/telemetry.js` | `SimSource` constants | burn time, thrust, drag, descent rates |
-
-The battery bar assumes a 2S pack (6.6–8.4 V); change the range in
-`paintTiles()` for a different pack.
+Coastlines are Natural Earth (public domain). CesiumJS is Apache-2.0 and is
+fetched by `tools/fetch_vendor.sh`, not vendored here.
