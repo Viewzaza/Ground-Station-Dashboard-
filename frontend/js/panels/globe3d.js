@@ -23,6 +23,7 @@ let entities = null;
 let orbitPathPositions = [];
 let lastPathBuild = 0;
 let pumpTimer = null;
+let mounting = null;      // in-flight mountGlobe(), so a second call joins it
 
 function loadCesium() {
   if (window.Cesium) return Promise.resolve(window.Cesium);
@@ -43,6 +44,23 @@ function loadCesium() {
 }
 
 export async function mountGlobe(hostId = 'globe3d') {
+  // Cesium takes several seconds to parse, so a second call can arrive while
+  // the first is still loading. Without this guard that builds a second viewer
+  // inside the same element, and two render loops fight over one canvas.
+  if (viewer) return viewer;
+  if (mounting) return mounting;
+
+  mounting = (async () => {
+    try {
+      return await build(hostId);
+    } finally {
+      mounting = null;
+    }
+  })();
+  return mounting;
+}
+
+async function build(hostId) {
   const host = document.getElementById(hostId);
   if (!host) return null;
 
