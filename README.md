@@ -26,15 +26,20 @@ running, and reflows down to a phone.
 | Area | State |
 |---|---|
 | Layout, health chips, config-driven frontend | done |
-| Camera tiles (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, awaiting real camera |
+| Camera tiles (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, **verified against the real camera** |
 | 2D ground track, footprint, terminator | done |
 | 3D orbit globe (CesiumJS, offline) | done |
 | Satellite selector, pass prediction, next-pass card | done |
-| Rotator read-out (polar plot, predicted arc, cable wrap) | done, awaiting the real rotator |
+| Rotator read-out (polar plot, predicted arc, cable wrap) | done, **verified against the real rotctld** |
 | Live WebSocket (rotator, pointing error, status, reconnect) | done |
-| Rotator **control** behind the SatNOGS interlock | pending |
-| SatNOGS 5024 activity feed | pending |
+| Rotator **control** behind the SatNOGS interlock | done, refusal path verified on site |
+| SatNOGS 5024 activity feed | done |
 | Grafana telemetry strip | done |
+
+The rotator control path has been exercised against the station's own rotctld
+and correctly **refused** every command, because satnogs-client was connected.
+No command that moves the antenna has yet been executed against the hardware —
+see [Rotator control](#rotator-control).
 
 ## Running it
 
@@ -140,6 +145,15 @@ Each of these cost time to find. Please read before changing them.
   camera speaks plain HTTP with Digest auth: a direct URL would be blocked as
   mixed content and would expose the credentials in page source.
 
+- **Hamlib prints `Min Azimuth`, not `Minimum Azimuth`.** The caps parser
+  originally looked for the long spelling, found nothing, and fell back to its
+  defaults — which are exactly the SPID 901's range, so against the only
+  rotator we had it looked perfect. On any other model the clamp in
+  `set_position` would have permitted a position the controller refuses. The
+  parser now accepts both spellings and a test asserts a 903's range is read
+  rather than assumed. Limits guard a physical end stop: never default them
+  quietly.
+
 - **One rotctld socket, process-wide.** rotctld spawns a thread per connection
   with no mutex around the shared rotator handle, so concurrent clients can
   interleave writes mid-frame and corrupt an in-progress track. N browser tabs
@@ -163,14 +177,41 @@ is running, rather than mounting the Docker socket, so the backend keeps minimal
 privilege. If the reference `ground-station` suite is also deployed, its rotator
 integration must stay disabled — this backend is the single writer.
 
+`POST /api/control/{arm,release,goto,park,track,stop}`, and the same commands
+over the WebSocket, all pass through one `ControlService`, so a gate shut to one
+is shut to both. A refusal is a 409 naming the gates, which is what the panel
+renders — an operator who presses GO and nothing happens can see *which* gate
+is closed without reading a log.
+
+Three details that are easy to get wrong, and are covered by tests:
+
+- **Unknown is not permission.** If SatNOGS has not answered, or its answer is
+  older than `GS_GATE_MAX_STALE_S`, the gates fail. A four-minute-old all-clear
+  is precisely the window in which satnogs-client would have picked up a job.
+- **The gates are re-read during a track, not only on entry.** A job gets
+  scheduled or the lease expires, and the track abandons itself.
+- **`stop` is deliberately not gated.** If the antenna is moving and the
+  operator wants it stopped, an expired lease is not a reason to keep driving.
+  The STOP button stays enabled whatever the gates say.
+
+On site this refuses correctly today: station 5024 is connected, so
+`satnogs_idle` is shut and every move is answered with
+`{"error": "refused: satnogs_idle", "blocked_by": ["satnogs_idle"]}`. Nothing
+has yet commanded the real antenna to move. Before it does, someone should have
+eyes on the mast and the station should be out of the SatNOGS schedule.
+
 ## Tests
 
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 50 tests
+.venv/Scripts/python -m pytest              # offline: 96 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
+
+Most of `tests/test_control.py` exists to prove the interlock refuses rather
+than that it works: each test names the unsafe thing it prevents. That is the
+file to read first if you are changing anything that can move the antenna.
 
 To exercise the real rotctld parser without a rotator, run the fake and point
 the backend at it — this is the code path that will meet the hardware, which
@@ -197,20 +238,41 @@ so there are no `if mock:` branches in the business logic.
 - **SatNOGS, Celestrak and Grafana** are public, so development exercises the
   production path. `GS_OFFLINE=1` falls back to fixtures.
 
-## Commissioning on site
+## What the hardware actually is
 
-See `deploy/commissioning/`. The open questions it settles:
+These were open questions. They were settled on 2026-09-13 by probing the
+station directly; `deploy/commissioning/` holds the scripts that did it, and
+re-running them is the way to check whether any of it has changed.
 
-1. **Is the rotator on 4532 or 4533?** rigctld defaults to 4532 (a *radio*),
-   rotctld to 4533. Probe both with `+\dump_caps`, which is answered from
-   compiled capabilities and does not touch the serial line, so it is safe
-   during a pass. `Rot type: AzEl` means rotctld; `RX freq ranges` means you
-   have found the radio.
-2. **SPID model 901 or 903?** The same dump says. It determines the legal
-   azimuth range, and 901-against-MD-01 produces laggy, wrong readings.
-3. **Is the camera H.264 or H.265?** WebRTC cannot carry H.265 at all. Check
-   `/ISAPI/Streaming/channels` and change the encoding before going further.
-4. **One camera or two?** "Two streams" is usually main + sub of one device.
+| Question | Answer |
+|---|---|
+| Rotator on 4532 or 4533? | **4533.** 4532 is closed — there is no rigctld at all. |
+| Rotator type | `Rot type: Az-El` — a rotator, not a radio. |
+| SPID model 901 or 903? | **901**, `Model name: Rot2Prog`, Mfg `SPID`. |
+| Azimuth / elevation range | −180…540 and −20…210, matching the defaults. |
+| Serial | 600 baud 8N1, 300 ms post-write delay, 400 ms timeout, 3 retries. |
+| Camera H.264 or H.265? | **H.264** on both channels — `profile-level-id=420029`, Baseline 4.1, `packetization-mode=1`. WebRTC carries it with no transcode. |
+| One camera or two? | **One.** Hikvision DS-2CD1023G2-LIUF/SL, `INSTED-GS_1`, firmware V5.8.4. Channel 101 is 1920×1080, 102 is 640×360. |
+
+Two of those answers changed the code:
+
+- **`Can Park: N`.** The 901 has no park command. Asking for one returns an
+  error and the antenna does not move, so park is an ordinary `set_pos` to the
+  configured park coordinates. `Can Move: N` and `Can Reset: N` likewise — only
+  `set_pos` and `stop` are actually available.
+- **There is one camera, not two.** The tiles were labelled "Camera 1" and
+  "Camera 2", which implies a redundancy that does not exist: both are views of
+  the same device, so losing it blanks both. They now read `main · 1080p` and
+  `sub · 360p`.
+
+One more thing worth knowing before the rotator is switched on again: with the
+SPID controller powered down, rotctld still answers `dump_caps` from its
+compiled-in capabilities — model, ranges and all — while every `get_pos`
+returns `RPRT -5` after 2.8–4.6 s of serial retries. So **capabilities being
+readable is not evidence that the rotator is alive.** The dashboard reports
+this state as `ROT down` with the polar plot's antenna marker absent, which is
+correct, and the near-5 s cost of each failed read is why the poll loop backs
+off rather than retrying at 1 Hz.
 
 ## Licence
 

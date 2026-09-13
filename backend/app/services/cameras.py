@@ -21,9 +21,15 @@ from ..config import Settings
 log = logging.getLogger(__name__)
 
 # Friendly labels for the stream names defined in deploy/go2rtc/*.yaml.
+#
+# Station 5024 has ONE camera, a Hikvision DS-2CD1023G2-LIUF/SL reporting
+# itself as INSTED-GS_1, and these are its two encoder channels: 101 at
+# 1920x1080 and 102 at 640x360, both H.264. They were labelled "Camera 1" and
+# "Camera 2" while that was still an open question; calling two views of one
+# camera two cameras tells the operator the wrong thing when one tile fails.
 LABELS = {
-    "cam_main": "Camera 1 · main",
-    "cam_sub": "Camera 2 · sub",
+    "cam_main": "main · 1080p",
+    "cam_sub": "sub · 360p",
 }
 
 

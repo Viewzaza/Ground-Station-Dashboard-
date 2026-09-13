@@ -132,6 +132,12 @@ function handle(frame) {
       set('satnogs', frame.data);
       break;
 
+    case 'control':
+      // The interlock closes on its own — a lease expires, SatNOGS picks up a
+      // job — so this arrives unprompted and must repaint the panel.
+      set('control', frame.data);
+      break;
+
     case 'status':
       if (frame.data.component !== 'backend') {
         setStatus(chipFor(frame.data.component), frame.data.state, frame.data.detail);

@@ -14,6 +14,33 @@ async function get(path, params) {
   return resp.json();
 }
 
+/** A refusal from the control interlock, carrying the gates that are shut. */
+export class Refused extends Error {
+  constructor(message, blockedBy) {
+    super(message);
+    this.blockedBy = blockedBy || [];
+  }
+}
+
+async function post(path, body) {
+  const resp = await fetch(new URL(path, location.origin), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const payload = await resp.json().catch(() => null);
+  if (resp.status === 409) {
+    // The interlock refusing is an ordinary, expected answer, so it is modelled
+    // as a typed result the panel can render rather than an unexpected failure.
+    const detail = payload?.detail || {};
+    throw new Refused(detail.error || 'refused', detail.blocked_by);
+  }
+  if (!resp.ok) {
+    throw new Error(`${resp.status} ${path}: ${JSON.stringify(payload).slice(0, 160)}`);
+  }
+  return payload;
+}
+
 export const api = {
   health:       ()            => get('/api/health'),
   config:       ()            => get('/api/config'),
@@ -25,4 +52,13 @@ export const api = {
   nextPass:     (norad)       => get('/api/passes/next', { norad }),
   passTrack:    (passId)      => get(`/api/passes/${encodeURIComponent(passId)}/track`),
   cameras:      ()            => get('/api/cameras'),
+  satnogs:      ()            => get('/api/satnogs'),
+
+  control:      ()            => get('/api/control'),
+  arm:          ()            => post('/api/control/arm'),
+  release:      ()            => post('/api/control/release'),
+  goto:         (az, el)      => post('/api/control/goto', { az, el }),
+  park:         ()            => post('/api/control/park'),
+  track:        (norad)       => post('/api/control/track', { norad }),
+  stopRotator:  ()            => post('/api/control/stop'),
 };

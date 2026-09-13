@@ -27,7 +27,13 @@
   overflow: hidden;
 }
 .track-col .panel { flex: none; }
-.track-col .panel.grow { flex: 1 1 auto; min-height: 0; }
+/* The rotator panel carries the control row, which is a fixed height and must
+   never be clipped — a GO button the operator cannot see is worse than a small
+   polar plot. So it has a floor, and the satellite panel below absorbs the
+   difference because its list already scrolls. */
+.track-col .panel.grow { flex: 1 1 auto; min-height: 240px; }
+.track-col .panel.satpanel { flex: 0 1 auto; min-height: 0; overflow: hidden; }
+.track-col .panel.satpanel .sat-list { flex: 1 1 auto; max-height: 132px; min-height: 38px; }
 
 /* ---------- 4K wall: more Grafana, taller globe ---------- */
 @media (min-width: 2400px) {

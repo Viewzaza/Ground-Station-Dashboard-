@@ -38,11 +38,16 @@ class MockRotator:
             min_az=-180.0, max_az=540.0,
             min_el=-20.0, max_el=210.0,
             is_rotator=True,
+            # Mirrors what the real 901 at station 5024 reports, park included:
+            # if the mock offered a park command the code would take a path here
+            # that does not exist on the hardware.
+            can_set_position=True, can_stop=True, can_park=False,
         )
         self._az = float(settings.park_az)
         self._el = float(settings.park_el)
         self._last = time.monotonic()
         self._started = time.monotonic()
+        self._commanded: tuple[float, float] | None = None
 
     async def connect(self) -> None:
         return None
@@ -77,8 +82,29 @@ class MockRotator:
         el = round(self._el * 2) / 2
         return az, el, 300.0
 
+    # --- writes ------------------------------------------------------------
+    async def set_position(self, az: float, el: float) -> None:
+        self._commanded = self.clamp(az, el)
+
+    async def stop(self) -> None:
+        self._commanded = (self._az, self._el)
+
+    def clamp(self, az: float, el: float) -> tuple[float, float]:
+        return (
+            min(max(az, self.caps.min_az), self.caps.max_az),
+            min(max(el, self.caps.min_el), self.caps.max_el),
+        )
+
     def _target(self) -> tuple[float, float]:
-        """Follow the default satellite when it is up, else stay parked."""
+        """Follow the default satellite when it is up, else stay parked.
+
+        A commanded position overrides the simulated tracking, so an operator
+        exercising manual control sees the antenna answer them rather than
+        fighting the simulation.
+        """
+        if self._commanded is not None:
+            return self._commanded
+
         pos = self.predictor.position(
             self.s.default_norad, datetime.now(timezone.utc)
         )

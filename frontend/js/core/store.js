@@ -16,6 +16,7 @@ export const store = {
   rotator: null,
   pointing: null,
   satnogs: null,
+  control: null,       // interlock state: gates, lease, mode
   cameras: [],
 };
 

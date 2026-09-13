@@ -18,6 +18,8 @@ import { mountHeader } from './panels/header.js';
 import { mountSatSelect } from './panels/satselect.js';
 import { mountPasses } from './panels/passes.js';
 import { mountGrafana } from './panels/grafana.js';
+import { mountSatnogs } from './panels/satnogs.js';
+import { mountControl, tickControl } from './panels/control.js';
 
 let orbit = null;
 let map = null;
@@ -41,6 +43,8 @@ async function boot() {
   mountHeader();
   mountGrafana();
   mountPasses();
+  mountSatnogs();
+  mountControl();
 
   // Cameras first — they are why the operator is looking at this screen.
   mountCameras();
@@ -127,6 +131,7 @@ function tick() {
   polar?.draw();
   globe?.updateGlobe(orbit);
   paintRotatorReadout();
+  tickControl();
 }
 
 function debounce(fn, ms) {

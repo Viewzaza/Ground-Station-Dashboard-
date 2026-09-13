@@ -14,8 +14,10 @@ from typing import Awaitable, Callable
 
 from .config import Settings
 from .hub import hub
+from .services.control import ControlService
 from .services.predictor import Predictor
 from .services.rotator_service import RotatorService
+from .services.satnogs import SatnogsService
 from .services.tle_store import TleStore
 
 log = logging.getLogger(__name__)
@@ -29,6 +31,10 @@ class Scheduler:
         self._tasks: list[asyncio.Task] = []
         self.components: dict[str, str] = {}
         self.rotator = RotatorService(settings, predictor, on_state=self.set_state)
+        self.satnogs = SatnogsService(settings, on_state=self.set_state)
+        self.control = ControlService(
+            settings, self.rotator, self.satnogs, predictor, on_state=self.set_state
+        )
 
     # --- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
@@ -37,6 +43,8 @@ class Scheduler:
         self._spawn("tle", self._tle_loop)
         self._spawn("rotctld", self.rotator.run)
         self._spawn("satpos", self._satpos_loop)
+        self._spawn("satnogs", self.satnogs.run)
+        self._spawn("control", self._control_loop)
 
     async def stop(self) -> None:
         await self.rotator.stop()
@@ -109,3 +117,28 @@ class Scheduler:
             # 1 Hz while the satellite is up, otherwise every 5 s.
             fast = pos is not None and pos.el > -2.0
             await asyncio.sleep(1.0 if fast else 5.0)
+
+    async def _control_loop(self) -> None:
+        """Publish the interlock whenever it changes.
+
+        The gates move on their own: a lease expires, SatNOGS picks up a job,
+        the station reconnects. Without this the operator's panel would keep
+        showing whatever was true when they last pressed something, which for a
+        safety interlock is the wrong way round — it must go red by itself.
+
+        Only changes are published. At 1 Hz an unchanging interlock would
+        otherwise be by far the noisiest thing on the WebSocket.
+        """
+        previous: tuple | None = None
+        while True:
+            state = self.control.state()
+            fingerprint = (
+                state.armed,
+                tuple(sorted(state.gates.items())),
+                state.mode,
+                state.target_norad,
+            )
+            if fingerprint != previous:
+                self.control.publish()
+                previous = fingerprint
+            await asyncio.sleep(1.0)

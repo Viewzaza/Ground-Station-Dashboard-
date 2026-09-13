@@ -59,6 +59,13 @@ class Caps:
     min_el: float
     max_el: float
     is_rotator: bool
+    # Station 5024's SPID Rot2Prog (model 901) answers `Can Park: N`, so the
+    # park command is not available on the hardware this is deployed against
+    # and parking has to be an ordinary set_pos to the park coordinates.
+    # Read these rather than assuming: a different backend may well differ.
+    can_set_position: bool = True
+    can_stop: bool = True
+    can_park: bool = False
 
 
 class RotctldClient:
@@ -158,11 +165,14 @@ class RotctldClient:
         caps = Caps(
             model=model,
             name=fields.get("model name", ""),
-            min_az=_as_float(fields.get("minimum azimuth"), -180.0),
-            max_az=_as_float(fields.get("maximum azimuth"), 540.0),
-            min_el=_as_float(fields.get("minimum elevation"), -20.0),
-            max_el=_as_float(fields.get("maximum elevation"), 210.0),
+            min_az=_first_float(fields, ("min azimuth", "minimum azimuth"), -180.0),
+            max_az=_first_float(fields, ("max azimuth", "maximum azimuth"), 540.0),
+            min_el=_first_float(fields, ("min elevation", "minimum elevation"), -20.0),
+            max_el=_first_float(fields, ("max elevation", "maximum elevation"), 210.0),
             is_rotator=is_rotator and not looks_like_rig,
+            can_set_position=_as_bool(fields.get("can set position"), True),
+            can_stop=_as_bool(fields.get("can stop"), True),
+            can_park=_as_bool(fields.get("can park"), False),
         )
         self.caps = caps
         return caps
@@ -199,9 +209,59 @@ class RotctldClient:
             raise RotctldError(RPRT_EINVAL, f"unparsable position: {records!r}")
         return az, el, latency_ms
 
+    # --- writes ------------------------------------------------------------
+    # Everything below moves a physical antenna. Callers must have passed the
+    # control interlock first; nothing here re-checks it.
+    async def set_position(self, az: float, el: float) -> None:
+        """Command an absolute position, clamped to the rotator's own limits.
+
+        The clamp uses dump_caps rather than a constant because the legal
+        azimuth range is what distinguishes a SPID 901 from a 903, and driving
+        past an end stop is a mechanical problem, not a software one.
+        """
+        az, el = self.clamp(az, el)
+        _, code = await self._command(f"set_pos {az:.2f} {el:.2f}")
+        if code != RPRT_OK:
+            raise RotctldError(code, f"set_pos {az:.2f} {el:.2f}")
+
+    async def stop(self) -> None:
+        _, code = await self._command("stop")
+        if code != RPRT_OK:
+            raise RotctldError(code, "stop")
+
+    def clamp(self, az: float, el: float) -> tuple[float, float]:
+        if self.caps is None:
+            raise RotctldError(RPRT_EINVAL, "refusing to move before dump_caps")
+        return (
+            min(max(az, self.caps.min_az), self.caps.max_az),
+            min(max(el, self.caps.min_el), self.caps.max_el),
+        )
+
 
 def _as_float(value: str | None, default: float) -> float:
     try:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return default
+
+
+def _first_float(fields: dict[str, str], keys: tuple[str, ...],
+                 default: float) -> float:
+    """First key that is present, else the default.
+
+    Hamlib prints `Min Azimuth:`, not `Minimum Azimuth:`. Matching only the
+    long spelling meant every limit silently fell back to its default — which
+    happens to be right for the SPID 901 at station 5024 and would be wrong for
+    anything else, with the error showing up as a clamp that permits a position
+    the controller will refuse.
+    """
+    for key in keys:
+        if key in fields:
+            return _as_float(fields[key], default)
+    return default
+
+
+def _as_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().upper().startswith("Y")

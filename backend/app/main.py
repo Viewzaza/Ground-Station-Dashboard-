@@ -13,7 +13,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .config import get_settings
-from .routes import cameras, health, passes, rotator, satellites, ws
+from .routes import (
+    cameras, control, health, passes, rotator, satellites, satnogs, ws,
+)
 from .scheduler import Scheduler
 from .services.predictor import Predictor
 from .services.tle_store import TleStore
@@ -41,6 +43,8 @@ async def lifespan(app: FastAPI):
     app.state.predictor = predictor
     app.state.scheduler = scheduler
     app.state.rotator = scheduler.rotator
+    app.state.satnogs = scheduler.satnogs
+    app.state.control = scheduler.control
 
     await scheduler.start()
     try:
@@ -66,4 +70,6 @@ app.include_router(satellites.router, prefix="/api", tags=["satellites"])
 app.include_router(passes.router, prefix="/api", tags=["passes"])
 app.include_router(cameras.router, prefix="/api", tags=["cameras"])
 app.include_router(rotator.router, prefix="/api", tags=["rotator"])
+app.include_router(control.router, prefix="/api", tags=["control"])
+app.include_router(satnogs.router, prefix="/api", tags=["satnogs"])
 app.include_router(ws.router, tags=["ws"])

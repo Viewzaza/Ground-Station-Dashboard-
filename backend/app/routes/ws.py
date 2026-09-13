@@ -19,6 +19,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..hub import hub
 from ..schemas import ClientFrame, Frame
+from ..services.control import ControlRefused
+from ..services.rotctld_client import RotctldError
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -92,6 +94,50 @@ async def _receive_loop(ws: WebSocket) -> None:
             topics = frame.data.get("topics")
             # None means everything; a phone can ask for less.
             ws.scope.setdefault("state", {})["topics"] = topics
-        # select_satellite / arm_control / slew arrive with rotator control,
-        # which is not wired up yet. Unknown-but-valid types are ignored rather
-        # than erroring, so an older client does not spew warnings.
+        elif frame.type in _CONTROL_FRAMES:
+            await _handle_control(ws, frame)
+        # select_satellite is handled entirely in the browser: the backend
+        # tracks GS_DEFAULT_NORAD because the antenna schedule must not change
+        # because somebody clicked a different satellite on one of the screens.
+
+
+_CONTROL_FRAMES = {"arm_control", "release_control", "slew", "stop"}
+
+
+async def _handle_control(ws: WebSocket, frame: ClientFrame) -> None:
+    """Control over the WebSocket, through the same interlock as the REST path.
+
+    There is no separate authorisation here and there must never be one: this
+    goes through ControlService exactly as /api/control does, so a gate closed
+    to one is closed to both.
+    """
+    service = getattr(ws.app.state, "control", None)
+    if service is None:
+        await ws.send_json(Frame(type="error", data={
+            "code": "unavailable", "msg": "control service not running",
+        }).model_dump(mode="json"))
+        return
+
+    try:
+        if frame.type == "arm_control":
+            service.arm()
+        elif frame.type == "release_control":
+            service.release()
+        elif frame.type == "stop":
+            await service.stop()
+        elif frame.type == "slew":
+            await service.goto(
+                float(frame.data["az"]), float(frame.data["el"])
+            )
+    except ControlRefused as exc:
+        await ws.send_json(Frame(type="error", data={
+            "code": "refused", "msg": str(exc), "blocked_by": exc.blocked_by,
+        }).model_dump(mode="json"))
+    except (KeyError, TypeError, ValueError) as exc:
+        await ws.send_json(Frame(type="error", data={
+            "code": "bad_frame", "msg": f"slew needs numeric az and el: {exc}",
+        }).model_dump(mode="json"))
+    except RotctldError as exc:
+        await ws.send_json(Frame(type="error", data={
+            "code": "rotctld", "msg": str(exc),
+        }).model_dump(mode="json"))

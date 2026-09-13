@@ -49,13 +49,16 @@
   </section>
 
   <!-- ─────────────────────────────── cameras ────────────────────────────── -->
+  <!-- One camera, two encoder channels. Station 5024 has a single Hikvision
+       DS-2CD1023G2-LIUF/SL; 101 is its main stream and 102 its sub. Labelling
+       them "Camera 1" and "Camera 2" implied a redundancy that is not there. -->
   <section class="panel cam" style="grid-area:cam1">
-    <h2>Camera 1 <span class="hint" id="cam1-state">—</span></h2>
+    <h2>Camera <span class="hint" id="cam1-state">—</span></h2>
     <div class="cam-slot" id="cam-slot-0"></div>
   </section>
 
   <section class="panel cam" style="grid-area:cam2">
-    <h2>Camera 2 <span class="hint" id="cam2-state">—</span></h2>
+    <h2>Camera <span class="hint" id="cam2-state">—</span></h2>
     <div class="cam-slot" id="cam-slot-1"></div>
   </section>
 
@@ -68,7 +71,9 @@
   <!-- ─────────────────────────── right-hand column ──────────────────────── -->
   <aside class="track-col" style="grid-area:track">
 
-    <section class="panel">
+    <!-- The list scrolls, so this is the panel that gives up height when the
+         column is short — the rotator controls below must not be clipped. -->
+    <section class="panel satpanel">
       <h2>Satellite</h2>
       <div class="satselect">
         <input id="sat-search" type="search" placeholder="search the amateur catalogue…"
@@ -93,13 +98,13 @@
         <span>ERR <b id="rot-err">—</b></span>
       </div>
       <div class="rot-control" id="rot-control">
-        <span class="muted">control disabled</span>
+        <span class="muted">control state unknown</span>
       </div>
     </section>
 
     <section class="panel">
       <h2>SatNOGS 5024</h2>
-      <div id="satnogs-activity"><p class="muted">not yet wired</p></div>
+      <div id="satnogs-activity"><p class="muted">awaiting SatNOGS</p></div>
     </section>
 
   </aside>

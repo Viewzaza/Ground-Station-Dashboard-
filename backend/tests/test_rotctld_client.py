@@ -18,15 +18,40 @@ from app.services.rotctld_client import (
     RotctldError,
 )
 
+# Transcribed from what station 5024's rotctld actually returns. Hamlib prints
+# "Min Azimuth", not "Minimum Azimuth" — a fixture using the long spelling
+# passed while the parser silently fell back to its defaults.
 ROT_CAPS = (
-    "Caps dump for model: 901\n"
-    "Model name:\tSPID Rot2Prog\n"
-    "Mfg name:\tSPID\n"
-    "Rot type:\tAzEl\n"
-    "Minimum Azimuth:\t-180.00\n"
-    "Maximum Azimuth:\t540.00\n"
-    "Minimum Elevation:\t-20.00\n"
-    "Maximum Elevation:\t210.00\n"
+    "Caps dump for model:\t901\n"
+    "Model name:\t\tRot2Prog\n"
+    "Mfg name:\t\tSPID\n"
+    "Rot type:\t\tAz-El\n"
+    "Serial speed:\t\t600..600 bauds, 8N1, ctrl=NONE\n"
+    "Post write delay:\t300ms\n"
+    "Min Azimuth:\t\t-180.00\n"
+    "Max Azimuth:\t\t540.00\n"
+    "Min Elevation:\t\t-20.00\n"
+    "Max Elevation:\t\t210.00\n"
+    "Can set Position:\tY\n"
+    "Can get Position:\tY\n"
+    "Can Stop:\t\tY\n"
+    "Can Park:\t\tN\n"
+    "Can Move:\t\tN\n"
+    "RPRT 0\n"
+)
+
+# A different rotator, to prove the limits are read rather than assumed.
+OTHER_ROT_CAPS = (
+    "Caps dump for model:\t903\n"
+    "Model name:\t\tMD-01\n"
+    "Rot type:\t\tAz-El\n"
+    "Min Azimuth:\t\t0.00\n"
+    "Max Azimuth:\t\t450.00\n"
+    "Min Elevation:\t\t0.00\n"
+    "Max Elevation:\t\t180.00\n"
+    "Can set Position:\tY\n"
+    "Can Stop:\t\tY\n"
+    "Can Park:\t\tY\n"
     "RPRT 0\n"
 )
 
@@ -54,6 +79,7 @@ class ScriptedServer:
         self.port = 0
         self.connections = 0
         self.commands: list[str] = []
+        self._writers: list[asyncio.StreamWriter] = []
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -61,11 +87,19 @@ class ScriptedServer:
         return self
 
     async def __aexit__(self, *exc):
+        # Close our side of every accepted connection first. A test that fails
+        # inside the `async with` never reaches its own client.close(), and
+        # wait_closed() on 3.12 then blocks forever — turning one failing
+        # assertion into a suite that hangs instead of reporting.
+        for writer in self._writers:
+            writer.close()
+        self._writers.clear()
         self.server.close()
         await self.server.wait_closed()
 
     async def _handle(self, reader, writer):
         self.connections += 1
+        self._writers.append(writer)
         try:
             while True:
                 raw = await reader.readline()
@@ -73,7 +107,11 @@ class ScriptedServer:
                     return
                 command = raw.decode().strip().lstrip("+\\")
                 self.commands.append(command)
-                text = self.replies.get(command, "RPRT -1\n")
+                # Replies are keyed by verb, arguments recorded separately:
+                # `set_pos 450.00 180.00` is answered by a "set_pos" entry,
+                # while self.commands keeps exactly what went on the wire.
+                text = self.replies.get(command.split()[0] if command else "",
+                                        self.replies.get(command, "RPRT -1\n"))
                 data = text.encode()
                 if self.chunk:
                     for i in range(0, len(data), self.chunk):
@@ -85,6 +123,13 @@ class ScriptedServer:
                     await writer.drain()
         except (ConnectionResetError, BrokenPipeError):
             pass
+        finally:
+            # Python 3.12 changed Server.wait_closed() to block until every
+            # accepted connection is closed, so a handler that returns without
+            # closing its own side hangs __aexit__ forever rather than ending
+            # the test. On 3.11 this was unnecessary, which is why it is easy
+            # to leave out.
+            writer.close()
 
 
 # --------------------------------------------------------------------------
@@ -177,6 +222,59 @@ async def test_rotator_is_identified_with_its_limits():
     assert caps.model == 901
     assert "Rot2Prog" in caps.name
     assert (caps.min_az, caps.max_az) == (-180.0, 540.0)
+
+
+@pytest.mark.asyncio
+async def test_limits_are_read_from_the_peer_not_assumed():
+    """The SPID 901's range coincides with the code's defaults, so a parser
+    that silently fell back would look correct against that one rotator and
+    clamp every other one wrongly."""
+    async with ScriptedServer({"dump_caps": OTHER_ROT_CAPS}) as srv:
+        client = RotctldClient("127.0.0.1", srv.port)
+        caps = await client.verify_is_rotator()
+        await client.close()
+
+    assert caps.model == 903
+    assert (caps.min_az, caps.max_az) == (0.0, 450.0)
+    assert (caps.min_el, caps.max_el) == (0.0, 180.0)
+
+
+@pytest.mark.asyncio
+async def test_park_capability_is_read():
+    """Station 5024's 901 answers `Can Park: N`, so park has to be a set_pos.
+    Assuming the command exists means the antenna quietly does not move."""
+    async with ScriptedServer({"dump_caps": ROT_CAPS}) as srv:
+        client = RotctldClient("127.0.0.1", srv.port)
+        caps = await client.verify_is_rotator()
+        await client.close()
+
+    assert caps.can_park is False
+    assert caps.can_set_position is True
+    assert caps.can_stop is True
+
+
+@pytest.mark.asyncio
+async def test_a_move_is_clamped_to_the_peers_limits():
+    async with ScriptedServer({"dump_caps": OTHER_ROT_CAPS, "set_pos": "RPRT 0\n"}) as srv:
+        client = RotctldClient("127.0.0.1", srv.port)
+        await client.verify_is_rotator()
+        await client.set_position(600.0, 200.0)      # past both maxima
+        await client.close()
+
+    assert srv.commands[-1] == "set_pos 450.00 180.00"
+
+
+@pytest.mark.asyncio
+async def test_a_move_before_dump_caps_is_refused():
+    """Without capabilities there are no limits to clamp against, so the safe
+    answer is to refuse rather than to guess a range."""
+    async with ScriptedServer({"set_pos": "RPRT 0\n"}) as srv:
+        client = RotctldClient("127.0.0.1", srv.port)
+        with pytest.raises(RotctldError):
+            await client.set_position(10.0, 10.0)
+        await client.close()
+
+    assert srv.commands == [], "nothing may be sent before the peer is identified"
 
 
 @pytest.mark.asyncio

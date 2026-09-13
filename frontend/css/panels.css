@@ -92,3 +92,79 @@
 /* Azimuth wound past north: real information about the cable, not noise. */
 .rot-readout b.wound { color: var(--warn); }
 .rot-readout b.err-bad { color: var(--bad); }
+
+/* ── rotator control ──────────────────────────────────────────────────────
+   The gates are always visible, never hidden behind a disabled button: an
+   operator who presses GO and gets nothing must be able to see which gate is
+   shut without opening a log. */
+.rot-control { flex-direction: column; align-items: stretch; margin-top: 6px; }
+.ctl { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+
+.ctl-off { display: flex; flex-direction: column; gap: 2px; }
+.ctl-hint { font-size: 10px; color: var(--dim); }
+
+.ctl-gates { display: flex; flex-wrap: wrap; gap: 2px 9px; font-size: 10px; align-items: baseline; }
+.gate { letter-spacing: .02em; cursor: help; white-space: nowrap; }
+.gate-ok { color: var(--ok); }
+.gate-shut { color: var(--dim); }
+
+.ctl-row { display: flex; gap: 4px; align-items: center; }
+.ctl-row label { font-size: 10px; color: var(--muted); display: flex; gap: 3px; align-items: center; }
+.ctl-row input {
+  width: 100%; min-width: 0; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 3px; padding: 2px 4px;
+  font: inherit; font-size: 11px; font-variant-numeric: tabular-nums;
+}
+
+.ctl-btn {
+  background: #18212c; color: var(--text); border: 1px solid var(--line);
+  padding: 3px 6px; border-radius: 4px; font: inherit; font-size: 10px;
+  letter-spacing: .05em; cursor: pointer; flex: 1; white-space: nowrap;
+}
+.ctl-btn:hover:not(:disabled) { border-color: var(--dim); }
+.ctl-btn:disabled { opacity: .35; cursor: default; }
+.ctl-btn.armed { background: #3a2a08; border-color: var(--warn); color: var(--warn); }
+.ctl-btn.active { background: #06301f; border-color: var(--ok); color: var(--ok); }
+/* STOP stays enabled whatever the gates say, so it is styled to be findable. */
+.ctl-btn.stop { background: #4a1520; border-color: #7a2230; color: #ffc2c8; }
+
+.ctl-lease { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
+             margin-left: auto; white-space: nowrap; }
+.ctl-lease.expiring { color: var(--warn); }
+.ctl-notice { font-size: 10px; color: var(--bad); line-height: 1.3; }
+
+/* The rotator panel stopped being only a plot when it grew controls. The plot
+   may shrink; the GO/PARK/STOP row may not, because a control the operator
+   cannot see is worse than a small polar display. */
+.track-col .panel.grow { min-height: 244px; }
+.polar { min-height: 96px; }
+
+/* Last resort. The wall display is sized so this never engages, but a shorter
+   screen must scroll rather than clip a control off the bottom. */
+.track-col { overflow-y: auto; }
+
+/* ── SatNOGS activity ─────────────────────────────────────────────────── */
+.sn-station { display: flex; gap: 6px; align-items: center; font-size: 11px; flex-wrap: wrap; }
+.sn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
+.sn-dot.on { background: var(--ok); }
+.sn-dot.off { background: var(--dim); }
+.sn-count { margin-left: auto; color: var(--dim); font-size: 10px; }
+
+.sn-next { font-size: 11px; color: var(--muted); margin: 4px 0 6px; }
+.sn-next b { color: var(--text); }
+.sn-next.live { color: var(--warn); }
+
+.sn-feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.sn-row {
+  display: flex; gap: 8px; align-items: baseline; font-size: 11px;
+  padding: 2px 5px; border-radius: 3px; background: var(--panel-2);
+}
+.sn-row a { color: var(--text); text-decoration: none; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
+.sn-row a:hover { color: var(--accent); }
+.sn-time { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; flex: none; }
+.sn-status { font-size: 10px; letter-spacing: .06em; flex: none; }
+.sn-status.s-good { color: var(--ok); }
+.sn-status.s-bad, .sn-status.s-failed { color: var(--bad); }
+.sn-status.s-future { color: var(--dim); }
+.sn-data { font-size: 10px; color: var(--accent); flex: none; min-width: 14px; }
