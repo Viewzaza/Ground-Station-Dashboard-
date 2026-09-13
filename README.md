@@ -1,1 +1,222 @@
-# Ground-Station-Dashboard-
+# KNACKSAT-2 Ground Station Dashboard
+
+An operator display for the KNACKSAT-2 ground control station run by **SatNOGS
+station 5024 — INSTED-Ground Station (UHF)**, grid OK03gt, 60 m ASL.
+
+Two camera feeds sit in the centre of the screen, with live satellite tracking
+to their left, pass and antenna information to their right, and KNACKSAT-2
+telemetry along the bottom. It is built for a wall-mounted display that is left
+running, and reflows down to a phone.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ KNACKSAT-2 · 67683 │ UTC / ICT │ NEXT AOS -00:14:22 │ ● API ● CAM ● ROT ● TLE │
+├─────────────────┬────────────────────────────────┬───────────────────────────┤
+│  GROUND TRACK   │          CAMERA 1              │ SATELLITE (amateur cat.)  │
+│  footprint,     │                                │ NEXT PASS  AOS/TCA/LOS    │
+│  terminator     ├────────────────────────────────┤ ROTATOR    polar plot     │
+│  ORBIT (3D)     │          CAMERA 2              │ SATNOGS    5024 activity  │
+├─────────────────┴────────────────────────────────┴───────────────────────────┤
+│ GRAFANA  [last beacon] [battery V] [solar W] [battery °C]      open full ↗    │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Status
+
+| Area | State |
+|---|---|
+| Layout, health chips, config-driven frontend | done |
+| Camera tiles (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, awaiting real camera |
+| 2D ground track, footprint, terminator | done |
+| 3D orbit globe (CesiumJS, offline) | done |
+| Satellite selector, pass prediction, next-pass card | done |
+| Rotator read-out (polar plot, predicted arc, cable wrap) | done, awaiting the real rotator |
+| Live WebSocket (rotator, pointing error, status, reconnect) | done |
+| Rotator **control** behind the SatNOGS interlock | pending |
+| SatNOGS 5024 activity feed | pending |
+| Grafana telemetry strip | done |
+
+## Running it
+
+### On this machine, without Docker
+
+```bash
+python -m venv backend/.venv
+backend/.venv/Scripts/python -m pip install -r backend/requirements.txt
+sh tools/fetch_vendor.sh            # CesiumJS, ~23 MB, not committed
+backend/.venv/Scripts/python tools/dev_server.py
+```
+
+Then open <http://localhost:8000>. The API and the frontend are served from one
+origin, so there is no CORS anywhere. The camera tiles will report the bridge as
+unreachable unless go2rtc is also running — that is a real state the UI is built
+to show, not a failure.
+
+### With Docker
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+```
+
+Development uses generated video test patterns. In production:
+
+```bash
+cp .env.example .env      # set GS_MOCK=0 and fill in the real values
+echo -n 'camera-password' > deploy/secrets/camera_password.txt
+chmod 600 deploy/secrets/camera_password.txt
+docker compose up -d
+```
+
+Four services: `caddy` (single origin, `tls internal`), `backend`, `video`
+(go2rtc) and `groundstation` — the separate `sgoudelis/ground-station` suite,
+started only with `--profile sdr`.
+
+## Architecture
+
+```
+browser ──HTTPS──▶ Caddy ──┬── /            frontend (static, no build step)
+                           ├── /api, /ws    backend   (FastAPI + Skyfield)
+                           ├── /video/*     go2rtc    (RTSP → WebRTC)
+                           └── /sdr/*       ground-station suite (separate, GPL)
+                                  │
+                    rotctld 10.90.36.140 ── ONE socket, 1 Hz
+                    camera  10.90.36.130 ── RTSP over TCP
+                    SatNOGS · Celestrak · Grafana (iframes only)
+```
+
+**Skyfield owns pass prediction, not the browser.** The schedule has to keep
+running with no browser open, and it is the same schedule the antenna will be
+driven from. The browser runs its own SGP4 (satellite.js) purely for the smooth
+1 Hz render of where the satellite is now.
+
+**Everything the frontend knows comes from `/api/config`** — station
+coordinates, Grafana panel ids, camera stream names, feature flags. Deploying to
+a different station is an `.env` edit.
+
+## Things that are the way they are for a reason
+
+Each of these cost time to find. Please read before changing them.
+
+- **Celestrak enforces its fetch etiquette.** Repeating a download before the
+  data has changed returns HTTP 403, and 50 errors in two hours puts your IP in
+  their firewall. `tle_store.py` never touches the network while the cache is
+  under `GS_TLE_TTL_S` (7200 s) old and treats any non-200 as terminal. Do not
+  lower that TTL, and do not add a retry loop.
+
+- **Match the station's horizon mask.** Station 5024 publishes
+  `min_horizon = 0`. With a plausible-looking 5° default our AOS ran a
+  consistent 74–96 seconds late against SatNOGS's own schedule; at 0° the two
+  agree to within a few seconds. `tests/test_satnogs_oracle.py` asserts this
+  against the live API.
+
+- **`satellite__norad_cat_id` does not filter the SatNOGS Network API.** It is
+  silently ignored and you get every satellite. Use `norad_cat_id`. Network API
+  pagination is cursor-based through the `Link: rel="next"` *header* — there is
+  no `?page=`.
+
+- **The antimeridian.** A ground track stepping from lon 179 to −179 draws a
+  line across the entire map unless the path is split and the crossing latitude
+  interpolated. Every path goes through `split_antimeridian()`. The same applies
+  to the footprint ring, which additionally does not close at all when it
+  contains a pole.
+
+- **Cesium's `requestRenderMode` starves its own tile loader.** It looks ideal
+  for a display that runs for months, but the globe surface never finishes
+  loading and you get markers floating in a black void. Cesium's default loop is
+  also driven by `requestAnimationFrame`, which a browser may throttle to zero
+  when the window is occluded — a wall display that silently stops repainting is
+  worse than a slow one. `globe3d.js` drives rendering itself: fast while tiles
+  settle, 1 Hz once idle.
+
+- **Grafana sends no CORS headers**, so their telemetry cannot be fetched, only
+  embedded. Their panels also need `var-DS_INFLUXDB` or they render empty. The
+  embeds work because that instance has anonymous access enabled — if the
+  KNACKSAT team turns it off, the panels go blank and `GS_GRAFANA_TOKEN` plus a
+  backend proxy become necessary.
+
+- **The camera password never reaches the browser.** Snapshots are proxied
+  through `/api/cameras/{id}/snapshot.jpg` rather than linked, because the
+  camera speaks plain HTTP with Digest auth: a direct URL would be blocked as
+  mixed content and would expose the credentials in page source.
+
+- **One rotctld socket, process-wide.** rotctld spawns a thread per connection
+  with no mutex around the shared rotator handle, so concurrent clients can
+  interleave writes mid-frame and corrupt an in-progress track. N browser tabs
+  must produce exactly one connection. Poll at 1 Hz — a 600-baud ROT2PROG
+  cannot sustain 2 Hz.
+
+## Rotator control
+
+Control is **off by default** (`GS_ROTATOR_CONTROL_ENABLED=0`) and, when
+enabled, is refused unless all four gates pass:
+
+| Gate | Source |
+|---|---|
+| SatNOGS client is down | station 5024 reports `is_connected = false` |
+| No imminent pass | no scheduled job within `GS_GATE_GUARD_S` of now |
+| Operator armed | an explicit arm, expiring after `GS_CONTROL_LEASE_S` |
+| Kill switch | `GS_ROTATOR_CONTROL_ENABLED=1` |
+
+The station's own `is_connected` flag is used as the signal that satnogs-client
+is running, rather than mounting the Docker socket, so the backend keeps minimal
+privilege. If the reference `ground-station` suite is also deployed, its rotator
+integration must stay disabled — this backend is the single writer.
+
+## Tests
+
+```bash
+cd backend
+.venv/Scripts/python -m pip install -r requirements-dev.txt
+.venv/Scripts/python -m pytest              # offline: 50 tests
+.venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
+```
+
+To exercise the real rotctld parser without a rotator, run the fake and point
+the backend at it — this is the code path that will meet the hardware, which
+`GS_MOCK=1` does not touch:
+
+```bash
+python tools/fake_rotctld.py --model 903          # rotctld on 4533
+python tools/fake_rotctld.py --kind rig          # a radio on 4532, must be refused
+python tools/fake_rotctld.py --split-frames      # replies one byte at a time
+```
+
+## Development on a machine that cannot reach the station LAN
+
+`GS_MOCK=1` is the only flag. It selects implementations at construction time,
+so there are no `if mock:` branches in the business logic.
+
+- **Cameras** — `deploy/go2rtc/go2rtc.mock.yaml` declares the *same stream
+  names* as production, backed by generated video. No frontend or backend code
+  differs between the two.
+- **Rotator** — a simulator driven by the real predictor, so it tracks an actual
+  KNACKSAT-2 pass, crosses 360° into the cable-wrap range and injects link
+  faults. `tools/fake_rotctld.py` additionally speaks the real wire protocol, so
+  the actual parser can be exercised without hardware.
+- **SatNOGS, Celestrak and Grafana** are public, so development exercises the
+  production path. `GS_OFFLINE=1` falls back to fixtures.
+
+## Commissioning on site
+
+See `deploy/commissioning/`. The open questions it settles:
+
+1. **Is the rotator on 4532 or 4533?** rigctld defaults to 4532 (a *radio*),
+   rotctld to 4533. Probe both with `+\dump_caps`, which is answered from
+   compiled capabilities and does not touch the serial line, so it is safe
+   during a pass. `Rot type: AzEl` means rotctld; `RX freq ranges` means you
+   have found the radio.
+2. **SPID model 901 or 903?** The same dump says. It determines the legal
+   azimuth range, and 901-against-MD-01 produces laggy, wrong readings.
+3. **Is the camera H.264 or H.265?** WebRTC cannot carry H.265 at all. Check
+   `/ISAPI/Streaming/channels` and change the encoding before going further.
+4. **One camera or two?** "Two streams" is usually main + sub of one device.
+
+## Licence
+
+MIT — see `LICENSE`. The `sgoudelis/ground-station` suite referenced in
+`docker-compose.yml` is GPL-3.0 and runs as a **separate container**; no code
+from it is present in this repository.
+
+Coastlines are Natural Earth (public domain). CesiumJS is Apache-2.0 and is
+fetched by `tools/fetch_vendor.sh`, not vendored here.

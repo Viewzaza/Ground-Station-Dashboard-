@@ -1,0 +1,23 @@
+# secrets
+.env
+.env.*
+!.env.example
+deploy/secrets/*
+!deploy/secrets/.gitkeep
+
+# runtime state
+backend/data/*
+!backend/data/.gitkeep
+caddy_data/
+caddy_config/
+
+# vendored assets fetched by tools/fetch_vendor.sh
+frontend/js/vendor/cesium/
+frontend/assets/earth-*.jpg
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/

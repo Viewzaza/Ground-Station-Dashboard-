@@ -1,0 +1,86 @@
+# Production stack. On the Linux server:
+#   cp .env.example .env && $EDITOR .env && docker compose up -d
+#
+# All four services sit on the default bridge network. A bridge container can
+# already reach 10.90.36.x outbound, so host networking is NOT used — it would
+# only be needed for broadcast/multicast discovery, which nothing here does.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./frontend:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      GS_DATA_DIR: /data
+    volumes:
+      - ./backend/data:/data
+    secrets:
+      - camera_password
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  video:
+    image: alexxit/go2rtc:latest
+    restart: unless-stopped
+    environment:
+      TZ: ${GS_TIMEZONE:-Asia/Bangkok}
+      CAM_HOST: ${CAM_HOST}
+      CAM_USER: ${CAM_USER}
+      CAM_PASS: ${CAM_PASS}
+    volumes:
+      - ./deploy/go2rtc:/config:ro
+    ports:
+      # WebRTC needs a reachable candidate port; 1984 stays internal behind Caddy.
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1984/api/streams"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # The reference ground-station suite (GPL-3.0) runs as a separate process for
+  # SDR reception, demodulation and observation recording. No code from it is in
+  # this repo. Its rotator integration MUST stay disabled — this dashboard's
+  # backend is the single writer to rotctld.
+  groundstation:
+    image: ghcr.io/sgoudelis/ground-station:latest
+    restart: unless-stopped
+    profiles: ["sdr"]
+    volumes:
+      - groundstation_data:/app/data
+    # devices:
+    #   - /dev/bus/usb   # uncomment once the SDR is attached on the server
+
+volumes:
+  caddy_data:
+  caddy_config:
+  groundstation_data:
+
+secrets:
+  camera_password:
+    file: ./deploy/secrets/camera_password.txt

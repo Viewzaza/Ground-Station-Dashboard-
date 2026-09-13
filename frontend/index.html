@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KNACKSAT-2 Ground Station</title>
+<link rel="icon" href="assets/favicon.svg">
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/panels.css">
+<link rel="stylesheet" href="css/layout.css">
+<link rel="stylesheet" href="css/cameras.css">
+</head>
+<body>
+
+<div class="wall">
+
+  <!-- ─────────────────────────────── header ─────────────────────────────── -->
+  <header class="hdr" style="grid-area:hdr">
+    <div class="hdr-id">
+      <h1 id="sat-name">KNACKSAT-2</h1>
+      <span class="norad" id="sat-norad">NORAD 67683</span>
+      <span class="station" id="station-name">SatNOGS 5024 · OK03gt</span>
+    </div>
+
+    <div class="hdr-clocks">
+      <div class="clock"><span>UTC</span><b id="clock-utc">--:--:--</b></div>
+      <div class="clock"><span id="clock-local-label">LOCAL</span><b id="clock-local">--:--:--</b></div>
+    </div>
+
+    <div class="hdr-aos">
+      <span id="aos-label">NEXT AOS</span>
+      <b id="aos-countdown">--:--:--</b>
+      <span class="aos-sub" id="aos-detail">awaiting elements</span>
+    </div>
+
+    <div class="hdr-chips" id="chips">
+      <span class="chip" data-chip="api">API</span>
+      <span class="chip" data-chip="cam">CAM</span>
+      <span class="chip" data-chip="rot">ROT</span>
+      <span class="chip" data-chip="tle">TLE</span>
+      <span class="chip" data-chip="satnogs">SATNOGS</span>
+    </div>
+  </header>
+
+  <!-- ─────────────────────────────── 2D map ─────────────────────────────── -->
+  <section class="panel" style="grid-area:map">
+    <h2>Ground track <span class="hint" id="map-hint"></span></h2>
+    <canvas id="map2d" class="fill"></canvas>
+  </section>
+
+  <!-- ─────────────────────────────── cameras ────────────────────────────── -->
+  <section class="panel cam" style="grid-area:cam1">
+    <h2>Camera 1 <span class="hint" id="cam1-state">—</span></h2>
+    <div class="cam-slot" id="cam-slot-0"></div>
+  </section>
+
+  <section class="panel cam" style="grid-area:cam2">
+    <h2>Camera 2 <span class="hint" id="cam2-state">—</span></h2>
+    <div class="cam-slot" id="cam-slot-1"></div>
+  </section>
+
+  <!-- ─────────────────────────────── 3D globe ───────────────────────────── -->
+  <section class="panel" style="grid-area:globe">
+    <h2>Orbit <span class="hint" id="globe-hint">3D</span></h2>
+    <div id="globe3d" class="fill globe-host"></div>
+  </section>
+
+  <!-- ─────────────────────────── right-hand column ──────────────────────── -->
+  <aside class="track-col" style="grid-area:track">
+
+    <section class="panel">
+      <h2>Satellite</h2>
+      <div class="satselect">
+        <input id="sat-search" type="search" placeholder="search the amateur catalogue…"
+               autocomplete="off" spellcheck="false">
+        <ul id="sat-list" class="sat-list"></ul>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Next pass</h2>
+      <div id="pass-card" class="pass-card">
+        <p class="muted">no prediction yet</p>
+      </div>
+    </section>
+
+    <section class="panel grow">
+      <h2>Rotator <span class="hint" id="rot-source">—</span></h2>
+      <canvas id="polar" class="polar"></canvas>
+      <div class="rot-readout">
+        <span>AZ <b id="rot-az">—</b></span>
+        <span>EL <b id="rot-el">—</b></span>
+        <span>ERR <b id="rot-err">—</b></span>
+      </div>
+      <div class="rot-control" id="rot-control">
+        <span class="muted">control disabled</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>SatNOGS 5024</h2>
+      <div id="satnogs-activity"><p class="muted">not yet wired</p></div>
+    </section>
+
+  </aside>
+
+  <!-- ────────────────────────────── grafana ─────────────────────────────── -->
+  <footer class="graf" style="grid-area:graf">
+    <div class="graf-strip" id="graf-strip"></div>
+    <a class="graf-open" id="graf-open" target="_blank" rel="noopener noreferrer">open full ↗</a>
+  </footer>
+
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
