@@ -30,7 +30,8 @@ running, and reflows down to a phone.
 | 2D ground track, footprint, terminator | done |
 | 3D orbit globe (CesiumJS, offline) | done |
 | Satellite selector, pass prediction, next-pass card | done |
-| Rotator **read-out** (polar plot, predicted arc) | plot done; rotctld bridge pending |
+| Rotator read-out (polar plot, predicted arc, cable wrap) | done, awaiting the real rotator |
+| Live WebSocket (rotator, pointing error, status, reconnect) | done |
 | Rotator **control** behind the SatNOGS interlock | pending |
 | SatNOGS 5024 activity feed | pending |
 | Grafana telemetry strip | done |
@@ -166,8 +167,19 @@ integration must stay disabled — this backend is the single writer.
 
 ```bash
 cd backend
-.venv/Scripts/python -m pytest              # offline
+.venv/Scripts/python -m pip install -r requirements-dev.txt
+.venv/Scripts/python -m pytest              # offline: 50 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
+```
+
+To exercise the real rotctld parser without a rotator, run the fake and point
+the backend at it — this is the code path that will meet the hardware, which
+`GS_MOCK=1` does not touch:
+
+```bash
+python tools/fake_rotctld.py --model 903          # rotctld on 4533
+python tools/fake_rotctld.py --kind rig          # a radio on 4532, must be refused
+python tools/fake_rotctld.py --split-frames      # replies one byte at a time
 ```
 
 ## Development on a machine that cannot reach the station LAN
