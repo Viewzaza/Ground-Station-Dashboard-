@@ -117,7 +117,10 @@ class CameraTile {
   useSnapshot(camera, reason) {
     this.clear();
     const img = document.createElement('img');
-    img.alt = camera.label || camera.id;
+    // No alt text: a failed snapshot would otherwise render the browser's
+    // broken-image icon and a caption across the tile, on top of the badge
+    // that is already saying exactly what is wrong.
+    img.alt = '';
     this.slot.appendChild(img);
     this.setBadge(reason, 'fallback');
     setStatus('cam', 'degraded', reason);
@@ -139,6 +142,7 @@ class CameraTile {
     };
 
     img.onload = () => {
+      img.hidden = false;
       if (failures) {
         failures = 0;
         interval = SNAPSHOT_INTERVAL_MS;
@@ -152,6 +156,7 @@ class CameraTile {
       failures += 1;
       if (failures >= 3) {
         interval = SNAPSHOT_RETRY_MS;
+        img.hidden = true;                 // leave the tile empty, not broken
         this.setBadge('CAMERA DOWN', 'down');
         setStatus('cam', 'down', 'no frames from the bridge or the camera');
       }

@@ -14,6 +14,8 @@ export const store = {
   nextPass: null,
   passes: [],
   rotator: null,
+  pointing: null,
+  satnogs: null,
   cameras: [],
 };
 

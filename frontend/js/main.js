@@ -8,6 +8,7 @@
    display changes faster than that, and a wall panel runs for months. */
 
 import { api } from './core/api.js';
+import { ws } from './core/ws.js';
 import { store, set, setStatus } from './core/store.js';
 import { Orbit } from './lib/orbit.js';
 import { Map2D } from './panels/map2d.js';
@@ -33,6 +34,9 @@ async function boot() {
     setStatus('api', 'down', String(err));
     return;
   }
+
+  // The live link carries rotator position, pointing error and status.
+  ws.connect();
 
   mountHeader();
   mountGrafana();

@@ -58,6 +58,11 @@ class Hub:
     def __init__(self) -> None:
         self._conns: set[Connection] = set()
         self._last: dict[str, Frame] = {}
+        # `status` is the one frame type many producers share, so keeping only
+        # the latest one per *type* would mean a newly connected client learns
+        # the health of whichever component reported most recently and nothing
+        # about the rest. Keep those per component instead.
+        self._last_status: dict[str, Frame] = {}
         self._seq = 0
 
     # --- connections -------------------------------------------------------
@@ -77,16 +82,28 @@ class Hub:
     def publish(self, frame_type: ServerFrameType, data: dict[str, Any]) -> Frame:
         self._seq += 1
         frame = Frame(type=frame_type, seq=self._seq, data=data)
-        self._last[frame_type] = frame
+
+        if frame_type == "status" and (component := data.get("component")):
+            self._last_status[component] = frame
+        else:
+            self._last[frame_type] = frame
+
         for conn in self._conns:
             if conn.wants(frame_type):
                 conn.offer(frame)
         return frame
 
     def snapshot(self) -> Frame:
-        """Every latest frame, as one frame, for a newly connected client."""
+        """Every latest frame, as one frame, for a newly connected client.
+
+        A browser opening mid-pass gets a complete dashboard immediately rather
+        than a blank one until each source next polls.
+        """
         self._seq += 1
-        frames = [f.model_dump(mode="json") for f in self._last.values()]
+        frames = [
+            f.model_dump(mode="json")
+            for f in (*self._last.values(), *self._last_status.values())
+        ]
         return Frame(type="snapshot", seq=self._seq, data={"frames": frames})
 
     def latest(self, frame_type: str) -> Frame | None:

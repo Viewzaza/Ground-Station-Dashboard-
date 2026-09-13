@@ -3,10 +3,10 @@
    Zenith at the centre, north up, horizon at the rim — the view an operator
    reads to see where the antenna is against where the satellite is.
 
-   Until the rotctld bridge lands (phase 5) this draws the predicted arc and the
-   live satellite marker, with the antenna marker absent rather than faked. A
-   dashboard that invents a pointing position is worse than one that admits it
-   does not know.
+   When the rotctld link is down the antenna marker disappears and the plot
+   says so, rather than leaving the last known position drawn as though it were
+   current. A dashboard that shows a stale pointing position during a pass is
+   worse than one that admits it does not know.
 */
 
 import { fit, palette } from '../lib/canvas.js';
@@ -107,7 +107,7 @@ export class PolarPlot {
 
     // --- antenna, when the rotator bridge is connected ---
     const rot = store.rotator;
-    if (rot) {
+    if (rot && rot.link === 'up') {
       const [x, y] = this._xy(rot.az_rose, Math.max(0, rot.el), cx, cy, r);
       ctx.beginPath();
       ctx.moveTo(x, y - 6); ctx.lineTo(x - 5, y + 4); ctx.lineTo(x + 5, y + 4);
@@ -116,16 +116,15 @@ export class PolarPlot {
       ctx.lineWidth = 1.6;
       ctx.stroke();
     } else {
-      ctx.fillStyle = this.pal.dim;
+      ctx.fillStyle = rot ? this.pal.bad : this.pal.dim;
       ctx.font = '9px monospace';
-      ctx.fillText('no rotator link', cx, cy + r + 6);
+      ctx.fillText(rot ? 'ROTATOR LINK DOWN' : 'no rotator link', cx, cy + r + 6);
     }
   }
 }
 
 export function paintRotatorReadout() {
   const rot = store.rotator;
-  const pos = store.satpos;
 
   if (!rot) {
     $('rot-az').textContent = '—';
@@ -135,19 +134,34 @@ export function paintRotatorReadout() {
     return;
   }
 
-  // The raw azimuth is shown first: a reading of 412 deg means the rotator is
+  // The raw azimuth is shown first: a reading of 412° means the rotator is
   // wound past north, which matters for cable wrap. The 0-360 value is only a
   // convenience for reading against a compass.
-  $('rot-az').textContent =
-    `${rot.az_raw.toFixed(1)}° (${rot.az_rose.toFixed(1)}°)`;
-  $('rot-el').textContent = deg(rot.el, 1);
-  $('rot-source').textContent = rot.source;
+  const wound = rot.wrap && rot.wrap !== 'none';
+  $('rot-az').textContent = wound
+    ? `${rot.az_raw.toFixed(1)}° (${rot.az_rose.toFixed(1)}°)`
+    : deg(rot.az_raw, 1);
+  $('rot-az').classList.toggle('wound', !!wound);
+  $('rot-az').title = wound
+    ? `wound ${rot.wrap === 'cw' ? 'clockwise' : 'anticlockwise'} past north`
+    : '';
 
-  if (pos && pos.el > 0) {
-    const dAz = Math.abs(((rot.az_rose - pos.az + 540) % 360) - 180);
-    const dEl = Math.abs(rot.el - pos.el);
-    $('rot-err').textContent = deg(Math.hypot(dAz, dEl), 1);
+  $('rot-el').textContent = deg(rot.el, 1);
+  $('rot-source').textContent = rot.link === 'up'
+    ? `${rot.source} · ${Math.round(rot.latency_ms)} ms`
+    : `${rot.source} · LINK ${rot.link.toUpperCase()}`;
+
+  // The pointing error is computed by the backend, against the same schedule
+  // the antenna is driven from — not re-derived here from a different source.
+  const err = store.pointing;
+  const errEl = $('rot-err');
+  if (!err) {
+    errEl.textContent = '—';
+    errEl.className = '';
   } else {
-    $('rot-err').textContent = '—';
+    errEl.textContent = deg(err.total_error_deg, 1);
+    // SatNOGS itself tracks with a 4-degree deadband, so anything under about
+    // 5 degrees is normal operation, not a fault worth colouring red.
+    errEl.className = err.total_error_deg > 5 ? 'err-bad' : '';
   }
 }

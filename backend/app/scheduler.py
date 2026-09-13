@@ -15,6 +15,7 @@ from typing import Awaitable, Callable
 from .config import Settings
 from .hub import hub
 from .services.predictor import Predictor
+from .services.rotator_service import RotatorService
 from .services.tle_store import TleStore
 
 log = logging.getLogger(__name__)
@@ -27,14 +28,18 @@ class Scheduler:
         self.predictor = predictor
         self._tasks: list[asyncio.Task] = []
         self.components: dict[str, str] = {}
+        self.rotator = RotatorService(settings, predictor, on_state=self.set_state)
 
     # --- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
         # One eager refresh so the first page load has elements to work with.
         await self._safe_refresh_tles()
         self._spawn("tle", self._tle_loop)
+        self._spawn("rotctld", self.rotator.run)
+        self._spawn("satpos", self._satpos_loop)
 
     async def stop(self) -> None:
+        await self.rotator.stop()
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -83,3 +88,24 @@ class Scheduler:
         while True:
             await asyncio.sleep(self.s.tle_ttl_s / 4)
             await self._safe_refresh_tles()
+
+    async def _satpos_loop(self) -> None:
+        """Publish the tracked satellite's state and its next pass.
+
+        The browser propagates its own position for the smooth 1 Hz render, so
+        this exists for clients that do not (and to keep every consumer working
+        from the same schedule the antenna does).
+        """
+        while True:
+            norad = self.s.default_norad
+            pos = self.predictor.position(norad)
+            if pos is not None:
+                hub.publish("satpos", pos.model_dump(mode="json"))
+                self.set_state("predictor", "ok")
+
+            nxt = self.predictor.next_pass(norad)
+            hub.publish("pass_next", nxt.model_dump(mode="json") if nxt else {})
+
+            # 1 Hz while the satellite is up, otherwise every 5 s.
+            fast = pos is not None and pos.el > -2.0
+            await asyncio.sleep(1.0 if fast else 5.0)

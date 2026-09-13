@@ -88,3 +88,7 @@
 .tag.bad { color: var(--bad); }
 .tag.unknown { color: var(--dim); }
 .row.highlight { outline: 1px solid rgba(55,210,240,.4); }
+
+/* Azimuth wound past north: real information about the cable, not noise. */
+.rot-readout b.wound { color: var(--warn); }
+.rot-readout b.err-bad { color: var(--bad); }
