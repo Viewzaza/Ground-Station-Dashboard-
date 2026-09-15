@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     tle_ttl_s: int = 7200               # Celestrak 403s below this. Do not lower.
     tle_stale_warn_d: float = 7.0
     tle_stale_crit_d: float = 14.0
+    # Transmitters change on the scale of months, so this is deliberately long.
+    transmitter_ttl_s: int = 86400
 
     # --- rotator ------------------------------------------------------------
     rotctld_host: str = "10.90.36.140"

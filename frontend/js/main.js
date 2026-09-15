@@ -20,6 +20,7 @@ import { mountPasses } from './panels/passes.js';
 import { mountGrafana } from './panels/grafana.js';
 import { mountSatnogs } from './panels/satnogs.js';
 import { mountControl, tickControl } from './panels/control.js';
+import { mountRadio } from './panels/radio.js';
 
 let orbit = null;
 let map = null;
@@ -45,6 +46,7 @@ async function boot() {
   mountPasses();
   mountSatnogs();
   mountControl();
+  mountRadio();
 
   // Cameras first — they are why the operator is looking at this screen.
   mountCameras();
@@ -52,8 +54,10 @@ async function boot() {
   map = new Map2D(document.getElementById('map2d'));
   polar = new PolarPlot(document.getElementById('polar'));
 
-  // Cesium is 23 MB. Load it after the panels that matter are already up,
-  // and only when this display is wide enough to be showing the globe.
+  // three.js is 1.3 MB — far less than the Cesium build this replaced, but
+  // still worth keeping off a phone that is only here for the camera. Note the
+  // module is assigned before mountGlobe resolves, so tick() can call into it
+  // mid-construction; globe3d guards that itself.
   if (store.config.features?.globe3d && window.innerWidth > 1000) {
     import('./panels/globe3d.js').then(async (mod) => {
       globe = mod;

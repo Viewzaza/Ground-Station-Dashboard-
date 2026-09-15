@@ -14,11 +14,12 @@ from fastapi import FastAPI
 
 from .config import get_settings
 from .routes import (
-    cameras, control, health, passes, rotator, satellites, satnogs, ws,
+    cameras, control, health, passes, radio, rotator, satellites, satnogs, ws,
 )
 from .scheduler import Scheduler
 from .services.predictor import Predictor
 from .services.tle_store import TleStore
+from .services.transmitters import TransmitterStore
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +36,15 @@ async def lifespan(app: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
     tles = TleStore(settings)
-    predictor = Predictor(settings, tles)
+    transmitters = TransmitterStore(settings)
+    predictor = Predictor(settings, tles, transmitters)
+    # The scheduler reaches the store through the predictor it already owns,
+    # rather than being handed a second reference to the same thing.
     scheduler = Scheduler(settings, tles, predictor)
 
     app.state.settings = settings
     app.state.tles = tles
+    app.state.transmitters = transmitters
     app.state.predictor = predictor
     app.state.scheduler = scheduler
     app.state.rotator = scheduler.rotator
@@ -72,4 +77,5 @@ app.include_router(cameras.router, prefix="/api", tags=["cameras"])
 app.include_router(rotator.router, prefix="/api", tags=["rotator"])
 app.include_router(control.router, prefix="/api", tags=["control"])
 app.include_router(satnogs.router, prefix="/api", tags=["satnogs"])
+app.include_router(radio.router, prefix="/api", tags=["radio"])
 app.include_router(ws.router, tags=["ws"])

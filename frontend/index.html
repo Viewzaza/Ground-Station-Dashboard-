@@ -49,17 +49,14 @@
   </section>
 
   <!-- ─────────────────────────────── cameras ────────────────────────────── -->
-  <!-- One camera, two encoder channels. Station 5024 has a single Hikvision
-       DS-2CD1023G2-LIUF/SL; 101 is its main stream and 102 its sub. Labelling
-       them "Camera 1" and "Camera 2" implied a redundancy that is not there. -->
-  <section class="panel cam" style="grid-area:cam1">
+  <!-- One tile, because there is one camera. Station 5024 has a single
+       Hikvision DS-2CD1023G2-LIUF/SL; channels 101 and 102 are its main and sub
+       streams, so showing both filled half the wall with the same picture at
+       two resolutions. The sub stream stays configured and is what the tile
+       falls back to if the main one will not carry. -->
+  <section class="panel cam" style="grid-area:cam">
     <h2>Camera <span class="hint" id="cam1-state">—</span></h2>
     <div class="cam-slot" id="cam-slot-0"></div>
-  </section>
-
-  <section class="panel cam" style="grid-area:cam2">
-    <h2>Camera <span class="hint" id="cam2-state">—</span></h2>
-    <div class="cam-slot" id="cam-slot-1"></div>
   </section>
 
   <!-- ─────────────────────────────── 3D globe ───────────────────────────── -->
@@ -108,6 +105,12 @@
     </section>
 
   </aside>
+
+  <!-- ─────────────────────────────── radio ──────────────────────────────── -->
+  <section class="panel" style="grid-area:radio">
+    <h2>Radio <span class="hint" id="radio-hint">—</span></h2>
+    <div id="radio-panel"><p class="muted">awaiting transmitters</p></div>
+  </section>
 
   <!-- ────────────────────────────── grafana ─────────────────────────────── -->
   <footer class="graf" style="grid-area:graf">

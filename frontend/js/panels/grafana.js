@@ -45,6 +45,12 @@ export function mountGrafana() {
     frame.loading = 'lazy';
     frame.referrerPolicy = 'no-referrer';
     frame.title = `Grafana panel ${panelId}`;
-    strip.appendChild(frame);
+
+    // Wrapped so .graf-cell::after can cover Grafana's own branding badge.
+    // The iframe is cross-origin, so that mask is the only way to reach it.
+    const cell = document.createElement('div');
+    cell.className = 'graf-cell';
+    cell.appendChild(frame);
+    strip.appendChild(cell);
   }
 }

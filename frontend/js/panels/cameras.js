@@ -15,8 +15,11 @@
 import { api } from '../core/api.js';
 import { set, setStatus } from '../core/store.js';
 
-const SLOTS = ['cam-slot-0', 'cam-slot-1'];
-const STATE_LABELS = ['cam1-state', 'cam2-state'];
+// One tile: the station has one camera, and 101/102 are its main and sub
+// streams. Showing both meant half the wall was the same picture twice.
+const SLOT_ID = 'cam-slot-0';
+const STATE_LABEL_ID = 'cam1-state';
+const PREFERRED_STREAM = 'cam_main';
 const FALLBACK_AFTER_MS = 15000;
 const SNAPSHOT_INTERVAL_MS = 1000;
 const SNAPSHOT_RETRY_MS = 15000;     // after repeated failures, stop hammering
@@ -168,8 +171,8 @@ class CameraTile {
 }
 
 export async function mountCameras() {
-  const tiles = SLOTS.map((id, i) => new CameraTile(id, STATE_LABELS[i]));
-  tiles.forEach((t) => t.placeholder('connecting…'));
+  const tile = new CameraTile(SLOT_ID, STATE_LABEL_ID);
+  tile.placeholder('connecting…');
 
   let cameras = [];
   try {
@@ -179,18 +182,18 @@ export async function mountCameras() {
   } catch (err) {
     console.error('[cameras]', err);
     setStatus('cam', 'down', String(err));
-    tiles.forEach((t) => t.placeholder('camera service unreachable'));
+    tile.placeholder('camera service unreachable');
     return;
   }
 
   if (!cameras.length) {
     setStatus('cam', 'down', 'no streams configured');
-    tiles.forEach((t) => t.placeholder('no streams configured'));
+    tile.placeholder('no streams configured');
     return;
   }
 
-  cameras.slice(0, tiles.length).forEach((camera, i) => tiles[i].mount(camera));
-  for (let i = cameras.length; i < tiles.length; i++) {
-    tiles[i].placeholder('no second stream');
-  }
+  // Prefer the main stream, but take whatever exists: if go2rtc is only
+  // carrying the sub channel, a 360p picture beats an empty tile.
+  const camera = cameras.find((c) => c.id === PREFERRED_STREAM) || cameras[0];
+  tile.mount(camera);
 }

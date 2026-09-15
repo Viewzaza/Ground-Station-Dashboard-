@@ -10,28 +10,32 @@
 
 set -eu
 
-CESIUM_VERSION="${CESIUM_VERSION:-1.145.0}"
+THREE_VERSION="${THREE_VERSION:-0.160.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR="$ROOT/frontend/js/vendor"
 
 mkdir -p "$VENDOR"
 
-# --- CesiumJS -----------------------------------------------------------------
-# The npm tarball carries a prebuilt Build/Cesium, which is exactly what a
-# no-build frontend needs. Assets/ must come with it: that is where the bundled
-# Natural Earth II imagery lives, and it is what lets the globe render with no
-# Ion account and no network.
-if [ -d "$VENDOR/cesium" ]; then
-  echo "cesium already present, skipping (delete $VENDOR/cesium to refetch)"
+# --- three.js -----------------------------------------------------------------
+# The globe used to be CesiumJS, which is a 23 MB download for a panel that
+# shows one orbit and one marker — and if the fetch was ever skipped the panel
+# rendered black with no hint why. three.js is 1.3 MB, ships an ES module the
+# browser loads directly with no build step, and the globe is drawn from the
+# Natural Earth GeoJSON already committed in frontend/assets, so there is no
+# imagery to download and nothing is fetched at runtime.
+if [ -f "$VENDOR/three/three.module.js" ]; then
+  echo "three.js already present, skipping (delete $VENDOR/three to refetch)"
 else
-  echo "fetching cesium $CESIUM_VERSION…"
+  echo "fetching three.js $THREE_VERSION…"
   tmp="$(mktemp -d)"
-  curl -sSL -o "$tmp/cesium.tgz" \
-    "https://registry.npmjs.org/cesium/-/cesium-$CESIUM_VERSION.tgz"
-  tar -xzf "$tmp/cesium.tgz" -C "$tmp" package/Build/Cesium
-  mv "$tmp/package/Build/Cesium" "$VENDOR/cesium"
+  curl -sSL -o "$tmp/three.tgz" \
+    "https://registry.npmjs.org/three/-/three-$THREE_VERSION.tgz"
+  tar -xzf "$tmp/three.tgz" -C "$tmp" package/build/three.module.js package/LICENSE
+  mkdir -p "$VENDOR/three"
+  mv "$tmp/package/build/three.module.js" "$VENDOR/three/three.module.js"
+  mv "$tmp/package/LICENSE" "$VENDOR/three/LICENSE"      # MIT; keep it with the code
   rm -rf "$tmp"
-  echo "cesium -> $VENDOR/cesium"
+  echo "three.js -> $VENDOR/three"
 fi
 
 # --- satellite.js -------------------------------------------------------------

@@ -16,6 +16,7 @@ export const store = {
   rotator: null,
   pointing: null,
   satnogs: null,
+  radio: null,         // transmitters + live Doppler for the tracked satellite
   control: null,       // interlock state: gates, lease, mode
   cameras: [],
 };

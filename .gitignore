@@ -12,7 +12,7 @@ caddy_data/
 caddy_config/
 
 # vendored assets fetched by tools/fetch_vendor.sh
-frontend/js/vendor/cesium/
+frontend/js/vendor/three/
 frontend/assets/earth-*.jpg
 
 # python

@@ -40,6 +40,9 @@ class Scheduler:
     async def start(self) -> None:
         # One eager refresh so the first page load has elements to work with.
         await self._safe_refresh_tles()
+        # Same reasoning for the tracked satellite's transmitters: without them
+        # the Doppler readout is blank through the first pass after a restart.
+        await self._safe_refresh_transmitters()
         self._spawn("tle", self._tle_loop)
         self._spawn("rotctld", self.rotator.run)
         self._spawn("satpos", self._satpos_loop)
@@ -89,6 +92,17 @@ class Scheduler:
         except Exception as exc:
             self.set_state("tle", "degraded", str(exc))
             log.exception("TLE refresh failed")
+
+    async def _safe_refresh_transmitters(self) -> None:
+        store = getattr(self.predictor, "transmitters", None)
+        if store is None:
+            return
+        try:
+            await store.refresh(self.s.default_norad)
+        except Exception:
+            # Never fatal: a missing downlink costs the Doppler readout, not
+            # the pass schedule, and the disk cache usually covers it.
+            log.warning("transmitter refresh failed", exc_info=True)
 
     async def _tle_loop(self) -> None:
         # Re-check on the TTL boundary. refresh() itself refuses to hit the

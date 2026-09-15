@@ -25,23 +25,37 @@ log = logging.getLogger(__name__)
 
 C_KM_S = 299792.458
 
-# Known downlinks, for the Doppler readout. KNACKSAT-2's UHF telemetry is the
-# transmitter station 5024 actually schedules.
+# Fallback downlinks for the Doppler readout, used only when SatNOGS DB has not
+# been reached yet. KNACKSAT-2's UHF telemetry is the transmitter station 5024
+# actually schedules, and SatNOGS DB agrees with this to the Hz — but a literal
+# here is right for one satellite and silently absent for every other one in
+# the selector, which is why TransmitterStore supersedes it.
 DOWNLINK_HZ: dict[int, float] = {
     67683: 400_630_000.0,      # KNACKSAT-2 UHF TLM, FSK 9600
 }
 
 
 class Predictor:
-    def __init__(self, settings: Settings, tles: TleStore) -> None:
+    def __init__(self, settings: Settings, tles: TleStore,
+                 transmitters=None) -> None:
         self.s = settings
         self.tles = tles
+        # Optional so the predictor stays constructible on its own, which is
+        # what the pass-prediction tests and the SatNOGS oracle rely on.
+        self.transmitters = transmitters
         self.ts = load.timescale()          # builtin=True: no download
         self.site = wgs84.latlon(
             settings.station_lat, settings.station_lon,
             elevation_m=settings.station_alt_m,
         )
         self._cache: dict[int, tuple[str, EarthSatellite]] = {}
+
+    def downlink_hz(self, norad: int) -> float | None:
+        if self.transmitters is not None:
+            live = self.transmitters.downlink_hz(norad)
+            if live:
+                return live
+        return DOWNLINK_HZ.get(norad)
 
     # --- satellites --------------------------------------------------------
     def satellite(self, norad: int) -> EarthSatellite | None:
@@ -79,7 +93,7 @@ class Predictor:
 
         speed = math.sqrt(sum(c * c for c in geo.velocity.km_per_s))
 
-        downlink = DOWNLINK_HZ.get(norad)
+        downlink = self.downlink_hz(norad)
         doppler = -downlink * range_rate / C_KM_S if downlink else None
 
         tle = self.tles.get(norad)

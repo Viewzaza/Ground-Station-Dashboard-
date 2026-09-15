@@ -143,6 +143,54 @@
    screen must scroll rather than clip a control off the bottom. */
 .track-col { overflow-y: auto; }
 
+/* ── radio / transmitters ─────────────────────────────────────────────────
+   The tuned frequency is the number an operator acts on, so it is the only
+   thing set large. Everything else is context for choosing between rows. */
+.rx-list {
+  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+  gap: 6px; overflow-y: auto; min-height: 0;
+}
+.rx {
+  padding: 6px 8px; border-radius: 4px; background: var(--panel-2);
+  border-left: 2px solid var(--line);
+}
+.rx-primary { border-left-color: var(--accent); }
+.rx-dead { opacity: .5; }
+
+.rx-top { display: flex; align-items: baseline; gap: 8px; }
+.rx-freq {
+  font-size: 19px; font-variant-numeric: tabular-nums; letter-spacing: .01em;
+  color: var(--text);
+}
+.rx-freq.rx-live { color: var(--accent); }
+.rx-freq i { font-size: 10px; font-style: normal; color: var(--dim); margin-left: 4px; }
+.rx-shift {
+  font-size: 11px; font-variant-numeric: tabular-nums; margin-left: auto;
+  white-space: nowrap;
+}
+/* Closing raises the received frequency, receding lowers it. Colouring the two
+   differently makes the turn at TCA visible at a glance. */
+.rx-shift.up { color: var(--ok); }
+.rx-shift.down { color: var(--warn); }
+
+.rx-meta {
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+  font-size: 10px; color: var(--muted); margin-top: 2px;
+}
+.rx-mode { color: var(--accent-2); letter-spacing: .06em; }
+.rx-type { color: var(--dim); }
+.rx-tag {
+  font-size: 9px; letter-spacing: .1em; padding: 1px 5px; border-radius: 2px;
+  border: 1px solid rgba(55,210,240,.35); color: var(--accent);
+}
+.rx-tag.dead { border-color: rgba(255,77,94,.35); color: var(--bad); }
+
+.rx-desc {
+  font-size: 10px; color: var(--dim); margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rx-nominal { font-size: 9px; color: var(--dim); margin-top: 2px; }
+
 /* ── SatNOGS activity ─────────────────────────────────────────────────── */
 .sn-station { display: flex; gap: 6px; align-items: center; font-size: 11px; flex-wrap: wrap; }
 .sn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }

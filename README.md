@@ -12,13 +12,15 @@ running, and reflows down to a phone.
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ KNACKSAT-2 · 67683 │ UTC / ICT │ NEXT AOS -00:14:22 │ ● API ● CAM ● ROT ● TLE │
 ├─────────────────┬────────────────────────────────┬───────────────────────────┤
-│  GROUND TRACK   │          CAMERA 1              │ SATELLITE (amateur cat.)  │
-│  footprint,     │                                │ NEXT PASS  AOS/TCA/LOS    │
-│  terminator     ├────────────────────────────────┤ ROTATOR    polar plot     │
-│  ORBIT (3D)     │          CAMERA 2              │ SATNOGS    5024 activity  │
-├─────────────────┴────────────────────────────────┴───────────────────────────┤
-│ GRAFANA  [last beacon] [battery V] [solar W] [battery °C]      open full ↗    │
-└──────────────────────────────────────────────────────────────────────────────┘
+│  GROUND TRACK   │                                │ SATELLITE (amateur cat.)  │
+│  footprint,     │            CAMERA              │ NEXT PASS  AOS/TCA/LOS    │
+│  terminator     │      (one camera, main)        │ ROTATOR    polar + control │
+├─────────────────┤                                │ SATNOGS    5024 activity  │
+│  ORBIT (3D)     │                                │                           │
+├─────────────────┼────────────────────────────────┴───────────────────────────┤
+│ RADIO           │ GRAFANA  [beacon] [batt V] [solar W] [batt °C]   open full ↗│
+│ tuned + doppler │                                                            │
+└─────────────────┴────────────────────────────────────────────────────────────┘
 ```
 
 ## Status
@@ -28,7 +30,8 @@ running, and reflows down to a phone.
 | Layout, health chips, config-driven frontend | done |
 | Camera tiles (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, **verified against the real camera** |
 | 2D ground track, footprint, terminator | done |
-| 3D orbit globe (CesiumJS, offline) | done |
+| 3D orbit globe (three.js, offline, no imagery download) | done |
+| Radio panel — transmitters and live Doppler from SatNOGS DB | done |
 | Satellite selector, pass prediction, next-pass card | done |
 | Rotator read-out (polar plot, predicted arc, cable wrap) | done, **verified against the real rotctld** |
 | Live WebSocket (rotator, pointing error, status, reconnect) | done |
@@ -48,7 +51,7 @@ see [Rotator control](#rotator-control).
 ```bash
 python -m venv backend/.venv
 backend/.venv/Scripts/python -m pip install -r backend/requirements.txt
-sh tools/fetch_vendor.sh            # CesiumJS, ~23 MB, not committed
+sh tools/fetch_vendor.sh            # three.js, ~1.3 MB, not committed
 backend/.venv/Scripts/python tools/dev_server.py
 ```
 
@@ -126,13 +129,51 @@ Each of these cost time to find. Please read before changing them.
   to the footprint ring, which additionally does not close at all when it
   contains a pole.
 
-- **Cesium's `requestRenderMode` starves its own tile loader.** It looks ideal
-  for a display that runs for months, but the globe surface never finishes
-  loading and you get markers floating in a black void. Cesium's default loop is
-  also driven by `requestAnimationFrame`, which a browser may throttle to zero
-  when the window is occluded — a wall display that silently stops repainting is
-  worse than a slow one. `globe3d.js` drives rendering itself: fast while tiles
-  settle, 1 Hz once idle.
+- **The globe draws its own surface; there is no imagery to download.** It was
+  CesiumJS, which is 23 MB fetched by a setup script — and because it was
+  fetched rather than committed, a clone that skipped that step showed a black
+  rectangle with no hint why. That is exactly how it was found. It is now
+  three.js (1.3 MB, MIT, plain ES module) and the sphere's texture is drawn at
+  load time into a 2048×1024 canvas from `assets/ne_110m_land.json`, the same
+  public-domain Natural Earth outline the 2D map uses. So the 3D and 2D
+  coastlines cannot disagree, and nothing is fetched at runtime.
+
+- **A dark palette plus a directional light is a black disc.** The first
+  version used the console's own near-black surface colours and let lighting do
+  the rest; every one of them multiplied down to indistinguishable black, and
+  the globe rendered as a silhouette with a track floating on it. The surface
+  now uses its texture as an `emissiveMap` as well as a `map`: emissive is a
+  floor that puts the coastlines on screen wherever the sun is, and the
+  directional light adds the day side on top so the terminator is still
+  visible. Ambient is kept low, because raising it washes the terminator out.
+
+- **The frame is earth-fixed, not inertial.** Spinning the planet under a fixed
+  orbit ring looks better in isolation, but this panel sits beside a 2D ground
+  track and a polar plot, and all three should answer the same question: where
+  is the satellite relative to *our* ground. Earth-fixed makes the 3D and 2D
+  tracks literally the same line. Rendering is on demand — a
+  `requestAnimationFrame` loop spinning a GPU at 60 Hz to move a marker that
+  updates at 1 Hz is just heat in a rack that runs for months.
+
+- **`satellite__norad_cat_id` filters the DB API but not the Network API.** The
+  two SatNOGS services do not share a convention, and both fail silently in the
+  same direction — an ignored filter returns every satellite rather than an
+  error. Network wants `norad_cat_id`; DB, which is where transmitters come
+  from, wants `satellite__norad_cat_id`.
+
+- **A satellite's transmitters are not interchangeable.** KNACKSAT-2 publishes
+  a 145.825 MHz V/V digipeater and a 400.630 MHz UHF telemetry downlink, and
+  station 5024 is a UHF station: its three Yagis span 380–490 MHz. Taking "the
+  first transmitter" would tune the panel to a band the antenna cannot hear, so
+  `primary_downlink()` prefers a live transmitter inside the station's band.
+  Both are still shown — the operator is told which one is primary, not denied
+  the other.
+
+- **Grafana's "Powered by Grafana" badge can only be covered, not removed.**
+  The panels are cross-origin iframes, so no stylesheet or script of ours can
+  reach inside them. `.graf-cell::after` masks the top-right corner where the
+  badge sits; the panel title is top-left and the value is centred, so nothing
+  readable is behind it. If Grafana moves the badge, move the mask.
 
 - **Grafana sends no CORS headers**, so their telemetry cannot be fetched, only
   embedded. Their panels also need `var-DS_INFLUXDB` or they render empty. The
@@ -280,5 +321,6 @@ MIT — see `LICENSE`. The `sgoudelis/ground-station` suite referenced in
 `docker-compose.yml` is GPL-3.0 and runs as a **separate container**; no code
 from it is present in this repository.
 
-Coastlines are Natural Earth (public domain). CesiumJS is Apache-2.0 and is
-fetched by `tools/fetch_vendor.sh`, not vendored here.
+Coastlines are Natural Earth (public domain). three.js is MIT and is fetched by
+`tools/fetch_vendor.sh` (with its licence) rather than committed. Transmitter
+data comes from SatNOGS DB at runtime and is cached, not vendored.
