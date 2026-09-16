@@ -1,22 +1,60 @@
-/* Camera tiles. These are the centre of the display, so they get the space and
-   everything else works around them. */
+/* The camera tile. One camera now, not two, and it is the largest thing on the
+   wall — so it is the display's centre of gravity and everything else works
+   around it.
+
+   The page is paper; this is a window cut into it. A rooftop camera at night is
+   near-black whatever the theme says, so the slot keeps --void and the white
+   card around it becomes the bezel. The thing NOT to do is ring a dark
+   rectangle with a --rule hairline: a light line between white chrome and a
+   dark picture is a seam, and a seam makes the tile read as a broken <img>
+   rather than as a view. Every step inward from the card therefore goes DOWN in
+   lightness — card, shadow, dark edge, void — which is how a recessed screen
+   actually behaves. Same reasoning, and the same construction, as .graf-cell in
+   layout.css. */
 
 .panel.cam { padding-bottom: 9px; }
 
 .cam-slot {
+  /* Two sets of locals, both of which exist only against --void and so are
+     deliberately not tokens.
+
+     --void-edge is kin to --graf-edge: a near-black step just above the ground,
+     enough to describe the frame's edge, never bright enough to be a line.
+
+     The state inks are the other half of the problem. --ok/--warn/--bad were
+     darkened for white paper — #0f7a4f is about 1.6:1 on --void, i.e. invisible
+     — and the badge below sits ON the video, so it needs them to go the other
+     way instead. These three are the dark theme's original values, kept for
+     exactly the surface they were chosen for and scoped to the slot so they
+     cannot leak back onto the page. */
+  --void-edge:    #1e2a32;
+  --on-void-ink:  #a8b8c0;
+  --on-void-ok:   #3ddc84;
+  --on-void-warn: #ffb020;
+  --on-void-bad:  #ff5f6e;
+
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  background: #05080d;
-  border: 1px solid var(--line-soft);
-  border-radius: 4px;
+  background: var(--void);
+  border: 1px solid var(--void-edge);
+  border-radius: var(--radius);
+  /* The theme's single elevation, doing here what it does for the grafana
+     cells: seating the dark tile into the card rather than letting it butt up
+     against it. No second shadow, no glow. */
+  box-shadow: var(--shadow);
   overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-/* go2rtc's custom element renders a <video> inside itself. */
+/* go2rtc's custom element renders a <video> inside itself. All three carry the
+   slot's own ground, so the bars that object-fit: contain leaves around a
+   stream whose aspect does not match the tile are the same dark as the frame —
+   one window, not a picture floating on a second, different black. An element
+   that has not painted a frame yet is that colour too, so start-up is a dark
+   window rather than a flash. */
 .cam-slot video-stream,
 .cam-slot video,
 .cam-slot img {
@@ -24,17 +62,27 @@
   height: 100%;
   object-fit: contain;
   display: block;
-  background: #05080d;
+  background: var(--void);
 }
 
-.cam-slot .cam-placeholder {
-  color: var(--dim);
+/* "connecting…" / "camera unreachable", set on the dark ground, so it takes a
+   light ink — --ink-3 is a paper grey and vanishes here.
+   Left unscoped rather than nested under .cam-slot because globe3d.js reuses
+   this class for its own fallback line inside .globe-host, which is the same
+   kind of dark window and has the same problem. */
+.cam-placeholder {
+  margin: 0;
+  padding: 12px;
+  color: var(--on-void-ink, #a8b8c0);
   font-size: 11px;
   letter-spacing: .1em;
   text-align: center;
-  padding: 12px;
 }
 
+/* Small, and kept small: it is a label on a picture, not a readout. The scrim
+   is dark rather than page-coloured so the badge survives a floodlit wall or a
+   headlight passing under it without becoming a chip of white chrome stamped
+   into the image. */
 .cam-badge {
   position: absolute;
   top: 6px;
@@ -43,15 +91,25 @@
   letter-spacing: .12em;
   padding: 2px 7px;
   border-radius: 3px;
-  background: rgba(8, 11, 16, .8);
-  border: 1px solid var(--line);
-  color: var(--muted);
+  background: rgba(6, 10, 14, .72);
+  border: 1px solid rgba(168, 184, 192, .28);
+  color: var(--on-void-ink);
   pointer-events: none;
 }
-.cam-badge.live     { color: var(--ok);   border-color: rgba(61,220,132,.4); }
-.cam-badge.fallback { color: var(--warn); border-color: rgba(255,176,32,.4); }
-.cam-badge.down     { color: var(--bad);  border-color: rgba(255,77,94,.4); }
+/* live — a picture off the camera we asked for.
+   fallback — degraded: still a picture, but off the sub stream or a snapshot.
+   down — a fault; nothing is coming.
+   The badge also carries the word, so the hue never has to work alone. */
+.cam-badge.live     { color: var(--on-void-ok);   border-color: rgba(61, 220, 132, .45); }
+.cam-badge.fallback { color: var(--on-void-warn); border-color: rgba(255, 176, 32, .45); }
+.cam-badge.down     { color: var(--on-void-bad);  border-color: rgba(255, 95, 110, .5); }
 
-/* Double-click a tile to fill the screen with it. */
-.cam-slot:fullscreen { background: #000; }
+/* Double-click the tile to fill the screen with it. There is no light chrome
+   left in view, so the bezel and its elevation come off with it. */
+.cam-slot:fullscreen {
+  background: #000;
+  border-color: #000;
+  border-radius: 0;
+  box-shadow: none;
+}
 .cam-slot:fullscreen video { object-fit: contain; }

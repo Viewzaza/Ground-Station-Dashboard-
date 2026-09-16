@@ -8,7 +8,7 @@ the same range rate rather than two independently propagated ones.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..services.transmitters import doppler_shift_hz
 
@@ -60,3 +60,54 @@ async def radio(request: Request, norad: int | None = None) -> dict:
         "count": len(items),
         "transmitters": items,
     }
+
+
+@router.get("/radio/waterfall")
+async def waterfall_meta(request: Request, norad: int | None = None) -> dict:
+    """Which observation the waterfall image currently shows."""
+    store = getattr(request.app.state, "waterfall", None)
+    if store is None:
+        raise HTTPException(503, "waterfall store not running")
+    norad = norad or request.app.state.settings.default_norad
+
+    meta = await store.refresh(norad)
+    if meta is None:
+        return {"norad": norad, "available": False}
+    return {
+        "norad": norad,
+        "available": store.png(norad) is not None,
+        "image_url": f"/api/radio/waterfall.png?norad={norad}",
+        **meta,
+    }
+
+
+@router.get("/radio/waterfall.png")
+async def waterfall_png(request: Request, norad: int | None = None) -> Response:
+    """The cropped, contrast-lifted signal region as a PNG.
+
+    Proxied rather than linked. The source lives on a Wasabi S3 bucket, so a
+    direct link would make every wall display fetch 1.6 MB of matplotlib
+    furniture across the internet to show a 760x150 strip — and the cropping
+    has to happen somewhere with an image library anyway.
+    """
+    store = getattr(request.app.state, "waterfall", None)
+    if store is None:
+        raise HTTPException(503, "waterfall store not running")
+    norad = norad or request.app.state.settings.default_norad
+
+    await store.refresh(norad)
+    png = store.png(norad)
+    if png is None:
+        raise HTTPException(404, f"no waterfall available for {norad}")
+
+    meta = store.meta(norad) or {}
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            # Keyed to the observation, so a new pass busts it and a wall
+            # display that reloads every minute does not refetch 100 KB.
+            "Cache-Control": "public, max-age=120",
+            "X-Observation-Id": str(meta.get("id", "")),
+        },
+    )

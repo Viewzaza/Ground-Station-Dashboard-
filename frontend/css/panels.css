@@ -4,6 +4,7 @@
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: var(--shadow);
   padding: 9px 10px 10px;
   display: flex;
   flex-direction: column;
@@ -24,7 +25,8 @@
 }
 
 .fill { flex: 1 1 auto; width: 100%; min-height: 0; display: block; }
-.globe-host { position: relative; background: #05080d; border-radius: 4px; overflow: hidden; }
+/* An instrument window, not a card: it keeps the dark ground. */
+.globe-host { position: relative; background: var(--void); border-radius: 4px; overflow: hidden; }
 
 /* ---------- satellite selector ---------- */
 .satselect { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
@@ -42,10 +44,16 @@
   border-bottom: 1px solid var(--line-soft);
 }
 .sat-list li:last-child { border-bottom: 0; }
-.sat-list li:hover { background: #141d28; }
-.sat-list li.selected { background: #0e3b46; color: #9fe9f8; }
+.sat-list li:hover { background: var(--sunk); }
+/* Selection is a tinted well plus a track-coloured edge marker. The marker is
+   an inset shadow, not a border, so the row's text does not shift by 2px when
+   the selection moves. */
+.sat-list li.selected {
+  background: rgba(0, 134, 173, .10); color: var(--track);
+  box-shadow: inset 2px 0 0 var(--track);
+}
 .sat-list li.pinned .sat-name::before { content: "★ "; color: var(--warn); }
-.sat-list .sat-norad { margin-left: auto; color: var(--dim); font-size: 11px; }
+.sat-list .sat-norad { margin-left: auto; color: var(--ink-3); font-size: 11px; }
 .sat-list .sat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------- next pass ---------- */
@@ -53,7 +61,7 @@
 .pass-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
 .pass-row span { color: var(--muted); }
 .pass-row b { font-variant-numeric: tabular-nums; font-weight: 600; }
-.pass-bar { height: 4px; background: #131c26; border-radius: 2px; overflow: hidden; }
+.pass-bar { height: 4px; background: var(--sunk); border-radius: 2px; overflow: hidden; }
 .pass-bar i { display: block; height: 100%; width: 0; background: var(--accent); }
 .pass-el { color: var(--accent); }
 .pass-el.low { color: var(--warn); }
@@ -68,12 +76,14 @@
 .rot-control { margin-top: 8px; display: flex; gap: 6px; align-items: center; flex: none; }
 
 .btn {
-  background: #18212c; color: var(--text); border: 1px solid var(--line);
+  background: var(--chrome-2); color: var(--text); border: 1px solid var(--line);
   padding: 5px 11px; border-radius: 4px; font: inherit; cursor: pointer;
 }
 .btn:hover:not(:disabled) { border-color: var(--dim); }
 .btn:disabled { opacity: .4; cursor: default; }
-.btn-danger { background: #4a1520; border-color: #7a2230; color: #ffc2c8; }
+/* Filled, not tinted: on paper a destructive control earns the ink. */
+.btn-danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+.btn-danger:hover:not(:disabled) { border-color: var(--ink); }
 
 /* ---------- generic lists / tables ---------- */
 .rows { display: flex; flex-direction: column; gap: 3px; overflow-y: auto; min-height: 0; }
@@ -86,8 +96,8 @@
 .row .tag { margin-left: auto; font-size: 10px; letter-spacing: .08em; }
 .tag.good { color: var(--ok); }
 .tag.bad { color: var(--bad); }
-.tag.unknown { color: var(--dim); }
-.row.highlight { outline: 1px solid rgba(55,210,240,.4); }
+.tag.unknown { color: var(--ink-3); }
+.row.highlight { outline: 1px solid var(--track); }
 
 /* Azimuth wound past north: real information about the cable, not noise. */
 .rot-readout b.wound { color: var(--warn); }
@@ -101,12 +111,16 @@
 .ctl { display: flex; flex-direction: column; gap: 4px; width: 100%; }
 
 .ctl-off { display: flex; flex-direction: column; gap: 2px; }
-.ctl-hint { font-size: 10px; color: var(--dim); }
+.ctl-hint { font-size: 10px; color: var(--ink-3); }
 
 .ctl-gates { display: flex; flex-wrap: wrap; gap: 2px 9px; font-size: 10px; align-items: baseline; }
 .gate { letter-spacing: .02em; cursor: help; white-space: nowrap; }
+/* The markup carries the state twice — a filled ● for open, a hollow ○ for
+   shut — so colour only has to be legible, not do the work alone. --dim is a
+   disabled grey (3.5:1 on white) and was unreadable at 10px; --ink-3 is 6.4:1
+   and still reads as "not yet" beside the green. */
 .gate-ok { color: var(--ok); }
-.gate-shut { color: var(--dim); }
+.gate-shut { color: var(--ink-3); }
 
 .ctl-row { display: flex; gap: 4px; align-items: center; }
 .ctl-row label { font-size: 10px; color: var(--muted); display: flex; gap: 3px; align-items: center; }
@@ -116,17 +130,46 @@
   font: inherit; font-size: 11px; font-variant-numeric: tabular-nums;
 }
 
+/* Three visual registers in this row, and they must not blur into each other
+   on paper:
+     plain   — flat grey chrome, no ring.
+     armed / active — tinted field inside a doubled ring in the state's hue
+       (border + inset shadow read as 2px without moving the label). The label
+       itself stays --ink: --warn and --ok as 10px text over their own tint sit
+       near 4:1, which is not enough for a control that says what the rotator
+       is doing. Hue lives in the ring, legibility in the text.
+     STOP    — the only solid fill, the only inverted label, the only lifted
+       control on the page.
+   Armed and active are also on different buttons (RELEASE vs TRACK), so the
+   amber/green pair never has to be told apart in isolation. */
 .ctl-btn {
-  background: #18212c; color: var(--text); border: 1px solid var(--line);
+  background: var(--chrome-2); color: var(--text); border: 1px solid var(--line);
   padding: 3px 6px; border-radius: 4px; font: inherit; font-size: 10px;
   letter-spacing: .05em; cursor: pointer; flex: 1; white-space: nowrap;
 }
 .ctl-btn:hover:not(:disabled) { border-color: var(--dim); }
-.ctl-btn:disabled { opacity: .35; cursor: default; }
-.ctl-btn.armed { background: #3a2a08; border-color: var(--warn); color: var(--warn); }
-.ctl-btn.active { background: #06301f; border-color: var(--ok); color: var(--ok); }
+/* On white, .35 faded a blocked GO/PARK almost off the card — an operator has
+   to see that the control exists before the gates can explain why it is shut. */
+.ctl-btn:disabled { opacity: .5; cursor: default; }
+.ctl-btn.armed {
+  background: rgba(180, 103, 15, .12); border-color: var(--warn); color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--warn);
+}
+.ctl-btn.active {
+  background: rgba(15, 122, 79, .12); border-color: var(--ok); color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ok);
+}
 /* STOP stays enabled whatever the gates say, so it is styled to be findable. */
-.ctl-btn.stop { background: #4a1520; border-color: #7a2230; color: #ffc2c8; }
+.ctl-btn.stop {
+  background: var(--bad); border-color: var(--bad); color: #fff;
+  box-shadow: var(--shadow);
+}
+/* The plain hover would otherwise repaint a state border grey — it is more
+   specific than the state rules — which is exactly the wrong moment to lose
+   the colour. Each state keeps its own ring under the cursor. */
+.ctl-btn.armed:hover:not(:disabled)  { border-color: var(--warn); }
+.ctl-btn.active:hover:not(:disabled) { border-color: var(--ok); }
+.ctl-btn.stop:hover:not(:disabled)   { border-color: var(--ink); }
 
 .ctl-lease { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
              margin-left: auto; white-space: nowrap; }
@@ -158,12 +201,17 @@
 .rx-dead { opacity: .5; }
 
 .rx-top { display: flex; align-items: baseline; gap: 8px; }
+/* On black, --track glowed and an idle frequency in --text receded. On white
+   it is the other way round: near-black is the loudest thing on the card, so
+   an unturned frequency in --text out-shouted the tuned one. Idle rows step
+   back to --ink-2, and the live number takes --contact, the palette's
+   "happening now" hue — the one saturated value in the panel. */
 .rx-freq {
   font-size: 19px; font-variant-numeric: tabular-nums; letter-spacing: .01em;
-  color: var(--text);
+  color: var(--ink-2);
 }
-.rx-freq.rx-live { color: var(--accent); }
-.rx-freq i { font-size: 10px; font-style: normal; color: var(--dim); margin-left: 4px; }
+.rx-freq.rx-live { color: var(--contact); }
+.rx-freq i { font-size: 10px; font-style: normal; color: var(--ink-3); margin-left: 4px; }
 .rx-shift {
   font-size: 11px; font-variant-numeric: tabular-nums; margin-left: auto;
   white-space: nowrap;
@@ -178,25 +226,29 @@
   font-size: 10px; color: var(--muted); margin-top: 2px;
 }
 .rx-mode { color: var(--accent-2); letter-spacing: .06em; }
-.rx-type { color: var(--dim); }
+.rx-type { color: var(--ink-3); }
 .rx-tag {
   font-size: 9px; letter-spacing: .1em; padding: 1px 5px; border-radius: 2px;
-  border: 1px solid rgba(55,210,240,.35); color: var(--accent);
+  border: 1px solid rgba(0, 134, 173, .45); color: var(--accent);
 }
-.rx-tag.dead { border-color: rgba(255,77,94,.35); color: var(--bad); }
+.rx-tag.dead { border-color: rgba(196, 42, 110, .45); color: var(--bad); }
 
 .rx-desc {
-  font-size: 10px; color: var(--dim); margin-top: 3px;
+  font-size: 10px; color: var(--ink-3); margin-top: 3px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.rx-nominal { font-size: 9px; color: var(--dim); margin-top: 2px; }
+.rx-nominal { font-size: 9px; color: var(--ink-3); margin-top: 2px; }
 
 /* ── SatNOGS activity ─────────────────────────────────────────────────── */
 .sn-station { display: flex; gap: 6px; align-items: center; font-size: 11px; flex-wrap: wrap; }
-.sn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex: none; }
-.sn-dot.on { background: var(--ok); }
-.sn-dot.off { background: var(--dim); }
-.sn-count { margin-left: auto; color: var(--dim); font-size: 10px; }
+/* A 7px dot cannot carry a state in hue alone at wall-display distance, and a
+   grey dot on white is nearly nothing. Connected is filled; off is a hollow
+   ring — filled vs empty survives both distance and colour vision. */
+.sn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--panel);
+          box-shadow: inset 0 0 0 1.5px var(--ink-4); flex: none; }
+.sn-dot.on { background: var(--ok); box-shadow: inset 0 0 0 1.5px var(--ok); }
+.sn-dot.off { background: var(--panel); box-shadow: inset 0 0 0 1.5px var(--ink-4); }
+.sn-count { margin-left: auto; color: var(--ink-3); font-size: 10px; }
 
 .sn-next { font-size: 11px; color: var(--muted); margin: 4px 0 6px; }
 .sn-next b { color: var(--text); }
@@ -214,5 +266,127 @@
 .sn-status { font-size: 10px; letter-spacing: .06em; flex: none; }
 .sn-status.s-good { color: var(--ok); }
 .sn-status.s-bad, .sn-status.s-failed { color: var(--bad); }
-.sn-status.s-future { color: var(--dim); }
+.sn-status.s-future { color: var(--ink-3); }
 .sn-data { font-size: 10px; color: var(--accent); flex: none; min-width: 14px; }
+
+/* ── waterfall ────────────────────────────────────────────────────────────
+   The other instrument window, after the globe and the camera: a near-black
+   spectrogram cropped out of the last SatNOGS observation. Same rule as those
+   two — the picture keeps --void and the white card is its bezel — and the
+   same thing to avoid: a --rule hairline around a dark image is a bright seam,
+   and a bright seam makes a spectrogram look like an <img> that failed to
+   load. The steps inward run card → shadow → dark edge → void, all downward in
+   lightness, so the frame reads as recessed rather than pasted on. */
+
+/* The panel is a flex column; this div is what gives the frame a height to
+   fill. The empty state is a plain <p class="muted">, which sits at the top of
+   the column and is already styled. */
+#waterfall-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wf-frame {
+  /* Locals, as on .cam-slot: an edge that is a dark step rather than a line,
+     and status inks brightened back up for near-black, because the page's
+     --ok/--bad were darkened for white paper and are unreadable here. */
+  --void-edge:    #1e2a32;
+  --on-void-ink:  #a8b8c0;
+  --on-void-ok:   #3ddc84;
+  --on-void-bad:  #ff5f6e;
+  --on-void-cool: #7fc4dd;
+
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
+  min-height: 64px;
+  overflow: hidden;
+  background: var(--void);
+  border: 1px solid var(--void-edge);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  text-decoration: none;
+  color: var(--on-void-ink);
+}
+/* It opens the observation on SatNOGS in a new tab, so it needs to look like a
+   target. The edge picks up --track, the palette's link hue, doubled with an
+   inset ring so it reads as 2px without the frame moving — the same trick the
+   rotator buttons use above. Nothing lights up, nothing scales. */
+.wf-frame:hover,
+.wf-frame:focus-visible {
+  border-color: var(--track);
+  box-shadow: var(--shadow), inset 0 0 0 1px var(--track);
+}
+.wf-frame:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
+
+/* Absolutely positioned rather than in flow: the image then cannot contribute
+   to the frame's size, so it can never push the panel open or spill out of it,
+   whatever the PNG's dimensions turn out to be.
+
+   object-fit: fill, not contain or cover. The captions below claim the full
+   time span and the full ±14 kHz, so cropping would make them lie, and
+   letterboxing would float the picture away from the captions pinned to its
+   edges; a waterfall's two axes are arbitrary scales anyway, so stretching one
+   costs nothing a reader can misread.
+
+   image-rendering stays auto on purpose. The frame is usually a little wider
+   and a little shorter than the 760x150 source, and a signal burst can be one
+   or two pixels across — smooth resampling keeps a thin burst as a faint line,
+   where nearest-neighbour would drop whole rows of it on the way down. */
+.wf-frame img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  display: block;
+  object-fit: fill;
+  image-rendering: auto;
+  background: var(--void);
+}
+
+/* Axis captions, stacked at the left edge rather than rotated: the frame is
+   only ~100px tall, and a rotated label would cost more room than it explains.
+   The halo is legibility, not decoration — a bright cyan burst can pass
+   directly under either caption. */
+.wf-axis {
+  position: absolute;
+  left: 6px;
+  font-size: 9px;
+  letter-spacing: .08em;
+  color: var(--on-void-ink);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .95), 0 0 4px rgba(0, 0, 0, .85);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.wf-axis-y { top: 5px; }
+.wf-axis-x { bottom: 5px; }
+
+/* The SatNOGS vetting status, top-right and out of the way of both captions.
+   Same construction as .cam-badge on the camera tile, because it is the same
+   job on the same kind of surface: small, dark scrim, bright ink. */
+.wf-badge {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  font-size: 9px;
+  letter-spacing: .1em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(6, 10, 14, .72);
+  border: 1px solid rgba(168, 184, 192, .28);
+  color: var(--on-void-ink);
+  pointer-events: none;
+}
+/* good — vetted, there is signal. bad/failed — vetted bad, or the observation
+   itself failed. unknown — not vetted yet, so it stays neutral and does not
+   claim anything. future — scheduled, not flown; rare here, since a pass that
+   has not happened has no waterfall to show. */
+.wf-badge.s-good    { color: var(--on-void-ok);   border-color: rgba(61, 220, 132, .45); }
+.wf-badge.s-bad,
+.wf-badge.s-failed  { color: var(--on-void-bad);  border-color: rgba(255, 95, 110, .5); }
+.wf-badge.s-unknown { color: var(--on-void-ink);  border-color: rgba(168, 184, 192, .3); }
+.wf-badge.s-future  { color: var(--on-void-cool); border-color: rgba(127, 196, 221, .4); }

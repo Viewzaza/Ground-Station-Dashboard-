@@ -39,21 +39,48 @@ const ORBIT_MINUTES = 100;          // a little over one LEO revolution
 const ORBIT_STEP_S = 20;
 const PATH_REBUILD_MS = 60_000;
 
-const COLOR = {
-  // Lit by a directional light, every one of these is multiplied down before it
-  // reaches the screen, so a palette picked to look right as flat swatches came
-  // out as a uniformly black disc. These are chosen for how they render *after*
-  // lighting, which means they look too bright in isolation.
-  ocean: '#0e1b28',
-  land: '#1d3448',
-  coast: '#4b86a8',
-  graticule: '#1a2836',
-  track: '#37d2f0',
-  orbit: '#8b7cf6',
-  sat: '#3ddc84',
-  station: '#ffb020',
-  footprint: 'rgba(55,210,240,0.30)',
+/* Colours come from css/tokens.css, so the globe, the 2D map and the polar plot
+   cannot drift apart. The literals here are fallbacks for the one case the
+   stylesheet cannot cover — tokens.css missing — and each names the token it
+   mirrors.
+
+   The page around this panel is light. The globe is not, and must not be: it is
+   an instrument window on `--void`, and a starfield-and-terminator view on a
+   white card reads as a broken image. The `--globe-*` surface colours are lit by
+   a directional light, so every one of them is multiplied down before it reaches
+   the screen; they are chosen for how they render *after* lighting, which is why
+   they look too bright as flat swatches. Do not lighten them to match the page.
+
+   The overlays are the page's three data hues. They are drawn with Basic
+   materials, which are unlit, so they land on screen at exactly these values. */
+const FALLBACK = {
+  ocean:     '#0b2033',   // --globe-ocean
+  land:      '#2c4437',   // --globe-land
+  coast:     '#496b56',   // --globe-coast
+  graticule: '#27455a',   // --globe-grat
+  track:     '#0086ad',   // --track     ground track, orbit path
+  contact:   '#b4670f',   // --contact   happening now: the satellite
+  observer:  '#c42a6e',   // --observer  us, the ground station
 };
+
+// Resolved in mountGlobe rather than here: this module is imported dynamically,
+// and reading computed styles at module scope would tie the palette to whenever
+// that import happens to land.
+let COLOR = { ...FALLBACK };
+
+function readPalette() {
+  const css = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+  return {
+    ocean:     v('--globe-ocean', FALLBACK.ocean),
+    land:      v('--globe-land', FALLBACK.land),
+    coast:     v('--globe-coast', FALLBACK.coast),
+    graticule: v('--globe-grat', FALLBACK.graticule),
+    track:     v('--track', FALLBACK.track),
+    contact:   v('--contact', FALLBACK.contact),
+    observer:  v('--observer', FALLBACK.observer),
+  };
+}
 
 let THREE = null;
 let renderer = null;
@@ -184,6 +211,8 @@ export async function mountGlobe(hostId = 'globe3d') {
   host = document.getElementById(hostId);
   if (!host) return null;
 
+  COLOR = readPalette();
+
   try {
     THREE = await import(THREE_URL);
   } catch (err) {
@@ -239,26 +268,41 @@ export async function mountGlobe(hostId = 'globe3d') {
   scene.add(sun);
   scene.add(new THREE.AmbientLight(0xffffff, 0.18));
 
+  // The satellite and everything attached to it are --contact: this is the
+  // "happening now" hue, the same one the readouts and in-view badges use.
   satMarker = new THREE.Mesh(
     new THREE.SphereGeometry(0.018, 16, 12),
-    new THREE.MeshBasicMaterial({ color: COLOR.sat }),
+    new THREE.MeshBasicMaterial({ color: COLOR.contact }),
   );
   satHalo = new THREE.Mesh(
     new THREE.RingGeometry(0.030, 0.038, 32),
     new THREE.MeshBasicMaterial({
-      color: COLOR.sat, transparent: true, opacity: 0.6,
+      color: COLOR.contact, transparent: true, opacity: 0.6,
       side: THREE.DoubleSide,
     }),
   );
   satMarker.visible = satHalo.visible = false;
   scene.add(satMarker, satHalo);
 
+  // The footprint travels with the satellite and is only ever "now", so it
+  // belongs to --contact as well — it is the halo at ground scale. Faint,
+  // because it is a large shape and the marker inside it is the reading.
   footprint = new THREE.Line(
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({
-      color: COLOR.track, transparent: true, opacity: 0.55,
+      color: COLOR.contact, transparent: true, opacity: 0.45,
     }),
   );
+
+  /* Ground track and orbit path share --track, because they are one thing:
+     where the satellite runs relative to our ground. They are told apart by
+     weight rather than hue. The ground track is the emphatic one — it is what
+     this panel is for, and it is opaque — while the orbit path is context and
+     sits at a third of that.
+
+     Opacity has to carry the whole distinction: WebGL ignores
+     LineBasicMaterial.linewidth on every desktop driver, so both lines render
+     one pixel wide no matter what width is asked for. */
   trackLine = new THREE.Line(
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({ color: COLOR.track }),
@@ -266,13 +310,16 @@ export async function mountGlobe(hostId = 'globe3d') {
   orbitLine = new THREE.Line(
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({
-      color: COLOR.orbit, transparent: true, opacity: 0.8,
+      color: COLOR.track, transparent: true, opacity: 0.32,
     }),
   );
+
+  // Drawn only while the satellite is above the horizon, which makes it a
+  // contact line, not a path.
   sightLine = new THREE.Line(
     new THREE.BufferGeometry(),
     new THREE.LineDashedMaterial({
-      color: COLOR.sat, dashSize: 0.03, gapSize: 0.02,
+      color: COLOR.contact, dashSize: 0.03, gapSize: 0.02,
       transparent: true, opacity: 0.85,
     }),
   );
@@ -292,7 +339,7 @@ function addStation() {
   if (!site) return;
   const marker = new THREE.Mesh(
     new THREE.SphereGeometry(0.012, 12, 10),
-    new THREE.MeshBasicMaterial({ color: COLOR.station }),
+    new THREE.MeshBasicMaterial({ color: COLOR.observer }),
   );
   marker.position.copy(toVec3(site.lat, site.lon, 0));
   scene.add(marker);

@@ -20,6 +20,7 @@ from .scheduler import Scheduler
 from .services.predictor import Predictor
 from .services.tle_store import TleStore
 from .services.transmitters import TransmitterStore
+from .services.waterfall import WaterfallStore
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.tles = tles
     app.state.transmitters = transmitters
+    app.state.waterfall = WaterfallStore(settings)
     app.state.predictor = predictor
     app.state.scheduler = scheduler
     app.state.rotator = scheduler.rotator

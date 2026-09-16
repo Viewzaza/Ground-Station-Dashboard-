@@ -5,3 +5,4 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 skyfield==1.49
 sgp4==2.23
+Pillow==12.3.0

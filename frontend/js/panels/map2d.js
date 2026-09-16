@@ -16,6 +16,13 @@ import {
 } from '../lib/geo.js';
 import { store } from '../core/store.js';
 
+/* Two colours this panel needs are not carried by palette(): the paper the map
+   is drawn on, and the night wash. Read them the way palette() does — from CSS,
+   with the light-theme value as the fallback — so tokens.css stays the single
+   source of truth. */
+const cssVar = (name, fallback) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+
 let land = null;
 let landPending = null;
 
@@ -42,6 +49,10 @@ export class Map2D {
   constructor(canvas) {
     this.canvas = canvas;
     this.pal = palette();
+    // Read once rather than per frame: getComputedStyle inside draw() would cost
+    // a reflow every tick. `--night` is translucent already, so it is used as-is.
+    this.paper = cssVar('--panel', '#ffffff');
+    this.night = cssVar('--night', 'rgba(16, 34, 44, .18)');
     loadLand().then(() => this.draw());
   }
 
@@ -89,10 +100,12 @@ export class Map2D {
 
           if (!wraps) {
             ctx.closePath();
-            ctx.fillStyle = '#111c27';
+            // Paper land over the sunk sea painted in draw(). The two neutrals
+            // are close by design, so the coastline carries the separation.
+            ctx.fillStyle = this.paper;
             ctx.fill();
           }
-          ctx.strokeStyle = '#24384b';
+          ctx.strokeStyle = this.pal.dim;
           ctx.stroke();
         }
       }
@@ -144,16 +157,19 @@ export class Map2D {
     ctx.lineTo(this.w, nightIsSouth ? this.h : 0);
     ctx.lineTo(0, nightIsSouth ? this.h : 0);
     ctx.closePath();
-    ctx.fillStyle = 'rgba(2, 4, 9, 0.62)';
+    ctx.fillStyle = this.night;
     ctx.fill();
 
     // Near an equinox the shading alone is almost invisible, because the
     // terminator runs nearly pole to pole. Draw the boundary itself.
     ctx.beginPath();
     curve.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-    ctx.strokeStyle = 'rgba(255, 176, 32, 0.30)';
+    ctx.save();
+    ctx.strokeStyle = this.pal.muted;   // basemap, not data: neutral ink
+    ctx.globalAlpha = 0.45;
     ctx.lineWidth = 1;
     ctx.stroke();
+    ctx.restore();
   }
 
   _drawFootprint(ctx, pos) {
@@ -161,7 +177,9 @@ export class Map2D {
     if (!ring.length) return;
 
     ctx.save();
-    ctx.strokeStyle = 'rgba(55, 210, 240, 0.55)';
+    // Where the satellite can be heard *now*, so it takes the contact hue and
+    // is told apart from the marker inside it by weight rather than colour.
+    ctx.strokeStyle = this.pal.contact;
     ctx.lineWidth = 1.2;
 
     const pole = containsPole(pos.lat, pos.alt_km);
@@ -173,8 +191,10 @@ export class Map2D {
           const x = this._x(lon), y = this._y(lat);
           if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         });
-        ctx.fillStyle = 'rgba(55, 210, 240, 0.08)';
+        ctx.fillStyle = this.pal.contact;
+        ctx.globalAlpha = 0.10;
         ctx.fill();
+        ctx.globalAlpha = 0.75;
         ctx.stroke();
       }
     } else {
@@ -189,8 +209,10 @@ export class Map2D {
       ctx.lineTo(this.w, pole > 0 ? 0 : this.h);
       ctx.lineTo(0, pole > 0 ? 0 : this.h);
       ctx.closePath();
-      ctx.fillStyle = 'rgba(55, 210, 240, 0.08)';
+      ctx.fillStyle = this.pal.contact;
+      ctx.globalAlpha = 0.10;
       ctx.fill();
+      ctx.globalAlpha = 0.75;
       ctx.stroke();
     }
     ctx.restore();
@@ -198,7 +220,7 @@ export class Map2D {
 
   _drawTrack(ctx, track) {
     if (!track || track.length < 2) return;
-    ctx.strokeStyle = this.pal.accent2;
+    ctx.strokeStyle = this.pal.track;
     ctx.lineWidth = 1.6;
     ctx.setLineDash([]);
     this._path(ctx, track);
@@ -207,7 +229,7 @@ export class Map2D {
   _drawStation(ctx, station) {
     const x = this._x(station.lon);
     const y = this._y(station.lat);
-    ctx.strokeStyle = this.pal.ok;
+    ctx.strokeStyle = this.pal.observer;
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(x - 5, y); ctx.lineTo(x + 5, y);
@@ -215,7 +237,7 @@ export class Map2D {
     ctx.stroke();
     ctx.beginPath();
     ctx.arc(x, y, 3, 0, Math.PI * 2);
-    ctx.fillStyle = this.pal.ok;
+    ctx.fillStyle = this.pal.observer;
     ctx.fill();
   }
 
@@ -225,7 +247,8 @@ export class Map2D {
 
     if (pos.el > 0 && station) {
       ctx.save();
-      ctx.strokeStyle = 'rgba(61, 220, 132, 0.5)';
+      ctx.strokeStyle = this.pal.contact;
+      ctx.globalAlpha = 0.65;
       ctx.setLineDash([3, 3]);
       ctx.lineWidth = 1;
       this._path(ctx, [[station.lat, station.lon], [pos.lat, pos.lon]]);
@@ -234,9 +257,11 @@ export class Map2D {
 
     ctx.beginPath();
     ctx.arc(x, y, 4.5, 0, Math.PI * 2);
-    ctx.fillStyle = pos.el > 0 ? this.pal.ok : this.pal.accent;
+    ctx.fillStyle = pos.el > 0 ? this.pal.contact : this.pal.accent;
     ctx.fill();
-    ctx.strokeStyle = '#05080d';
+    // A paper halo, so the marker punches out of the track, the footprint and
+    // the night wash alike. It used to be near-black, for a near-black map.
+    ctx.strokeStyle = this.paper;
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
@@ -254,7 +279,9 @@ export class Map2D {
     this.w = w; this.h = h;
     ctx.clearRect(0, 0, w, h);
 
-    ctx.fillStyle = '#070c14';
+    // This canvas sits on a white card, not in a dark instrument window like the
+    // globe: the sea is an inset well and the land drawn over it is paper.
+    ctx.fillStyle = this.pal.panel2;
     ctx.fillRect(0, 0, w, h);
 
     this._drawLand(ctx);

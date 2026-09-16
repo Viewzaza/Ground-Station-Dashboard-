@@ -22,17 +22,27 @@ import { bus } from '../core/bus.js';
 
 const $ = (id) => document.getElementById(id);
 const REFRESH_MS = 2000;
+// The waterfall only changes when a pass finishes and SatNOGS has processed it,
+// which is minutes at best. Polling it at the Doppler rate would re-crop a
+// 1.6 MB PNG for nothing.
+const WATERFALL_MS = 120_000;
 
 let timer = null;
+let waterfallTimer = null;
 
 export function mountRadio() {
   bus.on('radio', render);
+  bus.on('waterfall', renderWaterfall);
   // The tracked satellite can change from the selector; the panel follows it.
-  bus.on('satellite', () => refresh());
+  bus.on('satellite', () => { refresh(); refreshWaterfall(); });
   render();
   refresh();
+  refreshWaterfall();
+
   clearInterval(timer);
   timer = setInterval(refresh, REFRESH_MS);
+  clearInterval(waterfallTimer);
+  waterfallTimer = setInterval(refreshWaterfall, WATERFALL_MS);
 }
 
 async function refresh() {
@@ -41,6 +51,50 @@ async function refresh() {
   } catch (err) {
     console.warn('[radio]', err);
   }
+}
+
+async function refreshWaterfall() {
+  try {
+    set('waterfall', await api.waterfall(store.satellite?.norad ?? null));
+  } catch (err) {
+    console.warn('[waterfall]', err);
+  }
+}
+
+function renderWaterfall() {
+  const host = $('waterfall-panel');
+  const hint = $('waterfall-hint');
+  if (!host) return;
+
+  const wf = store.waterfall;
+  if (!wf || !wf.available) {
+    host.innerHTML = '<p class="muted">no waterfall recorded yet</p>';
+    if (hint) hint.textContent = '—';
+    return;
+  }
+
+  const when = wf.start ? new Date(wf.start) : null;
+  if (hint) {
+    const stamp = when
+      ? `${when.toISOString().slice(5, 16).replace('T', ' ')}Z`
+      : `obs ${wf.id}`;
+    // Decoded frames are the only unambiguous "we heard it": a waterfall can
+    // look busy with interference, and vetting often never happens.
+    hint.textContent = wf.frames
+      ? `${stamp} · ${wf.frames} frame${wf.frames === 1 ? '' : 's'}`
+      : stamp;
+  }
+
+  // Cache-bust on the observation id, not on Date.now(): the backend sets a
+  // 2-minute cache header, and busting every poll would defeat it.
+  host.innerHTML = `
+    <a class="wf-frame" href="${wf.url}" target="_blank" rel="noopener noreferrer"
+       title="observation ${wf.id} — open on SatNOGS">
+      <img src="${wf.image_url}&v=${wf.id}" alt="">
+      <span class="wf-axis wf-axis-x">time →</span>
+      <span class="wf-axis wf-axis-y">±14 kHz</span>
+      <span class="wf-badge s-${esc(wf.status || '')}">${esc(wf.status || '')}</span>
+    </a>`;
 }
 
 function render() {

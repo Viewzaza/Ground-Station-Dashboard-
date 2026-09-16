@@ -3,35 +3,43 @@
 An operator display for the KNACKSAT-2 ground control station run by **SatNOGS
 station 5024 — INSTED-Ground Station (UHF)**, grid OK03gt, 60 m ASL.
 
-Two camera feeds sit in the centre of the screen, with live satellite tracking
-to their left, pass and antenna information to their right, and KNACKSAT-2
-telemetry along the bottom. It is built for a wall-mounted display that is left
-running, and reflows down to a phone.
+The camera sits in the centre of the screen, with live satellite tracking to its
+left, pass and antenna information to its right, radio and the last pass's
+signal under them, and KNACKSAT-2 telemetry along the bottom. It is built for a
+wall-mounted display that is left running, and reflows down to a phone.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ KNACKSAT-2 · 67683 │ UTC / ICT │ NEXT AOS -00:14:22 │ ● API ● CAM ● ROT ● TLE │
+│ KNACKSAT-2 · 67683 │ UTC/ICT │ NEXT AOS -00:14:22 │ ● API ● CAM ● ROT ● TLE  │
 ├─────────────────┬────────────────────────────────┬───────────────────────────┤
-│  GROUND TRACK   │                                │ SATELLITE (amateur cat.)  │
+│  GROUND TRACK   │                                │ SATELLITE  amateur cat.   │
 │  footprint,     │            CAMERA              │ NEXT PASS  AOS/TCA/LOS    │
-│  terminator     │      (one camera, main)        │ ROTATOR    polar + control │
-├─────────────────┤                                │ SATNOGS    5024 activity  │
+│  terminator     │        one tile, main          │ ROTATOR    polar+control  │
+├─────────────────┤    (dark instrument window)    │ SATNOGS    5024 activity  │
 │  ORBIT (3D)     │                                │                           │
+│  earth-fixed    │                                │                           │
 ├─────────────────┼────────────────────────────────┴───────────────────────────┤
-│ RADIO           │ GRAFANA  [beacon] [batt V] [solar W] [batt °C]   open full ↗│
-│ tuned + doppler │                                                            │
-└─────────────────┴────────────────────────────────────────────────────────────┘
+│ RADIO           │ LAST SIGNAL   waterfall of the most recent 5024 pass       │
+│ tuned + doppler │ time ─────────────────────────────────────────────────▶    │
+├─────────────────┴────────────────────────────────────────────────────────────┤
+│ GRAFANA  [beacon] [batt V] [solar W] [batt °C]                 open full ↗   │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+Light paper chrome, dark instrument windows — see
+[Light panel, dark instruments](#light-panel-dark-instruments).
 
 ## Status
 
 | Area | State |
 |---|---|
 | Layout, health chips, config-driven frontend | done |
-| Camera tiles (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, **verified against the real camera** |
+| Light instrument-panel theme, dark instrument windows | done |
+| Camera tile (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, **verified against the real camera** |
 | 2D ground track, footprint, terminator | done |
 | 3D orbit globe (three.js, offline, no imagery download) | done |
 | Radio panel — transmitters and live Doppler from SatNOGS DB | done |
+| "Last signal" — the previous pass's waterfall, cropped and lifted | done |
 | Satellite selector, pass prediction, next-pass card | done |
 | Rotator read-out (polar plot, predicted arc, cable wrap) | done, **verified against the real rotctld** |
 | Live WebSocket (rotator, pointing error, status, reconnect) | done |
@@ -102,6 +110,62 @@ driven from. The browser runs its own SGP4 (satellite.js) purely for the smooth
 coordinates, Grafana panel ids, camera stream names, feature flags. Deploying to
 a different station is an `.env` edit.
 
+## Light panel, dark instruments
+
+This was a dark console — near-black page, cyan accent. It is now a light
+instrument panel, following the operator's other tool,
+[sattrackslop](https://github.com/colabear101/sattrackslop), so the two read as
+one set of instruments rather than two unrelated pages. `--surface` #f2f4f5 is
+the page, `--panel` #ffffff the cards, `--ink` #0e1a1f the text, `--rule`
+#cbd6db the borders. Every colour is in `frontend/css/tokens.css`; nothing else
+holds a literal.
+
+**The instrument windows stay dark.** `--void` #0b1116 paints the camera tile,
+the 3D globe and the waterfall, and it is deliberately not derived from the rest
+of the palette. Space has no light mode: a night rooftop camera, a black globe
+or a spectrogram rendered on a white card reads as a broken image rather than a
+view. So the chrome is paper and the windows into the sky are not. The Grafana
+iframes are the same case — see below.
+
+**Three data hues, and the same three everywhere** — 2D map, 3D globe, polar
+plot. `--track` #0086ad is the orbit and the ground track, `--contact` #b4670f
+is happening-now (live values, the in-view arc, the satellite itself), and
+`--observer` #c42a6e is us. Three is the number that survives: they stay far
+apart in hue under deuteranopia, and lightness carries a fourth channel where a
+fourth is needed. A wall display is read from across a room, by whoever is in
+it.
+
+**The fonts are system stacks, not Google Fonts, on purpose.** The station may
+sit on an isolated LAN, and a webfont `<link>` fails silently — the wall display
+would simply be in fallback with nothing to say so. Numbers are monospaced and
+tabular so a changing digit does not shift the ones beside it.
+
+## Radio and the last signal
+
+`GET /api/radio` lists the satellite's transmitters from SatNOGS DB with the
+Doppler shift applied, so the large number on the panel is the frequency to tune
+to *now*. The shift is computed on the server, from the same range rate the pass
+schedule and the pointing error come from, rather than a second propagation in
+the browser that would disagree in the third decimal. Selection is band-aware —
+see [transmitters are not
+interchangeable](#things-that-are-the-way-they-are-for-a-reason).
+
+`GET /api/radio/waterfall` says which observation is being shown;
+`GET /api/radio/waterfall.png` is the image. It finds the most recent finished
+observation for this satellite **at station 5024**, downloads the SatNOGS
+waterfall, locates the spectrogram inside the matplotlib figure rather than
+assuming pixel offsets, crops to the middle of the band, lifts the signal out of
+the noise floor and serves a 760x150 strip with time running left to right. The
+panel answers the question the radio panel cannot: not what to tune to next
+time, but what was actually heard last time.
+
+This is the one thing in the backend that needs an image library, so **Pillow**
+is now in `backend/requirements.txt`. The crop runs in a worker thread — it is
+CPU-bound on a megapixel image, and on the event loop it would stall every other
+poller — and the PNG is proxied rather than linked, because the source is a
+1.6 MB S3 object and every wall display would otherwise fetch all of it to show
+a strip.
+
 ## Things that are the way they are for a reason
 
 Each of these cost time to find. Please read before changing them.
@@ -118,10 +182,16 @@ Each of these cost time to find. Please read before changing them.
   agree to within a few seconds. `tests/test_satnogs_oracle.py` asserts this
   against the live API.
 
-- **`satellite__norad_cat_id` does not filter the SatNOGS Network API.** It is
-  silently ignored and you get every satellite. Use `norad_cat_id`. Network API
-  pagination is cursor-based through the `Link: rel="next"` *header* — there is
-  no `?page=`.
+- **`satellite__norad_cat_id` filters SatNOGS DB but not the Network API.** The
+  two services do not share a convention, and both fail in the same direction:
+  an ignored filter returns *every* satellite rather than an error, so it looks
+  like success until you notice the frequencies belong to other spacecraft. DB,
+  which is where transmitters come from, wants `satellite__norad_cat_id`;
+  Network — jobs, observations, and the waterfall's "latest pass" lookup — wants
+  `norad_cat_id`. The waterfall paid for this lesson a second time, and the
+  symptom there is worse, because a strip of someone else's signal still looks
+  like a signal. Network pagination is also cursor-based, through the
+  `Link: rel="next"` *header*; there is no `?page=`.
 
 - **The antimeridian.** A ground track stepping from lon 179 to −179 draws a
   line across the entire map unless the path is split and the crossing latitude

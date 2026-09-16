@@ -10,17 +10,22 @@
   gap: var(--gap);
   padding: var(--gap);
   grid-template-columns: minmax(340px, 4fr) minmax(520px, 5fr) minmax(360px, 3fr);
-  grid-template-rows: var(--hdr-h) 1fr 1fr minmax(160px, var(--graf-h));
+  grid-template-rows:
+    var(--hdr-h) 1fr 1fr minmax(110px, 150px) minmax(140px, var(--graf-h));
   /* One camera instead of two frees the whole middle column, so the tile now
      spans both rows and the map and globe get a full row each rather than
-     sharing one. Radio takes the bottom-left corner: the tuned frequency is a
-     row of numbers, which suits a wide short panel, and it sits directly under
-     the orbit view an operator is reading it against. */
+     sharing one.
+
+     Radio and the waterfall share a row because they are two halves of one
+     question: radio is what to tune to on the next pass, the waterfall is what
+     was actually heard on the last one. The waterfall is a wide short strip —
+     time runs across it — so it takes the two wider columns. */
   grid-template-areas:
     "hdr   hdr   hdr"
     "map   cam   track"
     "globe cam   track"
-    "radio graf  graf";
+    "radio wf    wf"
+    "graf  graf  graf";
 }
 
 .track-col {
@@ -43,20 +48,26 @@
 /* ---------- 4K wall: more Grafana, taller globe ---------- */
 @media (min-width: 2400px) {
   :root { --hdr-h: 74px; --graf-h: 240px; --gap: 12px; }
-  .wall { grid-template-rows: var(--hdr-h) 1fr 1.15fr minmax(200px, var(--graf-h)); }
+  .wall {
+    grid-template-rows:
+      var(--hdr-h) 1fr 1.15fr minmax(140px, 190px) minmax(200px, var(--graf-h));
+  }
 }
 
 /* ---------- laptop: camera goes full width under the header ---------- */
 @media (max-width: 1400px) {
   .wall {
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: var(--hdr-h) minmax(240px, 1.2fr) 1fr 1fr minmax(150px, var(--graf-h));
+    grid-template-rows:
+      var(--hdr-h) minmax(240px, 1.2fr) 1fr 1fr minmax(110px, 150px)
+      minmax(150px, var(--graf-h));
     grid-template-areas:
       "hdr   hdr"
       "cam   cam"
       "map   track"
       "globe track"
-      "radio graf";
+      "radio wf"
+      "graf  graf";
   }
 }
 
@@ -72,6 +83,7 @@
       "cam"
       "track"
       "radio"
+      "wf"
       "map"
       "globe"
       "graf";
@@ -86,20 +98,33 @@
 }
 
 /* ---------- header ---------- */
+/* The header is chrome, not a card: one step darker than the page rather than
+   lighter, ruled off from the wall below it, and lifted by the single shadow
+   this theme owns. --panel-2 used to make it a dark bar; it now resolves to an
+   inset well, which reads as a sunk readout instead of a title bar. */
 .hdr {
   display: flex;
   align-items: center;
   gap: 28px;
   padding: 0 14px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
+  background: var(--chrome);
+  border: 1px solid var(--rule);
   border-radius: var(--radius);
+  box-shadow: var(--shadow);
   overflow: hidden;
 }
 .hdr-id { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .hdr-id h1 { font-size: 16px; letter-spacing: .14em; white-space: nowrap; }
-.hdr-id .norad { color: var(--accent); font-size: 11px; letter-spacing: .1em; }
-.hdr-id .station { color: var(--muted); font-size: 11px; letter-spacing: .08em; white-space: nowrap; }
+/* --track at 11px on chrome is only ~3.4:1. Mixed toward ink it clears AA
+   without leaving the hue, so the NORAD id still reads as track-coloured.
+   The plain token is declared first as the fallback for engines without
+   color-mix(); it is exactly what this line rendered before. */
+.hdr-id .norad {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  font-size: 11px; letter-spacing: .1em;
+}
+.hdr-id .station { color: var(--ink-3); font-size: 11px; letter-spacing: .08em; white-space: nowrap; }
 
 .hdr-clocks { display: flex; gap: 18px; }
 .clock { display: flex; flex-direction: column; line-height: 1.15; }
@@ -111,17 +136,40 @@
 .hdr-aos b { font-size: 20px; font-variant-numeric: tabular-nums; color: var(--accent); }
 .hdr-aos.imminent b { color: var(--warn); }
 .hdr-aos.in-pass b { color: var(--ok); }
-.aos-sub { font-size: 10px; color: var(--dim); }
+/* --dim is the disabled/placeholder ink; at 10px on chrome it is a ghost
+   (~2.9:1), and this line carries the AOS detail, which is not decoration. */
+.aos-sub { font-size: 10px; color: var(--ink-3); }
 
 .hdr-chips { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+/* Chips were dark wells with translucent borders, which only carry on a dark
+   page: on chrome a 35%-alpha border washes out to nothing. Each state is now
+   a pale tint of its own colour with a border solid enough to hold an edge,
+   and the darkened state inks from tokens.css for the label. Where color-mix()
+   is unavailable the chip falls back to a white pill with a solid state border
+   — still legible, still the right three colours. */
 .chip {
   font-size: 10px; letter-spacing: .1em; padding: 3px 8px; border-radius: 3px;
-  border: 1px solid var(--line); color: var(--dim); background: #0a0f16;
+  border: 1px solid var(--rule); color: var(--ink-3); background: var(--panel);
   white-space: nowrap;
 }
-.chip.ok       { color: var(--ok);   border-color: rgba(61,220,132,.35); }
-.chip.degraded { color: var(--warn); border-color: rgba(255,176,32,.35); }
-.chip.down     { color: var(--bad);  border-color: rgba(255,77,94,.35); }
+.chip.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--panel));
+  background: color-mix(in srgb, var(--ok) 10%, var(--panel));
+}
+.chip.degraded {
+  color: var(--warn);
+  border-color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--panel));
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+}
+.chip.down {
+  color: var(--bad);
+  border-color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--panel));
+  background: color-mix(in srgb, var(--bad) 10%, var(--panel));
+}
 
 /* On a phone the header's fixed-width blocks overlap each other. These rules
    must live AFTER the base .hdr rules above: same specificity, so source order
@@ -146,17 +194,36 @@
 /* ---------- grafana strip ---------- */
 .graf {
   display: flex; gap: var(--gap); align-items: stretch;
-  background: var(--panel); border: 1px solid var(--line);
+  background: var(--panel); border: 1px solid var(--rule);
   border-radius: var(--radius); padding: 8px; min-height: 0;
+  box-shadow: var(--shadow);
 }
 .graf-strip {
   display: grid; gap: var(--gap); flex: 1; min-width: 0;
   grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
 }
+/* grafana.js requests these panels with theme=dark, and it is cross-origin, so
+   each iframe is a near-black rectangle we cannot restyle — the only honest
+   thing to do is treat it as an instrument window, like the globe and the
+   camera, and let the white strip be its bezel.
+   --graf-panel is Grafana's OWN dark-theme panel background, not a palette
+   colour, which is why it is a literal here rather than a token: it has to
+   track whatever that instance renders, and it is the colour the ::after mask
+   below must match. (Grafana 8 and later paint #181b1f; if the team's instance
+   is older, or its theme changes, this one value is what to change.) It is
+   kin to --void — near-black, out of the page's ramp — for the same reason.
+   The cell is painted with it too, so a lazy iframe that has not loaded yet
+   is the same colour as one that has, and the edge is a dark step rather than
+   a light hairline: a --rule border here would draw exactly the bright seam
+   between white bezel and black panel that we are trying to avoid. The shadow
+   seats the dark tile on the card instead of letting it butt up against it. */
 .graf-cell {
+  --graf-panel: #181b1f;
+  --graf-edge:  #2a3239;
   position: relative; min-width: 0; overflow: hidden;
-  border: 1px solid var(--line-soft); border-radius: 4px;
-  background: var(--panel-2);
+  border: 1px solid var(--graf-edge); border-radius: 4px;
+  background: var(--graf-panel);
+  box-shadow: var(--shadow);
 }
 .graf-strip iframe {
   width: 100%; height: 100%; border: 0; display: block; background: transparent;
@@ -164,20 +231,33 @@
 /* Grafana draws its own "Powered by Grafana" badge inside the panel, and the
    iframe is cross-origin, so no stylesheet or script of ours can reach it. The
    only thing left is to cover it. The badge sits top-right; the panel title is
-   top-left and the value is centred, so nothing readable is behind this. */
+   top-left and the value is centred, so nothing readable is behind this.
+
+   The mask has to match the IFRAME, not the page. It used --panel-2, which was
+   a dark well and blended in; that alias now resolves to a near-white inset,
+   which would stamp a bright rectangle into the corner of a black panel — far
+   louder than the badge it is hiding. So it takes --graf-panel, the same value
+   the cell is painted with. */
 .graf-cell::after {
   content: "";
   position: absolute; top: 0; right: 0;
   width: 116px; height: 26px;
-  background: var(--panel-2);
+  background: var(--graf-panel);
   pointer-events: none;
 }
+/* A quiet chrome button on the white strip, not a link in running text. */
 .graf-open {
-  align-self: flex-start; color: var(--muted); text-decoration: none;
-  font-size: 11px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 3px;
+  align-self: flex-start; color: var(--ink-3); text-decoration: none;
+  font-size: 11px; padding: 4px 8px; border: 1px solid var(--rule); border-radius: 3px;
+  background: var(--chrome);
   white-space: nowrap;
 }
-.graf-open:hover { color: var(--accent); border-color: var(--accent); }
+.graf-open:hover {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  border-color: var(--track);
+  background: var(--chrome-2);
+}
 
 @media (max-width: 1400px) { .graf-strip { grid-auto-columns: minmax(200px, 1fr); } }
 @media (max-width: 1000px) {
