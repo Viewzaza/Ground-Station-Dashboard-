@@ -105,6 +105,7 @@ let lastPathBuild = 0;
 // still awaiting the texture. Guarding on `renderer` is not enough: that is
 // assigned early, so the markers would still be null. Set this last.
 let ready = false;
+let mounting = null;      // in-flight mountGlobe(), so a second call joins it
 
 // --------------------------------------------------------------------------
 // geometry helpers
@@ -208,6 +209,27 @@ async function buildEarthTexture() {
 // --------------------------------------------------------------------------
 
 export async function mountGlobe(hostId = 'globe3d') {
+  // Mounting is not instant — a dynamic import of three.js, then painting a
+  // 2048x1024 texture — so a second call can arrive while the first is still
+  // running, and that would build a second renderer inside the same element
+  // with two of them fighting over one canvas. The guard predates this module:
+  // it was written for Cesium, where the window was several seconds. It is
+  // shorter now, not zero, and the failure is just as silent.
+  if (renderer) return renderer;
+  if (mounting) return mounting;
+
+  mounting = (async () => {
+    try {
+      return await build(hostId);
+    } finally {
+      mounting = null;
+    }
+  })();
+  return mounting;
+}
+
+async function build(hostId) {
+  // Module-scope, not local: resizeGlobe needs it on every window resize.
   host = document.getElementById(hostId);
   if (!host) return null;
 

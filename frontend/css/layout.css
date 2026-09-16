@@ -71,9 +71,51 @@
   }
 }
 
+/* ---------- short screens: stop squeezing, start scrolling ----------
+
+   The wall grid assumes roughly 1080p. On a 720p laptop the fixed minimums for
+   the header, camera row and Grafana strip eat the budget and the map and
+   globe collapse to about 50 px each — present, but useless. Below that height
+   give every panel a floor and let the page scroll instead. 1080p and above is
+   unaffected and still fits without scrolling. */
+@media (min-width: 1000px) and (max-height: 900px) {
+  /* height:auto as well as overflow:auto — tokens.css pins these to 100%, and
+     a document that cannot grow clips the overflow instead of scrolling it. */
+  html, body { overflow: auto; height: auto; }
+  .wall { height: auto; min-height: 100vh; }
+  .track-col { overflow: visible; }
+}
+
+/* Three-column wall layout: five rows since radio and the waterfall gained
+   their own. A row template here must have exactly as many entries as the
+   grid-template-areas above, or every row below the mismatch is misplaced. */
+@media (min-width: 1401px) and (max-height: 900px) {
+  .wall {
+    grid-template-rows:
+      var(--hdr-h)
+      minmax(300px, 1fr)
+      minmax(300px, 1fr)
+      minmax(130px, 150px)
+      minmax(170px, var(--graf-h));
+  }
+}
+
+/* Two-column laptop layout: six rows, the camera in its own. */
+@media (min-width: 1000px) and (max-width: 1400px) and (max-height: 900px) {
+  .wall {
+    grid-template-rows:
+      var(--hdr-h)
+      minmax(240px, 1.1fr)
+      minmax(260px, 1fr)
+      minmax(260px, 1fr)
+      minmax(130px, 150px)
+      minmax(170px, var(--graf-h));
+  }
+}
+
 /* ---------- tablet and phone: one scrolling column ---------- */
 @media (max-width: 1000px) {
-  html, body { overflow: auto; }
+  html, body { overflow: auto; height: auto; }
   .wall {
     height: auto;
     grid-template-columns: 1fr;
