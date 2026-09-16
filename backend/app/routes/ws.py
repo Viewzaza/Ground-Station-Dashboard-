@@ -49,8 +49,24 @@ async def websocket(ws: WebSocket) -> None:
         done, pending = await asyncio.wait(
             {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
         )
+
         for task in pending:
             task.cancel()
+        # Await the cancellations, then LOOK at whichever task finished. An
+        # exception on a done task that nobody retrieves is reported by asyncio
+        # at garbage-collection time as "Task exception was never retrieved",
+        # with a traceback detached from anything that explains it. On a display
+        # that runs for months and reconnects on every reload, that is a steady
+        # drip of tracebacks into the log — which is how a real fault ends up
+        # being scrolled past.
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            exc = task.exception()
+            # A browser navigating away closes mid-send, and Starlette asserts
+            # rather than raising something specific. That is an ordinary
+            # disconnect, not a fault, so it is retrieved and dropped.
+            if exc and not isinstance(exc, (WebSocketDisconnect, AssertionError)):
+                raise exc
     except WebSocketDisconnect:
         pass
     except Exception:

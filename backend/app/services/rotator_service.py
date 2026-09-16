@@ -39,7 +39,11 @@ class RotatorService:
             self.client = MockRotator(settings, predictor)
             self.source = "mock"
         else:
-            self.client = RotctldClient(settings.rotctld_host, settings.rotctld_port)
+            self.client = RotctldClient(
+                settings.rotctld_host, settings.rotctld_port,
+                min_az=settings.rot_limit_min_az, max_az=settings.rot_limit_max_az,
+                min_el=settings.rot_limit_min_el, max_el=settings.rot_limit_max_el,
+            )
             self.source = "rotctld"
 
         self.last: RotatorSample | None = None

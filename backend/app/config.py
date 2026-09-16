@@ -51,11 +51,39 @@ class Settings(BaseSettings):
     tle_stale_crit_d: float = 14.0
     # Transmitters change on the scale of months, so this is deliberately long.
     transmitter_ttl_s: int = 86400
+    # Frames only appear while the satellite is overhead and someone is
+    # listening, so a few minutes is as often as there is any point asking.
+    telemetry_ttl_s: int = 300
+    # A waterfall only appears once a pass has finished and the station has
+    # uploaded it. Asking more often than this cannot learn anything, and
+    # asking on every request is what made SatNOGS answer 429.
+    waterfall_ttl_s: int = 300
 
     # --- rotator ------------------------------------------------------------
     rotctld_host: str = "10.90.36.140"
     rotctld_port: int = 4533            # rotctld default; 4532 is rigctld (a RADIO)
     rotctld_protocol: str = "auto"      # auto | rotctld | rigctld
+
+    # Station 5024's rigctld runs a Hamlib "Dummy" rig on 4534. satnogs-client
+    # writes the Doppler-corrected downlink to it during a pass, so reading it
+    # back is the only live view of what the receiver is actually tuned to.
+    # Read-only: this dashboard never sets a frequency.
+    rigctld_host: str = "10.90.36.140"
+    rigctld_port: int = 4534
+    rigctld_enabled: bool = True
+
+    # The rotator's REAL travel limits, which are not what dump_caps reports.
+    # dump_caps returns the SPID backend's compiled range (el -20..210); the
+    # limits actually in force are rotctld's own -C overrides and the ones
+    # satnogs-client pushes, and on station 5024 those are tighter:
+    #   rotctld   -C min_az=-180,max_az=540,min_el=0,max_el=100
+    #   satnogs   SATNOGS_ROT_SET_CONF min_az=-90,max_az=450,min_el=-5,max_el=100
+    # Clamping to dump_caps would let a command through at an elevation the
+    # hardware will not go to. These are the narrower, authoritative numbers.
+    rot_limit_min_az: float = -90.0
+    rot_limit_max_az: float = 450.0
+    rot_limit_min_el: float = 0.0
+    rot_limit_max_el: float = 100.0
     rotator_poll_hz: float = 1.0
     rotator_backoff_min_s: float = 5.0
     rotator_backoff_max_s: float = 10.0

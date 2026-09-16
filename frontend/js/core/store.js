@@ -18,6 +18,7 @@ export const store = {
   satnogs: null,
   radio: null,         // transmitters + live Doppler for the tracked satellite
   waterfall: null,     // most recent observation's cropped signal image
+  rig: null,           // what the station's receiver is tuned to, live
   control: null,       // interlock state: gates, lease, mode
   cameras: [],
 };

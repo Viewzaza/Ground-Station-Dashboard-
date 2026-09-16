@@ -111,3 +111,25 @@ async def waterfall_png(request: Request, norad: int | None = None) -> Response:
             "X-Observation-Id": str(meta.get("id", "")),
         },
     )
+
+
+@router.get("/telemetry")
+async def telemetry(request: Request, norad: int | None = None) -> dict:
+    """Recent decoded frames for a satellite, newest first.
+
+    Always 200 with a `status`, never an error for a station that is simply not
+    configured: `/telemetry/` is the one SatNOGS endpoint here that needs a
+    token, and an empty `GS_SATNOGS_DB_TOKEN` comes back as
+    `status: "no_token"` with a `detail` the panel can print. A panel that says
+    what to set is worth more than one that is blank or red.
+    """
+    store = getattr(request.app.state, "telemetry", None)
+    if store is None:
+        raise HTTPException(503, "telemetry store not running")
+    norad = norad or request.app.state.settings.default_norad
+
+    # Lazily, like the transmitters above: a satellite the operator has only
+    # just selected has never been fetched. TTL-gated, so a wall display
+    # polling this does not turn into polling SatNOGS.
+    await store.refresh(norad)
+    return store.snapshot(norad)

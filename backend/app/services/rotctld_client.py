@@ -69,9 +69,16 @@ class Caps:
 
 
 class RotctldClient:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int,
+                 min_az: float = -180.0, max_az: float = 540.0,
+                 min_el: float = -20.0, max_el: float = 210.0) -> None:
         self.host = host
         self.port = port
+        # The station's configured travel limits. Defaults are the widest any
+        # supported rotator accepts, so an un-configured deployment behaves as
+        # before; a real one passes the numbers from its rotctld -C flags.
+        self.min_az, self.max_az = min_az, max_az
+        self.min_el, self.max_el = min_el, max_el
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
@@ -213,11 +220,16 @@ class RotctldClient:
     # Everything below moves a physical antenna. Callers must have passed the
     # control interlock first; nothing here re-checks it.
     async def set_position(self, az: float, el: float) -> None:
-        """Command an absolute position, clamped to the rotator's own limits.
+        """Command an absolute position, clamped to the rotator's real limits.
 
-        The clamp uses dump_caps rather than a constant because the legal
-        azimuth range is what distinguishes a SPID 901 from a 903, and driving
-        past an end stop is a mechanical problem, not a software one.
+        "Real" is doing work in that sentence. dump_caps reports the Hamlib
+        backend's COMPILED range — for a SPID 901, el -20..210 — and that is
+        not what the rotator will actually do. The limits in force come from
+        rotctld's own -C overrides and from what satnogs-client pushes, neither
+        of which dump_caps reflects. On station 5024 the real ceiling is el 100,
+        less than half the compiled figure, so a clamp trusting dump_caps would
+        pass an el of 150 straight through to a rotator that cannot reach it.
+        See `limits` and GS_ROT_LIMIT_*.
         """
         az, el = self.clamp(az, el)
         _, code = await self._command(f"set_pos {az:.2f} {el:.2f}")
@@ -229,12 +241,30 @@ class RotctldClient:
         if code != RPRT_OK:
             raise RotctldError(code, "stop")
 
+    def limits(self) -> tuple[float, float, float, float]:
+        """The travel limits actually in force: (min_az, max_az, min_el, max_el).
+
+        The tighter of what the backend claims and what the station configures,
+        per axis. Taking the intersection rather than preferring one source
+        means neither a wrong configuration nor a wrong backend can widen the
+        range — only narrow it. There is no reading of this that ends with the
+        antenna being commanded further than both sources agree it can go.
+        """
+        caps = self.caps
+        return (
+            max(self.min_az, caps.min_az if caps else self.min_az),
+            min(self.max_az, caps.max_az if caps else self.max_az),
+            max(self.min_el, caps.min_el if caps else self.min_el),
+            min(self.max_el, caps.max_el if caps else self.max_el),
+        )
+
     def clamp(self, az: float, el: float) -> tuple[float, float]:
         if self.caps is None:
             raise RotctldError(RPRT_EINVAL, "refusing to move before dump_caps")
+        min_az, max_az, min_el, max_el = self.limits()
         return (
-            min(max(az, self.caps.min_az), self.caps.max_az),
-            min(max(el, self.caps.min_el), self.caps.max_el),
+            min(max(az, min_az), max_az),
+            min(max(el, min_el), max_el),
         )
 
 

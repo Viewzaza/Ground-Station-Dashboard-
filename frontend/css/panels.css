@@ -390,3 +390,27 @@
 .wf-badge.s-failed  { color: var(--on-void-bad);  border-color: rgba(255, 95, 110, .5); }
 .wf-badge.s-unknown { color: var(--on-void-ink);  border-color: rgba(168, 184, 192, .3); }
 .wf-badge.s-future  { color: var(--on-void-cool); border-color: rgba(127, 196, 221, .4); }
+
+/* ── rig readout ──────────────────────────────────────────────────────────
+   The one frequency on the page we did not compute: read back from the
+   station's own rigctld, which satnogs-client drives during a pass. It sits
+   above the transmitter list because it answers a different question — not
+   "what should we tune to" but "what is the receiver actually doing". */
+.rig {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+  padding: 4px 8px; border-radius: 4px; background: var(--sunk);
+  border-left: 2px solid var(--rule); font-size: 11px;
+}
+.rig-label { font-size: 9px; letter-spacing: .12em; color: var(--ink-3); }
+.rig-freq { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.rig-freq i { font-size: 9px; font-style: normal; color: var(--ink-4); margin-left: 3px; }
+.rig-note { margin-left: auto; font-size: 10px; color: var(--ink-3); white-space: nowrap; }
+
+/* Idle is the normal state between passes, so it must not look like a fault. */
+.rig-idle { opacity: .7; }
+.rig-agrees { border-left-color: var(--ok); }
+.rig-agrees .rig-note { color: var(--ok); }
+/* Two independent propagators disagreeing on the downlink is worth an alarm:
+   at 9k6 FSK it is the difference between decoding a pass and missing it. */
+.rig-differs { border-left-color: var(--bad); background: var(--panel); }
+.rig-differs .rig-note { color: var(--bad); font-weight: 600; }

@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -47,6 +48,10 @@ INK_FRACTION = 0.55     # how much of a line must be non-white to be "the plot"
 SAMPLE_STEP = 6         # every 6th pixel is plenty to find a 600 px wide box
 CENTRE_FRACTION = 0.5   # of the band, kept around the centre frequency
 PANEL_W, PANEL_H = 760, 150
+# Retry interval with nothing cached. Shorter than the full TTL so a station
+# that has just started shows a waterfall without waiting five minutes, but long
+# enough that a rate-limited or unreachable API is not asked once per request.
+FAILED_RETRY_S = 60.0
 
 
 class WaterfallStore:
@@ -54,6 +59,7 @@ class WaterfallStore:
         self.s = settings
         self._meta: dict[int, dict] = {}        # norad -> observation summary
         self._png: dict[int, bytes] = {}        # norad -> processed image
+        self._checked_at: dict[int, float] = {}  # norad -> monotonic stamp
         self._lock = asyncio.Lock()
 
     # --- discovery ---------------------------------------------------------
@@ -113,6 +119,26 @@ class WaterfallStore:
     # --- fetch + process ---------------------------------------------------
     async def refresh(self, norad: int, force: bool = False) -> dict | None:
         async with self._lock:
+            # Gate on a TTL before touching the network at all. This used to
+            # call the Network API on every request — and since the panel polls
+            # and each request also asked, SatNOGS started answering 429 Too
+            # Many Requests. A waterfall only changes when a pass finishes and
+            # the station uploads it, which is minutes at best, so asking more
+            # often than that cannot learn anything. Same etiquette as the
+            # Celestrak rule: do not ask again before the answer can differ.
+            #
+            # The gate applies whether or not we already hold an image. Gating
+            # only on a cached hit is the trap: the case that hammers the API is
+            # the one where every attempt FAILS, because failure leaves nothing
+            # cached and so skips the check entirely — and the commonest reason
+            # for failing is that the API is already rate-limiting us.
+            have = norad in self._png
+            age = time.monotonic() - self._checked_at.get(norad, -1e9)
+            interval = self.s.waterfall_ttl_s if have else FAILED_RETRY_S
+            if not force and age < interval:
+                return self._meta.get(norad)
+
+            self._checked_at[norad] = time.monotonic()
             meta = await self._find_latest(norad)
             if meta is None:
                 return None

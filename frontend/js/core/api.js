@@ -55,6 +55,7 @@ export const api = {
   satnogs:      ()            => get('/api/satnogs'),
   radio:        (norad)       => get('/api/radio', { norad }),
   waterfall:    (norad)       => get('/api/radio/waterfall', { norad }),
+  rig:          ()            => get('/api/rig'),
 
   control:      ()            => get('/api/control'),
   arm:          ()            => post('/api/control/arm'),

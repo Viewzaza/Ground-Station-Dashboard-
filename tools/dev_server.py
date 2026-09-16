@@ -84,11 +84,18 @@ async def video_ws(client: WebSocket) -> None:
     up = asyncio.create_task(pump_up())
     down = asyncio.create_task(pump_down())
     try:
-        _, pending = await asyncio.wait(
+        done, pending = await asyncio.wait(
             {up, down}, return_when=asyncio.FIRST_COMPLETED
         )
         for task in pending:
             task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        # Retrieve the finished task's exception. A viewer closing the tab ends
+        # this proxy through pump_up raising WebSocketDisconnect, and leaving
+        # that unretrieved makes asyncio print a traceback at collection time —
+        # once per camera tile, every reload, for a normal disconnect.
+        for task in done:
+            task.exception()
     except Exception:
         pass
     finally:

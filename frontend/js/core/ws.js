@@ -132,6 +132,12 @@ function handle(frame) {
       set('satnogs', frame.data);
       break;
 
+    case 'rig':
+      // satnogs-client's own Doppler-corrected frequency, read back from the
+      // station's rigctld. An independent answer to the one we compute.
+      set('rig', frame.data);
+      break;
+
     case 'control':
       // The interlock closes on its own — a lease expires, SatNOGS picks up a
       // job — so this arrives unprompted and must repaint the panel.

@@ -14,10 +14,11 @@ from fastapi import FastAPI
 
 from .config import get_settings
 from .routes import (
-    cameras, control, health, passes, radio, rotator, satellites, satnogs, ws,
+    cameras, control, health, passes, radio, rig, rotator, satellites, satnogs, ws,
 )
 from .scheduler import Scheduler
 from .services.predictor import Predictor
+from .services.telemetry import TelemetryStore
 from .services.tle_store import TleStore
 from .services.transmitters import TransmitterStore
 from .services.waterfall import WaterfallStore
@@ -47,11 +48,13 @@ async def lifespan(app: FastAPI):
     app.state.tles = tles
     app.state.transmitters = transmitters
     app.state.waterfall = WaterfallStore(settings)
+    app.state.telemetry = TelemetryStore(settings)
     app.state.predictor = predictor
     app.state.scheduler = scheduler
     app.state.rotator = scheduler.rotator
     app.state.satnogs = scheduler.satnogs
     app.state.control = scheduler.control
+    app.state.rig = scheduler.rig
 
     await scheduler.start()
     try:
@@ -80,4 +83,5 @@ app.include_router(rotator.router, prefix="/api", tags=["rotator"])
 app.include_router(control.router, prefix="/api", tags=["control"])
 app.include_router(satnogs.router, prefix="/api", tags=["satnogs"])
 app.include_router(radio.router, prefix="/api", tags=["radio"])
+app.include_router(rig.router, prefix="/api", tags=["rig"])
 app.include_router(ws.router, tags=["ws"])

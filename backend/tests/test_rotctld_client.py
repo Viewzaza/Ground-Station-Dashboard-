@@ -265,6 +265,42 @@ async def test_a_move_is_clamped_to_the_peers_limits():
 
 
 @pytest.mark.asyncio
+async def test_the_station_limits_win_over_the_backends_compiled_ones():
+    """dump_caps reports what the Hamlib backend was COMPILED with, not what
+    the rotator will do. Station 5024 runs
+
+        rotctld -m 901 ... -C min_az=-180,max_az=540,min_el=0,max_el=100
+
+    and satnogs-client pushes min_az=-90,max_az=450,min_el=-5,max_el=100 on top,
+    none of which dump_caps reflects. Trusting it would let an elevation of 150
+    through to a rotator whose ceiling is 100."""
+    async with ScriptedServer({"dump_caps": ROT_CAPS, "set_pos": "RPRT 0\n"}) as srv:
+        client = RotctldClient("127.0.0.1", srv.port,
+                               min_az=-90, max_az=450, min_el=0, max_el=100)
+        await client.verify_is_rotator()
+        assert client.caps.max_el == 210.0, "the backend really does claim 210"
+        await client.set_position(600.0, 150.0)
+        await client.close()
+
+    assert srv.commands[-1] == "set_pos 450.00 100.00"
+
+
+@pytest.mark.asyncio
+async def test_limits_are_the_intersection_so_neither_source_can_widen_them():
+    """Taking the tighter of the two per axis means a wrong configuration can
+    only narrow the range, never open it past what the hardware allows."""
+    async with ScriptedServer({"dump_caps": OTHER_ROT_CAPS}) as srv:
+        # Backend says az 0..450 / el 0..180; the station claims a WIDER az and
+        # a narrower el. The wider claim must not win.
+        client = RotctldClient("127.0.0.1", srv.port,
+                               min_az=-180, max_az=540, min_el=0, max_el=100)
+        await client.verify_is_rotator()
+        await client.close()
+
+    assert client.limits() == (0.0, 450.0, 0.0, 100.0)
+
+
+@pytest.mark.asyncio
 async def test_a_move_before_dump_caps_is_refused():
     """Without capabilities there are no limits to clamp against, so the safe
     answer is to refuse rather than to guess a range."""

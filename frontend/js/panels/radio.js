@@ -32,6 +32,7 @@ let waterfallTimer = null;
 
 export function mountRadio() {
   bus.on('radio', render);
+  bus.on('rig', render);
   bus.on('waterfall', renderWaterfall);
   // The tracked satellite can change from the selector; the panel follows it.
   bus.on('satellite', () => { refresh(); refreshWaterfall(); });
@@ -50,6 +51,14 @@ async function refresh() {
     set('radio', await api.radio(store.satellite?.norad ?? null));
   } catch (err) {
     console.warn('[radio]', err);
+  }
+  // The WebSocket carries `rig` once the poller ticks; this is only so a
+  // browser opened between ticks is not missing the line.
+  if (!store.rig) {
+    try {
+      const r = await api.rig();
+      if (r.sample) set('rig', r.sample);
+    } catch { /* no rigctld is a normal deployment, not an error */ }
   }
 }
 
@@ -121,7 +130,41 @@ function render() {
     .slice()
     .sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0));
 
-  host.innerHTML = `<ul class="rx-list">${rows.map((tx) => row(tx, data)).join('')}</ul>`;
+  host.innerHTML = rigLine()
+    + `<ul class="rx-list">${rows.map((tx) => row(tx, data)).join('')}</ul>`;
+}
+
+/* What the station's receiver is actually tuned to.
+
+   This is the one number on the panel we did not compute. satnogs-client writes
+   its own Doppler-corrected frequency to the station's rigctld during a pass,
+   from its own propagator and its own elements, so agreement means two
+   independent chains are tracking the same object. Disagreement means one of
+   them is wrong, and at 9k6 FSK that is the difference between decoding the
+   pass and missing it. */
+function rigLine() {
+  const r = store.rig;
+  if (!r) return '';
+
+  if (!r.tracking) {
+    // Between passes satnogs-client is not writing here at all and the rig
+    // holds its idle value. Showing a delta against that would be a permanent
+    // false alarm, so say plainly that there is nothing to compare yet.
+    return `<div class="rig rig-idle">
+        <span class="rig-label">RIG</span>
+        <span class="rig-freq">${mhz(r.freq_hz)}<i>MHz</i></span>
+        <span class="rig-note">idle — no pass</span>
+      </div>`;
+  }
+
+  const agrees = r.agrees;
+  const delta = Math.round(r.delta_hz);
+  return `<div class="rig ${agrees ? 'rig-agrees' : 'rig-differs'}">
+      <span class="rig-label">RIG</span>
+      <span class="rig-freq">${mhz(r.freq_hz)}<i>MHz</i></span>
+      <span class="rig-note">${agrees ? 'agrees' : 'DIFFERS'}
+        ${delta > 0 ? '+' : ''}${delta} Hz vs ours</span>
+    </div>`;
 }
 
 function row(tx, data) {
