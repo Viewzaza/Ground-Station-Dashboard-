@@ -10,11 +10,12 @@
   gap: var(--gap);
   padding: var(--gap);
   grid-template-columns: minmax(340px, 4fr) minmax(520px, 5fr) minmax(360px, 3fr);
-  /* The footer's floor rose from 140px to 220px when the decoded frames moved
-     in under Grafana. Below that the frame list is a header and one row, which
-     is not worth the space it costs the map and the globe above it. */
+  /* The footer's floor is what keeps the frame list from collapsing to a header
+     and one row, which is not worth the space it costs the map and the globe
+     above it. It is lower than it was while the two panels were stacked — they
+     now share this height rather than dividing it. */
   grid-template-rows:
-    var(--hdr-h) 1fr 1fr minmax(110px, 150px) minmax(220px, var(--graf-h));
+    var(--hdr-h) 1fr 1fr minmax(110px, 150px) minmax(150px, var(--graf-h));
   /* One camera instead of two frees the whole middle column, so the tile now
      spans both rows and the map and globe get a full row each rather than
      sharing one.
@@ -49,14 +50,15 @@
 .track-col .panel.satpanel .sat-list { flex: 1 1 auto; max-height: 132px; min-height: 38px; }
 
 /* ---------- 4K wall: more frames, taller globe ---------- */
-/* The extra footer height here buys rows in the frame list, not a bigger
-   Grafana: four stat panels stretched to 200px are four enormous numbers with
-   nothing more to say, while the list can always show another pass. */
+/* The extra room here buys rows in the frame list, not a bigger Grafana: four
+   stat panels given half a 4K wall are four enormous numbers with nothing more
+   to say, while the list can always show another pass. So the height goes up
+   and Grafana's share of the width comes down. */
 @media (min-width: 2400px) {
-  :root { --hdr-h: 74px; --graf-h: 340px; --graf-strip-h: 104px; --gap: 12px; }
+  :root { --hdr-h: 74px; --graf-h: 340px; --graf-strip-w: 38%; --gap: 12px; }
   .wall {
     grid-template-rows:
-      var(--hdr-h) 1fr 1.15fr minmax(140px, 190px) minmax(260px, var(--graf-h));
+      var(--hdr-h) 1fr 1.15fr minmax(140px, 190px) minmax(190px, var(--graf-h));
   }
 }
 
@@ -66,7 +68,7 @@
     grid-template-columns: 1fr 1fr;
     grid-template-rows:
       var(--hdr-h) minmax(240px, 1.2fr) 1fr 1fr minmax(110px, 150px)
-      minmax(220px, var(--graf-h));
+      minmax(150px, var(--graf-h));
     grid-template-areas:
       "hdr   hdr"
       "cam   cam"
@@ -102,7 +104,7 @@
       minmax(300px, 1fr)
       minmax(300px, 1fr)
       minmax(130px, 150px)
-      minmax(220px, var(--graf-h));
+      minmax(150px, var(--graf-h));
   }
 }
 
@@ -115,7 +117,7 @@
       minmax(260px, 1fr)
       minmax(260px, 1fr)
       minmax(130px, 150px)
-      minmax(220px, var(--graf-h));
+      minmax(150px, var(--graf-h));
   }
 }
 
@@ -241,21 +243,31 @@
   .hdr-chips { grid-column: 1 / -1; margin-left: 0; }
 }
 
-/* ---------- footer: grafana strip over decoded frames ----------
-   One card holding two panels, so it is a column now rather than a row. The
-   Grafana half is pinned to --graf-strip-h and the frames take everything else:
-   the embeds are a fixed amount of information — four numbers — and stretching
-   them only makes the numbers larger, while the list below can always use the
-   room for another pass. */
+/* ---------- footer: decoded frames beside the grafana strip ----------
+   One card holding two panels, side by side. The frames take the left and grow;
+   Grafana takes a fixed share of the width on the right.
+
+   Width is what keeps the embeds small here, where height used to. Four stat
+   panels are a fixed amount of information — four numbers — so narrowing them
+   costs nothing, while the frame list turns every pixel it is given into
+   another pass on screen. That asymmetry is the whole reason for the split
+   being uneven rather than half and half.
+
+   The frames are first in the DOM as well as on the left, so the reading order
+   a screen reader takes is the one the eye takes. */
 .graf {
-  display: flex; flex-direction: column; gap: var(--gap);
+  display: flex; flex-direction: row; gap: var(--gap);
   background: var(--panel); border: 1px solid var(--rule);
   border-radius: var(--radius); padding: 8px; min-height: 0;
   box-shadow: var(--shadow);
 }
+.graf .tlm { flex: 1 1 auto; min-width: 0; }
+/* Allowed to shrink but not to grow: past about this width the stat panels are
+   only setting their own numbers in larger type, and the room is worth more to
+   the list beside them. */
 .graf-top {
   display: flex; gap: var(--gap); align-items: stretch;
-  flex: none; height: var(--graf-strip-h);
+  flex: 0 1 var(--graf-strip-w); min-width: 0;
 }
 .graf-strip {
   display: grid; gap: var(--gap); flex: 1; min-width: 0;
@@ -318,12 +330,21 @@
   background: var(--chrome-2);
 }
 
-@media (max-width: 1400px) { .graf-strip { grid-auto-columns: minmax(200px, 1fr); } }
-/* Stacked on a phone, so --graf-strip-h would be the height of one panel rather
-   than of all four — the row has to be let go before it clips them. They also
-   get more height each here than on the wall, because a single-column phone has
-   the width to spare and nothing else is competing for the fold. */
+/* Two panels abreast need a wall to be abreast on. On a laptop the footer is
+   the full width of a two-column grid rather than a three-column one, so
+   Grafana gives up a little more of it and the frame rows stay on one line. */
+@media (max-width: 1400px) {
+  :root { --graf-strip-w: 40%; }
+  .graf-strip { grid-auto-columns: minmax(120px, 1fr); }
+}
+
+/* Below this there is no width to put two things beside each other, so the
+   footer goes back to being a column: frames first, Grafana under them. The
+   stat panels also get more height each here than on the wall, because a
+   single-column phone has the width to spare and nothing else is competing for
+   the fold. */
 @media (max-width: 1000px) {
-  .graf-top { height: auto; }
+  .graf { flex-direction: column; }
+  .graf-top { flex: none; }
   .graf-strip { grid-auto-flow: row; grid-auto-rows: 120px; }
 }

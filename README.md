@@ -21,13 +21,11 @@ wall-mounted display that is left running, and reflows down to a phone.
 ├─────────────────┼────────────────────────────────┴───────────────────────────┤
 │ RADIO           │ LAST SIGNAL   waterfall of the most recent 5024 pass       │
 │ tuned + doppler │ time ─────────────────────────────────────────────────▶    │
-├─────────────────┴────────────────────────────────────────────────────────────┤
-│ GRAFANA  [beacon] [batt V] [solar W] [batt °C]                 open full ↗   │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ DECODED FRAMES   2 h ago                      SatNOGS network · 8 frames     │
-│  10:31:06Z  WH6GVF UHF   165 B  HS0K→HS0AK-11  90A6608296407690A66096404061  │
-│  10:30:36Z  WH6GVF UHF   165 B  HS0K→HS0AK-11  90A6608296407690A66096404061  │
-└──────────────────────────────────────────────────────────────────────────────┘
+├─────────────────┴────────────────────────────────────────┬───────────────────┤
+│ DECODED FRAMES  2 h ago       SatNOGS network · 8 frames │ GRAFANA     ↗     │
+│  10:31:06Z WH6GVF UHF 165 B HS0K→HS0AK-11 90A66082964076 │ [beacon] [batt V] │
+│  10:30:36Z WH6GVF UHF 165 B HS0K→HS0AK-11 90A66082964076 │ [solar W] [bat°C] │
+└──────────────────────────────────────────────────────────┴───────────────────┘
 ```
 
 Light paper chrome, dark instrument windows — see
@@ -174,11 +172,16 @@ a strip.
 ## Decoded frames
 
 `GET /api/telemetry` is the most recent frames SatNOGS has for the tracked
-satellite, newest first, and it sits under the Grafana strip along the bottom
-of the wall. The headline is the **age of the newest frame**. That is the point
-of the panel: a satellite propagating perfectly and a satellite that has been
-silent for two days look identical on the map, the globe and the polar plot,
-and "heard 2 h ago" is the only line on this display that tells them apart.
+satellite, newest first. It takes the left of the footer, with the Grafana
+embeds beside it on the right. The headline is the **age of the newest frame**.
+That is the point of the panel: a satellite propagating perfectly and a
+satellite that has been silent for two days look identical on the map, the
+globe and the polar plot, and "heard 2 h ago" is the only line on this display
+that tells them apart.
+
+The two sit on one line because Grafana's leftmost panel — *time since last
+beacon* — is asking exactly the question the frame list answers, and the two
+disagreeing is worth seeing at a glance rather than one above the other.
 
 There are two sources, and the panel says which one it is showing.
 
@@ -205,13 +208,18 @@ hearing the spacecraft several times a day. "Is it alive" is answered by
 anyone's frame; "did *we* hear it" is a different question, and it gets a
 marked row rather than an empty panel.
 
-**Grafana was cut to the height of one stat number** to make room. The two are
-not equally direct and are now sized that way: Grafana shows whatever last
-reached the team's InfluxDB, which is downstream of everything, while the
-frames are what SatNOGS demodulated out of the air. The gap is visible on the
-wall right now — Grafana's "time since last beacon" reads 5 hours against the
-frame panel's 2, because they are measuring different things at different
-points in the same pipeline.
+**Grafana gave up most of its width** to make room, from the full span of the
+wall to about half the footer, and the footer itself got shorter. Width is what
+does the work here: four stat panels are four numbers however much room they
+are given, so narrowing them costs nothing, while the frame list turns width
+into legible rows and height into more passes on screen.
+
+The two are not equally direct and are now sized that way: Grafana shows
+whatever last reached the team's InfluxDB, which is downstream of everything,
+while the frames are what SatNOGS demodulated out of the air. The gap is
+visible on the wall right now — Grafana's "time since last beacon" reads 6
+hours against the frame panel's 2, because they are measuring different things
+at different points in the same pipeline. Side by side, that is one glance.
 
 ## Things that are the way they are for a reason
 

@@ -68,14 +68,15 @@
 
   --gap: 10px;
   --hdr-h: 62px;
-  /* The footer row, and the slice of it the Grafana embeds get. They are two
-     numbers rather than one because the footer now carries two panels, and the
-     iframes are the one of the pair that must not grow: --graf-strip-h is sized
-     to a Grafana stat panel's big number and nothing else, so every pixel added
-     to --graf-h goes to the decoded frames underneath. The row template in
-     layout.css supplies the floor; these are the ceilings. */
-  --graf-h: 270px;
-  --graf-strip-h: 86px;
+  /* The footer row, and the slice of its WIDTH the Grafana embeds get — the
+     two panels sit side by side, so the second number is a width. The iframes
+     are the one of the pair that must not grow: four stat panels are four
+     numbers however much room they are given, while the frame list turns width
+     into legible rows and height into more passes. So --graf-strip-w is a
+     ceiling the embeds may shrink below, and everything --graf-h buys goes to
+     the frames. The row template in layout.css supplies the height floor. */
+  --graf-h: 180px;
+  --graf-strip-w: 52%;
   --radius: 4px;
 
   /* --- legacy aliases, so older rules keep working -------------------- */

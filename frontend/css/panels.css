@@ -419,8 +419,8 @@
 .rig-differs .rig-note { color: var(--bad); font-weight: 600; }
 
 /* ── decoded frames ───────────────────────────────────────────────────────
-   The footer's lower half: what SatNOGS demodulated out of the air, newest
-   first, under the Grafana embeds that show what eventually reached InfluxDB.
+   The footer's left half: what SatNOGS demodulated out of the air, newest
+   first, beside the Grafana embeds that show what eventually reached InfluxDB.
 
    This is a readout of numbers, not a picture of the sky, so the well is
    --sunk and not --void. The dark windows are reserved for the camera, the
