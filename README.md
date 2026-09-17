@@ -23,6 +23,10 @@ wall-mounted display that is left running, and reflows down to a phone.
 │ tuned + doppler │ time ─────────────────────────────────────────────────▶    │
 ├─────────────────┴────────────────────────────────────────────────────────────┤
 │ GRAFANA  [beacon] [batt V] [solar W] [batt °C]                 open full ↗   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ DECODED FRAMES   2 h ago                      SatNOGS network · 8 frames     │
+│  10:31:06Z  WH6GVF UHF   165 B  HS0K→HS0AK-11  90A6608296407690A66096404061  │
+│  10:30:36Z  WH6GVF UHF   165 B  HS0K→HS0AK-11  90A6608296407690A66096404061  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -45,7 +49,8 @@ Light paper chrome, dark instrument windows — see
 | Live WebSocket (rotator, pointing error, status, reconnect) | done |
 | Rotator **control** behind the SatNOGS interlock | done, refusal path verified on site |
 | SatNOGS 5024 activity feed | done |
-| Grafana telemetry strip | done |
+| Grafana telemetry strip | done, cut back to one stat's height |
+| Decoded frames — the most recent frames SatNOGS demodulated | done, **no token needed** |
 
 The rotator control path has been exercised against the station's own rotctld
 and correctly **refused** every command, because satnogs-client was connected.
@@ -166,6 +171,48 @@ poller — and the PNG is proxied rather than linked, because the source is a
 1.6 MB S3 object and every wall display would otherwise fetch all of it to show
 a strip.
 
+## Decoded frames
+
+`GET /api/telemetry` is the most recent frames SatNOGS has for the tracked
+satellite, newest first, and it sits under the Grafana strip along the bottom
+of the wall. The headline is the **age of the newest frame**. That is the point
+of the panel: a satellite propagating perfectly and a satellite that has been
+silent for two days look identical on the map, the globe and the polar plot,
+and "heard 2 h ago" is the only line on this display that tells them apart.
+
+There are two sources, and the panel says which one it is showing.
+
+**SatNOGS DB `/telemetry/` carries decoded fields** — named scalars a decoder
+produced, `battery_v: 3.92` — and refuses anonymous requests. It is used when
+`GS_SATNOGS_DB_TOKEN` is set, because named values beat bytes.
+
+**SatNOGS Network carries the frames themselves, and they are public.** Every
+observation publishes a `demoddata` list of URLs, and those objects come back
+HTTP 200 with no token from the same bucket the waterfalls do. So on a station
+with no token — which is this station — the panel is full rather than empty.
+What is lost is the decode: these are bytes off the air. What is recovered from
+them is the AX.25 header, which is a published standard rather than a
+per-spacecraft guess, so the row can say *who sent it*: KNACKSAT-2's beacons
+decode to `HS0K → HS0AK-11`, and SatNOGS DB agrees, publishing that transmitter
+as `Mode U - FSK9k6 - AX.25 G3RUH -TLM`. Everything past the header is
+spacecraft-specific and stays hex. Naming fields in a beacon whose format we do
+not have would put numbers on a wall display that nobody can check.
+
+**The panel is network-wide, not station 5024 only.** 5024 has decoded
+KNACKSAT-2 on 4 of its last 25 good passes, so a panel filtered to our own
+station would be empty most of the week while the network as a whole was
+hearing the spacecraft several times a day. "Is it alive" is answered by
+anyone's frame; "did *we* hear it" is a different question, and it gets a
+marked row rather than an empty panel.
+
+**Grafana was cut to the height of one stat number** to make room. The two are
+not equally direct and are now sized that way: Grafana shows whatever last
+reached the team's InfluxDB, which is downstream of everything, while the
+frames are what SatNOGS demodulated out of the air. The gap is visible on the
+wall right now — Grafana's "time since last beacon" reads 5 hours against the
+frame panel's 2, because they are measuring different things at different
+points in the same pipeline.
+
 ## Things that are the way they are for a reason
 
 Each of these cost time to find. Please read before changing them.
@@ -192,6 +239,35 @@ Each of these cost time to find. Please read before changing them.
   symptom there is worse, because a strip of someone else's signal still looks
   like a signal. Network pagination is also cursor-based, through the
   `Link: rel="next"` *header*; there is no `?page=`.
+
+- **An unfiltered observation query answers entirely `future` passes.** Network
+  returns scheduled observations alongside flown ones, newest `start` first,
+  and a LEO satellite has far more scheduled than flown. So
+  `?norad_cat_id=<n>` comes back as 25 rows of things that have not happened,
+  every one with an empty `demoddata` — which is indistinguishable from a
+  satellite nobody has ever heard. `status=good` is what makes the page dense:
+  21 of 25 rows carried frames against 0 of 25 unfiltered.
+
+- **`demoddata` is not in time order.** One observation's list came back
+  10:28:06, 10:27:36, 10:27:06, 10:31:06 — the newest frame was *fourth*.
+  Taking the head of the list as the latest frame therefore usually works and
+  occasionally, silently, does not, on the one panel whose whole job is to say
+  when the spacecraft was last heard. Every URL is stamped and sorted. The
+  per-frame timestamp is in the object name (`data_<obs>_2026-09-17T10-28-06`)
+  and nowhere else in the record.
+
+- **A frame's bytes are public; its decode is not.** `/telemetry/` on
+  db.satnogs.org is the only SatNOGS endpoint this dashboard touches that
+  answers 401 anonymously, and for as long as it was the only source this panel
+  had never once had anything on it. The frames were reachable the whole time,
+  one API over. A missing token is now a sentence on the panel, not an empty
+  panel — see [Decoded frames](#decoded-frames).
+
+- **The AX.25 parser is deliberately strict.** A loose one finds a plausible
+  callsign in any sixteen bytes of binary and prints it with exactly the same
+  confidence as a real one. Every field is checked: the shift bit on each
+  address character, the end-of-address marker landing exactly once, and a
+  UI / no-layer-3 control pair. Anything else shows hex, which is honest.
 
 - **The antimeridian.** A ground track stepping from lon 179 to −179 draws a
   line across the entire map unless the path is split and the crossing latitude
@@ -316,7 +392,7 @@ eyes on the mast and the station should be out of the SatNOGS schedule.
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 96 tests
+.venv/Scripts/python -m pytest              # offline: 204 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
 

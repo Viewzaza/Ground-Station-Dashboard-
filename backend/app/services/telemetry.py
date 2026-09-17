@@ -31,12 +31,21 @@ filter shows up as that count being non-zero, which is a line in the log rather
 than someone else's telemetry on the wall. When a token does turn up, that is
 the thing to look for.
 
-**Without a token there is nothing to fetch.** `/telemetry/` is the only
-SatNOGS endpoint this dashboard touches that is not public. An empty
-`GS_SATNOGS_DB_TOKEN` is a configuration state, not a fault: no request is
-made, nothing is raised, the reason is logged once and reported to the panel so
-it can ask for the token. Anything already on disk is still served, because a
-station that had a token last month has frames worth showing today.
+**Without a token this endpoint is closed, so there is a second source.**
+`/telemetry/` is the only SatNOGS endpoint this dashboard touches that is not
+public, and station 5024 has no token — which for as long as that was the only
+source meant this panel had never once had anything to draw. `frames.py` reads
+the demodulated frames out of SatNOGS *Network* instead, where they are public,
+and this store falls back to it. So the order here is: the DB when a token
+exists, because it is the only source that carries decoded *fields*; the
+public frames when it does not, because bytes off the air still answer "did we
+hear it". An empty or rejected token is a configuration state, not a fault —
+it is logged once, carried to the panel as `detail` so it can ask for the
+token, and the panel keeps showing frames from the other source meanwhile.
+
+Anything already on disk is served whatever happens, because a station that
+had a token last month has frames worth showing today, and a station that lost
+its uplink to the internet an hour ago has not stopped being a ground station.
 """
 
 from __future__ import annotations
@@ -49,6 +58,7 @@ from datetime import datetime, timezone
 import httpx
 
 from ..config import Settings
+from .frames import NetworkFrameSource
 
 log = logging.getLogger(__name__)
 
@@ -79,17 +89,33 @@ NO_TOKEN = "no_token"
 BAD_TOKEN = "bad_token"
 OFFLINE = "offline"
 UNREACHABLE = "unreachable"
+# The DB answered and has nothing for this satellite. Not a fault and not worth
+# a word on the panel — a satellite nobody has decoded this week is a fact —
+# but still a reason to go and ask the public source before giving up.
+EMPTY = "empty"
+
+# Which of the two sources the frames on screen came from. The panel draws them
+# differently because they are not the same thing: the DB's carry decoded
+# fields, Network's carry bytes. Saying which is on screen is the difference
+# between "the battery is at 3.9 V" and "something transmitted 165 bytes".
+DB = "satnogs-db"
+NETWORK = "satnogs-network"
 
 # Said in the operator's terms, because this is what the panel renders when
-# there is nothing to draw. "No data" is not a useful thing for a wall display
-# to say when the fix is one line of .env.
+# something is not right. "No data" is not a useful thing for a wall display to
+# say when the fix is one line of .env. NO_TOKEN and BAD_TOKEN are notes rather
+# than statuses now — neither one means there is nothing to show, because the
+# public source still answers.
 DETAIL = {
     OK: "",
     UNKNOWN: "not fetched yet",
-    NO_TOKEN: "needs GS_SATNOGS_DB_TOKEN — db.satnogs.org requires a token for /telemetry/",
-    BAD_TOKEN: "GS_SATNOGS_DB_TOKEN was rejected by db.satnogs.org",
+    NO_TOKEN: "no GS_SATNOGS_DB_TOKEN — showing demodulated frames from SatNOGS "
+              "Network; decoded fields need a db.satnogs.org token",
+    BAD_TOKEN: "GS_SATNOGS_DB_TOKEN was rejected by db.satnogs.org — showing "
+               "demodulated frames from SatNOGS Network instead",
     OFFLINE: "GS_OFFLINE=1 — showing cached frames only",
-    UNREACHABLE: "db.satnogs.org could not be reached",
+    UNREACHABLE: "SatNOGS could not be reached",
+    EMPTY: "",
 }
 
 
@@ -108,6 +134,17 @@ class TelemetryStore:
         self._fetched_at: dict[int, datetime] = {}
         self._failed_at: dict[int, datetime] = {}
         self._status: dict[int, str] = {}
+        self._source: dict[int, str] = {}
+        # The DB path's own last outcome, tracked apart from `_status` purely
+        # so "your token is being rejected" is said once rather than on every
+        # poll for the months this display stays up.
+        self._db_status: dict[int, str] = {}
+        # Why the DB path is not the one in use, when it is not. Kept apart
+        # from `_status` because it describes the configuration rather than the
+        # data: a station with no token and a full panel is in both states at
+        # once, and the panel has to be able to say so.
+        self._note: dict[int, str] = {}
+        self._network = NetworkFrameSource(settings)
         self._lock = asyncio.Lock()
         self._load_cache()
 
@@ -126,6 +163,10 @@ class TelemetryStore:
                 int(k): datetime.fromisoformat(v)
                 for k, v in blob.get("fetched_at", {}).items()
             }
+            # Which source wrote them, so a display that comes up on cache
+            # alone still labels the frames correctly. Frames cached before
+            # this field existed are the DB's, because it was the only source.
+            self._source = {int(k): v for k, v in blob.get("source", {}).items()}
             log.info("loaded telemetry for %d satellites from cache",
                      len(self._by_norad))
         except Exception as exc:                  # a corrupt cache is not fatal
@@ -138,6 +179,7 @@ class TelemetryStore:
                 "sats": {str(k): v for k, v in self._by_norad.items()},
                 "fetched_at": {str(k): v.isoformat()
                                for k, v in self._fetched_at.items()},
+                "source": {str(k): v for k, v in self._source.items()},
             }, indent=1),
             encoding="utf-8",
         )
@@ -160,12 +202,8 @@ class TelemetryStore:
         "the internet is gone" have to be states this reports rather than
         exceptions it throws.
         """
-        if not self.s.satnogs_db_token:
-            # Nothing to try. Not an error, and not worth a request that is
-            # guaranteed to come back 401.
-            return self._set(norad, NO_TOKEN)
         if self.is_fresh(norad) and not force:
-            return self._set(norad, OK)
+            return self._status.get(norad, OK)
         if self.s.offline:
             return self._set(norad, OFFLINE)
         if not force and self._cooling_off(norad):
@@ -175,55 +213,109 @@ class TelemetryStore:
             # Re-checked under the lock: two panels selecting the same
             # satellite at the same moment should make one request, not two.
             if self.is_fresh(norad) and not force:
-                return self._set(norad, OK)
+                return self._status.get(norad, OK)
 
-            headers = {
-                "User-Agent": USER_AGENT,
-                # The prefix is the DB's own: "Token-based authentication with
-                # required prefix Token".
-                "Authorization": f"Token {self.s.satnogs_db_token}",
-            }
-            try:
-                async with httpx.AsyncClient(
-                    timeout=REQUEST_TIMEOUT_S, headers=headers
-                ) as client:
-                    resp = await client.get(
-                        f"{self.s.satnogs_db}/telemetry/",
-                        # `satellite` — not `norad_cat_id`, and not
-                        # `satellite__norad_cat_id` as /transmitters/ takes.
-                        # See the module docstring; the wrong one is ignored
-                        # rather than refused. Nothing else is filtered on, so
-                        # there is exactly one parameter that can be wrong.
-                        params={"satellite": norad, "format": "json"},
-                    )
-                if resp.status_code in (401, 403):
-                    return self._fail(norad, BAD_TOKEN, f"HTTP {resp.status_code}")
-                if resp.status_code != 200:
-                    return self._fail(norad, UNREACHABLE, f"HTTP {resp.status_code}")
-                payload = resp.json()
-            except (httpx.HTTPError, ValueError) as exc:
-                return self._fail(norad, UNREACHABLE, str(exc))
+            # The DB first, and only with a token, because it is the only
+            # source that carries decoded fields. An empty token is not worth a
+            # request that is guaranteed to come back 401 — that is a crash
+            # loop with extra steps against somebody else's service.
+            if self.s.satnogs_db_token:
+                status = await self._from_db(norad)
+                if status == OK:
+                    return status
+                # A missing or rejected token is worth saying out loud, but it
+                # is not a reason to show nothing: the public source has frames
+                # for this satellite either way.
+                self._note[norad] = DETAIL.get(status, "")
+            else:
+                self._note[norad] = DETAIL[NO_TOKEN]
+                self._note_only(norad, NO_TOKEN, "")
 
-            # Cursor-paginated: {"next", "previous", "results"}. A bare list is
-            # accepted too, because /transmitters/ on the same service returns
-            # one and there is no reason for this to be the thing that breaks.
-            records = payload.get("results") if isinstance(payload, dict) else payload
-            if not isinstance(records, list):
-                return self._fail(norad, UNREACHABLE, "unexpected payload shape")
+            return await self._from_network(norad)
 
-            frames = [_summarise(f) for f in records]
-            frames = self._only(norad, frames)
-            # Newest first: the panel draws the top of this list, and the API's
-            # own ordering is not part of any contract.
-            frames.sort(key=_ordering_key, reverse=True)
+    async def _from_db(self, norad: int) -> str:
+        """Decoded frames from db.satnogs.org. Needs a token; may return none."""
+        headers = {
+            "User-Agent": USER_AGENT,
+            # The prefix is the DB's own: "Token-based authentication with
+            # required prefix Token".
+            "Authorization": f"Token {self.s.satnogs_db_token}",
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=REQUEST_TIMEOUT_S, headers=headers
+            ) as client:
+                resp = await client.get(
+                    f"{self.s.satnogs_db}/telemetry/",
+                    # `satellite` — not `norad_cat_id`, and not
+                    # `satellite__norad_cat_id` as /transmitters/ takes. See
+                    # the module docstring; the wrong one is ignored rather
+                    # than refused. Nothing else is filtered on, so there is
+                    # exactly one parameter that can be wrong.
+                    params={"satellite": norad, "format": "json"},
+                )
+            if resp.status_code in (401, 403):
+                return self._note_only(norad, BAD_TOKEN, f"HTTP {resp.status_code}")
+            if resp.status_code != 200:
+                return self._note_only(norad, UNREACHABLE, f"HTTP {resp.status_code}")
+            payload = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            return self._note_only(norad, UNREACHABLE, str(exc))
 
-            self._by_norad[norad] = frames[:MAX_FRAMES]
-            self._fetched_at[norad] = datetime.now(timezone.utc)
-            self._failed_at.pop(norad, None)
-            self._save_cache()
-            log.info("telemetry: %d frames for NORAD %s",
-                     len(self._by_norad[norad]), norad)
-            return self._set(norad, OK)
+        # Cursor-paginated: {"next", "previous", "results"}. A bare list is
+        # accepted too, because /transmitters/ on the same service returns one
+        # and there is no reason for this to be the thing that breaks.
+        records = payload.get("results") if isinstance(payload, dict) else payload
+        if not isinstance(records, list):
+            return self._note_only(norad, UNREACHABLE, "unexpected payload shape")
+
+        frames = self._only(norad, [_summarise(f) for f in records])
+        for f in frames:
+            # `ours` and `observation_url` are Network's fields. The panel draws
+            # one row whichever source filled it, so the DB's frames are given
+            # the same two rather than leaving the panel to reconstruct them:
+            # it would have to guess, and on a frame submitted over SiDS there
+            # is no observation page to guess at, only a link that 404s.
+            f["ours"] = f.get("station_id") == self.s.station_id
+            f["observation_url"] = (
+                f"https://network.satnogs.org/observations/{f['observation_id']}/"
+                if f.get("observation_id") else None
+            )
+        if not frames:
+            # A working token and a satellite nobody has decoded look the same
+            # from here, and neither is a fault. Falling through to the public
+            # source is what turns this into frames rather than an empty panel.
+            return self._note_only(norad, EMPTY, "no frames for this satellite")
+
+        # Newest first: the panel draws the top of this list, and the API's own
+        # ordering is not part of any contract.
+        frames.sort(key=_ordering_key, reverse=True)
+        self._db_status[norad] = OK
+        self._note[norad] = ""
+        return self._keep(norad, frames, DB)
+
+    async def _from_network(self, norad: int) -> str:
+        """Demodulated frames from SatNOGS Network. Public — no token at all."""
+        try:
+            frames = await self._network.latest(norad)
+        except (httpx.HTTPError, ValueError) as exc:
+            return self._fail(norad, UNREACHABLE, str(exc))
+        if not frames:
+            # Nothing heard is a real answer, and it has to stamp freshness
+            # like any other or every poll re-asks. The panel says so from
+            # `available`, and any cached frames stay on screen.
+            return self._keep(norad, self.get(norad), self._source.get(norad, NETWORK))
+        return self._keep(norad, frames, NETWORK)
+
+    def _keep(self, norad: int, frames: list[dict], source: str) -> str:
+        self._by_norad[norad] = frames[:MAX_FRAMES]
+        self._source[norad] = source
+        self._fetched_at[norad] = datetime.now(timezone.utc)
+        self._failed_at.pop(norad, None)
+        self._save_cache()
+        log.info("telemetry: %d frames for NORAD %s from %s",
+                 len(self._by_norad[norad]), norad, source)
+        return self._set(norad, OK)
 
     def _only(self, norad: int, frames: list[dict]) -> list[dict]:
         """Frames that really are this satellite's.
@@ -252,6 +344,22 @@ class TelemetryStore:
         self._failed_at[norad] = datetime.now(timezone.utc)
         return self._set(norad, status, note)
 
+    def _note_only(self, norad: int, status: str, note: str) -> str:
+        """The DB path gave up. Say why, but do not start the cooldown.
+
+        The cooldown exists to stop a wall display hammering a service that is
+        refusing it, and it is `refresh` as a whole that must respect it — set
+        here, it would also suppress the public source that is about to answer
+        perfectly well. So this only logs, and whether to back off is decided
+        once the second source has had its turn.
+        """
+        if self._db_status.get(norad) != status:
+            log.log(logging.WARNING if status == BAD_TOKEN else logging.INFO,
+                    "telemetry %s for NORAD %s%s — trying SatNOGS Network",
+                    status, norad, f": {note}" if note else "")
+            self._db_status[norad] = status
+        return status
+
     def _set(self, norad: int, status: str, note: str = "") -> str:
         """Record the state, and log it only when it changes.
 
@@ -276,21 +384,30 @@ class TelemetryStore:
     def snapshot(self, norad: int) -> dict:
         """What the panel draws, and why it is what it is.
 
-        `available` is about having frames to show; `status` is about whether
-        anything newer will arrive. They are separate because the interesting
-        case is a station whose token was removed: the last frames are still
-        the last frames, and the panel should keep showing them while saying
-        they have stopped moving.
+        Three separate facts, deliberately not collapsed into one:
+
+        `available` is about having frames to show. `status` is about whether
+        anything newer will arrive. `source` is about what kind of thing the
+        frames are — decoded fields, or bytes off the air.
+
+        They are separate because the interesting cases are the ones where they
+        disagree. A station whose token was removed still has its last frames,
+        and should keep showing them while saying they have stopped moving. A
+        station that never had a token has a full panel and a configuration
+        worth mentioning, which is `detail` rather than an error.
         """
         frames = self.get(norad)
         status = self.status(norad)
         age = self.age_s(norad)
         return {
             "norad": norad,
-            "source": "satnogs-db",
+            "source": self._source.get(norad),
             "available": bool(frames),
             "status": status,
-            "detail": DETAIL.get(status, ""),
+            # The note outranks the status line: "ok, and by the way there is
+            # no token" is more use to whoever is standing in front of this
+            # than "ok".
+            "detail": self._note.get(norad) or DETAIL.get(status, ""),
             "age_s": None if age == float("inf") else round(age, 1),
             "stale": not self.is_fresh(norad),
             "count": len(frames),
@@ -322,7 +439,7 @@ def _summarise(frame: dict) -> dict:
     elsewhere = decoded.strip() if isinstance(decoded, str) and decoded.strip() else ""
     return {
         "norad": _as_int(frame.get("norad_cat_id")),
-        "timestamp": frame.get("timestamp") or None,
+        "timestamp": _utc_stamp(frame.get("timestamp")),
         "observer": frame.get("observer") or "",
         "station_id": _as_int(frame.get("station_id")),
         "observation_id": _as_int(frame.get("observation_id")),
@@ -354,6 +471,25 @@ def _decoded_values(decoded) -> dict:
         elif isinstance(value, str):
             out[str(key)] = value[:MAX_VALUE_CHARS]
     return out
+
+
+def _utc_stamp(raw) -> str | None:
+    """The frame's time as an unambiguous UTC string.
+
+    A browser reads an ISO timestamp with no zone as *local* time. On a station
+    in Bangkok that is a silent seven-hour error on "last heard", which is the
+    one number this panel exists to show, and it would be wrong in the
+    direction that looks plausible. SatNOGS sends UTC, so the zone is asserted
+    here rather than hoped for downstream.
+
+    A timestamp that will not parse at all is passed through untouched: a frame
+    is evidence of contact even when its clock is nonsense, and dropping it
+    would lose the contact along with the clock.
+    """
+    stamp = _parse_ts(raw)
+    if stamp is None:
+        return raw or None
+    return stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _as_int(value) -> int | None:

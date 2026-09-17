@@ -13,7 +13,10 @@
   overflow: hidden;
 }
 
-.panel h2 {
+/* .tlm sits inside the footer card rather than in one of its own, so it is not
+   a .panel — but a heading that changed register at the bottom of the screen
+   would read as a different application pasted in, so it wears this one. */
+.panel h2, .tlm h2 {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -414,3 +417,114 @@
    at 9k6 FSK it is the difference between decoding a pass and missing it. */
 .rig-differs { border-left-color: var(--bad); background: var(--panel); }
 .rig-differs .rig-note { color: var(--bad); font-weight: 600; }
+
+/* ── decoded frames ───────────────────────────────────────────────────────
+   The footer's lower half: what SatNOGS demodulated out of the air, newest
+   first, under the Grafana embeds that show what eventually reached InfluxDB.
+
+   This is a readout of numbers, not a picture of the sky, so the well is
+   --sunk and not --void. The dark windows are reserved for the camera, the
+   globe and the waterfall, where a light ground would make a photograph look
+   like a broken image; a column of hex on near-black would just be a second
+   theme on one screen. */
+.tlm { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.tlm-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+
+/* The one thing on this panel meant to be read from the far side of the room,
+   so it is set at the header's size rather than the label's, and it drops the
+   heading's wide tracking — letter-spacing on a number is how a countdown ends
+   up looking like a part code. */
+.tlm-age {
+  font-size: 15px; font-weight: 500; letter-spacing: 0;
+  color: var(--ink-2); white-space: nowrap;
+}
+/* --contact is the palette's "happening now", and it only means that if it
+   expires: a frame from the last hour is live, an older one is history and
+   steps back to plain ink. JS owns the threshold. */
+.tlm-age.live { color: var(--contact); }
+
+/* Scrolls down, never across. Every field on a row either shrinks or
+   ellipsises, so a sideways scrollbar could only mean something has gone wrong
+   with the data — and on a display nobody is sitting in front of, a row that is
+   half off the edge is worse than one that is cut short. */
+.tlm-rows {
+  display: flex; flex-direction: column;
+  flex: 1 1 auto; min-height: 0;
+  overflow-x: hidden; overflow-y: auto;
+  padding: 2px; border-radius: var(--radius);
+  background: var(--sunk); border: 1px solid var(--rule-soft);
+}
+
+.tlm-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 3px 6px; border-radius: 3px;
+  font-size: 11px; white-space: nowrap;
+  color: var(--ink); text-decoration: none;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.tlm-row:last-child { border-bottom: 0; }
+/* On a sunk ground the hover has to come up towards the page, not down into
+   it — a darker row on a well reads as pressed, which is wrong for a link. */
+a.tlm-row:hover, a.tlm-row:focus-visible { background: var(--panel); }
+a.tlm-row:focus-visible { outline: 2px solid var(--track); outline-offset: -2px; }
+
+/* Our own station hearing the spacecraft is the fact this panel exists to
+   report, and --observer is the hue that already means "us" on the map, the
+   globe and the polar plot. The marker doubles it in the glyph, the way the
+   pinned satellites and the interlock gates do, so the row still declares
+   itself where colour cannot be relied on. The edge is an inset shadow rather
+   than a border so the text does not shift by 2px between row kinds. */
+.tlm-row.ours { box-shadow: inset 2px 0 0 var(--observer); }
+.tlm-row.ours .tlm-who { color: var(--observer); }
+.tlm-row.ours .tlm-who::before { content: "◉ "; }
+
+.tlm-time {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  color: var(--ink-3); flex: none;
+}
+.tlm-who { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tlm-bytes {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  color: var(--ink-3); flex: none;
+}
+/* Callsigns, so mono: HS0AK-11 and HS0K have to line up as addresses rather
+   than flow as words. */
+.tlm-ax { font-family: var(--mono); color: var(--ink-2); flex: none; }
+
+/* The hex is a fingerprint — enough to see that two frames differ, not meant
+   to be decoded by eye — so it is the quietest ink on the row and the first
+   thing allowed to truncate when the footer narrows. */
+.tlm-head {
+  font-family: var(--mono); color: var(--ink-4);
+  margin-left: auto; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Real decoded scalars, and the only values on the row a person did not have
+   to interpret, so they get the live hue the radio panel's tuned frequency
+   uses. The chip is lifted to --panel because it sits on the sunk well. */
+.tlm-vals { display: flex; gap: 4px; flex: none; }
+.tlm-val {
+  font-family: var(--mono); font-size: 10px; padding: 0 5px;
+  border: 1px solid var(--rule); border-radius: 2px;
+  background: var(--panel); color: var(--ink-3);
+}
+.tlm-val b { color: var(--contact); font-weight: 600; margin-left: 3px; }
+
+/* Empty and degraded are the states this panel is in most of the time — a
+   station between passes, or one without a DB token — and neither is a fault.
+   They are ordinary muted prose, the same register as "no prediction yet".
+   Only --warn, never --bad: a token that was supplied and rejected is worth
+   flagging, and nothing here is worth an alarm colour on a wall that runs
+   unattended for months. */
+.tlm-note { font-size: 11px; color: var(--ink-3); margin: 0; padding: 6px 2px; line-height: 1.45; }
+.tlm-note.tlm-fix { color: var(--warn); }
+
+/* On a phone the row cannot hold five columns, and the hex is the field that
+   loses least by moving: it wraps to its own line under the metadata rather
+   than being clipped to four bytes, which would make two different frames
+   look identical. */
+@media (max-width: 1000px) {
+  .tlm-row { flex-wrap: wrap; gap: 2px 8px; white-space: normal; }
+  .tlm-head { margin-left: 0; flex-basis: 100%; }
+  .tlm-rows { max-height: 50vh; }
+}

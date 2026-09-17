@@ -120,10 +120,30 @@
     <div id="waterfall-panel"><p class="muted">awaiting waterfall</p></div>
   </section>
 
-  <!-- ────────────────────────────── grafana ─────────────────────────────── -->
+  <!-- ──────────────────── grafana · decoded frames ──────────────────────── -->
+  <!-- Two accounts of the same spacecraft, stacked, and they are not equally
+       direct. Grafana shows whatever last reached the team's InfluxDB, which is
+       downstream of everything; the frames underneath are what SatNOGS actually
+       demodulated out of the air. The frames are the earlier and the more
+       certain fact, so the embed is cut back to the height of one stat number
+       and the panel below it takes the rest of the footer. -->
   <footer class="graf" style="grid-area:graf">
-    <div class="graf-strip" id="graf-strip"></div>
-    <a class="graf-open" id="graf-open" target="_blank" rel="noopener noreferrer">open full ↗</a>
+    <div class="graf-top">
+      <div class="graf-strip" id="graf-strip"></div>
+      <a class="graf-open" id="graf-open" target="_blank" rel="noopener noreferrer">open full ↗</a>
+    </div>
+
+    <!-- The age is in the header rather than on a row because it is the one
+         thing here worth reading from across the room: an orbit propagating
+         perfectly and a spacecraft that has been silent for two days look
+         identical everywhere else on this display. -->
+    <section class="tlm" id="tlm-panel">
+      <h2>Decoded frames
+        <b class="tlm-age" id="tlm-age">—</b>
+        <span class="hint" id="tlm-hint">—</span>
+      </h2>
+      <div class="tlm-body" id="tlm-body"><p class="tlm-note">awaiting SatNOGS</p></div>
+    </section>
   </footer>
 
 </div>
