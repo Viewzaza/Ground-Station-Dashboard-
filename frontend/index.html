@@ -287,9 +287,11 @@
           <div class="sched-campaign-row">
             <span class="muted">Target: KNACKSAT-2 · NORAD 67683</span>
           </div>
-          <div class="sched-campaign-row">
+          <div class="sched-campaign-row sched-campaign-row-slider">
             <label for="campaign-max-total">Max bookings / run</label>
-            <input id="campaign-max-total" type="number" min="1" max="1000">
+            <input id="campaign-max-total" type="range" min="1" max="150" step="1"
+                   aria-describedby="campaign-max-total-value">
+            <output id="campaign-max-total-value" for="campaign-max-total">150</output>
             <span id="campaign-cfg-status" class="hint"></span>
             <button class="btn btn-quiet" id="campaign-cfg-save" type="button">SAVE</button>
           </div>

@@ -635,7 +635,9 @@ async function loadConfig() {
       cfg.db_token_set ? 'saved (hidden) — leave blank to keep' : 'unchanged';
     document.getElementById('schedule-cfg-network-token').placeholder =
       cfg.network_token_set ? 'saved (hidden) — leave blank to keep' : 'unchanged';
-    document.getElementById('campaign-max-total').value = cfg.campaign_max_total || '';
+    const maxTotalInput = document.getElementById('campaign-max-total');
+    maxTotalInput.value = cfg.campaign_max_total || 150;
+    document.getElementById('campaign-max-total-value').textContent = maxTotalInput.value;
     networkTokenSet = !!cfg.network_token_set;
     updateCampaignGate();
   } catch (err) {
@@ -870,7 +872,8 @@ function mountCampaign() {
   document.getElementById('campaign-preview-btn').addEventListener('click', runCampaignPreview);
   document.getElementById('campaign-commit-btn').addEventListener('click', confirmCampaign);
   document.getElementById('campaign-cfg-save').addEventListener('click', saveCampaignConfig);
-  document.getElementById('campaign-max-total').addEventListener('input', () => {
+  document.getElementById('campaign-max-total').addEventListener('input', (e) => {
+    document.getElementById('campaign-max-total-value').textContent = e.target.value;
     campaignConfigDirty = true;
     updateCampaignGate();
   });

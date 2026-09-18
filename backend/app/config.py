@@ -140,6 +140,12 @@ class Settings(BaseSettings):
     # that could look like spamming the community's shared stations from one
     # run, without hardcoding today's exact station count.
     campaign_max_total: int = 150
+    # None (default) means "follow the global mock flag". Set explicitly to
+    # run Network Campaign against real SatNOGS Network while every other
+    # component (rotator, camera, the Station Schedule tab) stays mocked -
+    # e.g. a dev box that must not open a second live connection to a
+    # station's real rotctld.
+    campaign_mock: bool | None = None
 
     # --- derived ------------------------------------------------------------
     @property

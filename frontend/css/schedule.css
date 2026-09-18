@@ -166,6 +166,18 @@
   font: inherit;
   padding: 4px 6px;
 }
+.sched-campaign-row-slider input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 120px;
+  max-width: 220px;
+  accent-color: var(--track);
+}
+.sched-campaign-row-slider output {
+  min-width: 2.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
 #campaign-preview-result { margin-bottom: 8px; }
 #campaign-commit-btn { margin-bottom: 8px; }
 

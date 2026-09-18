@@ -47,6 +47,9 @@ class CampaignService:
     def is_running(self) -> bool:
         return self._running
 
+    def _effective_mock(self) -> bool:
+        return self.s.mock if self.s.campaign_mock is None else self.s.campaign_mock
+
     # --- settings ---------------------------------------------------------
     def _build_autoscheduler_settings(self) -> AutoSettings:
         # Reuses ScheduleService's own builder for station_id/db_token/
@@ -64,7 +67,7 @@ class CampaignService:
                 return {"status": "running"}
             self._running = True
         try:
-            if self.s.mock:
+            if self._effective_mock():
                 result = self._mock_preview()
             else:
                 result = await asyncio.to_thread(self._preview_sync)
@@ -127,7 +130,7 @@ class CampaignService:
                 return {"status": "running"}
             self._running = True
         try:
-            if self.s.mock:
+            if self._effective_mock():
                 result = self._mock_commit(items, trigger)
             else:
                 result = await asyncio.to_thread(self._commit_sync, items, trigger)
