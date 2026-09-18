@@ -1,0 +1,135 @@
+/* Design tokens. Everything else references these — change a colour here and
+   the whole console follows.
+
+   This is a LIGHT instrument panel with DARK instrument windows. The chrome,
+   cards and readouts are paper; the globe, the camera tile and the waterfall
+   stay near-black, because space does not have a light mode and a photographic
+   night sky on a white card looks like a broken image rather than a view.
+   `--void` is that window colour and is deliberately not derived from the rest
+   of the palette.
+
+   Only three data hues, and they are the same three everywhere — 2D map, 3D
+   globe, polar plot. `--track` is the orbit and ground track, `--contact` is
+   "happening now" (live values, in-view arcs, the satellite itself), and
+   `--observer` is us, the ground station. They are far apart in hue under
+   deuteranopia, and lightness carries a fourth channel where a fourth is
+   needed, because a wall display gets read from across a room.
+
+   The legacy names (--bg, --line, --accent, --text …) are kept as aliases onto
+   the new palette so that every stylesheet did not have to change at once. New
+   rules should prefer the semantic names below them. */
+
+:root {
+  /* --- surfaces ------------------------------------------------------- */
+  --surface:  #f2f4f5;   /* page */
+  --panel:    #ffffff;   /* cards */
+  --sunk:     #e9edef;   /* inset wells: readouts, lists, inputs */
+  --chrome:   #e4eaed;   /* header bar and footer rail */
+  --chrome-2: #d8e0e4;   /* buttons, hover */
+  --void:     #0b1116;   /* instrument windows: globe, camera, waterfall */
+
+  /* --- ink ------------------------------------------------------------ */
+  --ink:    #0e1a1f;
+  --ink-2:  #3c4d56;
+  --ink-3:  #536169;     /* labels, eyebrows */
+  --ink-4:  #7c8c95;     /* disabled, placeholder */
+
+  /* --- rules ---------------------------------------------------------- */
+  --rule:      #cbd6db;
+  --rule-soft: #dde4e8;
+
+  /* --- data ----------------------------------------------------------- */
+  --track:    #0086ad;   /* orbit path, ground track, links, focus */
+  --contact:  #b4670f;   /* live / in view / the satellite */
+  --observer: #c42a6e;   /* the ground station */
+
+  /* --- state ---------------------------------------------------------- */
+  /* Darkened from the dark theme's values: #3ddc84 on white is illegible. */
+  --ok:   #0f7a4f;
+  --warn: #b4670f;
+  --bad:  #c42a6e;
+
+  /* --- globe surface -------------------------------------------------- */
+  /* These stay dark: they paint the instrument window, not the page. None of
+     them is a data hue — the globe is the ground the three data hues are read
+     against, so these are allowed to be blue-green without competing with
+     --track.
+
+     The first four are painted into the canvas texture that carries the globe
+     when there is no NASA imagery on disk. The last three apply to whichever
+     surface is up. */
+  --globe-ocean: #0b2033;
+  --globe-land:  #2c4437;
+  --globe-coast: #496b56;
+  --globe-grat:  #27455a;
+
+  /* The limb. A back-faced shell brightened at grazing angles, additive, so
+     this is the colour of the ring just outside the planet's silhouette and
+     nothing else — it never lands flat on the disc. */
+  --globe-atmo:  #3f8fb4;
+  /* Phong specular for the drawn surface: near-black on purpose. A drawn
+     diagram with a gloss highlight on it reads as a bug. */
+  --globe-spec:  #0d1820;
+  /* Sun glint on water, for the photographic surface only. Desaturated so that
+     a bright spot on the ocean cannot be mistaken for a fourth data hue. */
+  --globe-glint: #cfe4ee;
+
+  --shadow: 0 1px 2px rgba(14, 26, 31, .06), 0 10px 26px -18px rgba(14, 26, 31, .34);
+
+  /* System stacks rather than a webfont: the station may sit on an isolated
+     LAN, and a Google Fonts <link> would leave the display in fallback with
+     no way to tell. Numbers are monospaced so columns of them line up. */
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+          "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Mono", "SF Mono", ui-monospace, "Roboto Mono", Menlo,
+          Consolas, monospace;
+
+  --gap: 10px;
+  --hdr-h: 62px;
+  /* The footer band. It carries four panels abreast in equal columns — decoded
+     frames, the satellite selector, the 5024 feed and the Grafana embeds — so
+     there is one number here and the widths follow from it. Everything this
+     buys is height: rows in the frame list, entries in the feed, and the room
+     the embeds need to sit two-by-two rather than in a thin file. The row
+     template in layout.css supplies the floor. */
+  --graf-h: 240px;
+  --radius: 4px;
+
+  /* --- legacy aliases, so older rules keep working -------------------- */
+  --bg:        var(--surface);
+  --panel-2:   var(--sunk);
+  --line:      var(--rule);
+  --line-soft: var(--rule-soft);
+  --text:      var(--ink);
+  --muted:     var(--ink-3);
+  --dim:       var(--ink-4);
+  --accent:    var(--track);
+  --accent-2:  var(--contact);
+  --night:     rgba(16, 34, 44, .18);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--surface);
+  color: var(--ink);
+  font: 13px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;            /* wall display: released below 1000px */
+}
+
+h1, h2 { margin: 0; font-weight: 600; }
+
+/* Every number on the page: monospaced and tabular, so a digit changing does
+   not shift the ones beside it. A readout that jitters is hard to read at a
+   glance, which is the only way a wall display is ever read. */
+b, .num, input[type="number"] { font-variant-numeric: tabular-nums; }
+
+.muted { color: var(--ink-3); }
+.hint  { margin-left: auto; color: var(--ink-4); font-weight: 400; letter-spacing: 0; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }

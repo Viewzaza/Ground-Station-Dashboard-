@@ -1,0 +1,33 @@
+# Production: the real Hikvision camera.
+#
+# Credentials come from the environment (docker-compose passes CAM_* through),
+# never from this file and never from the repo. go2rtc expands ${VAR} natively.
+#
+# Stream NAMES are the contract with the frontend: cam_main and cam_sub exist in
+# both this file and go2rtc.mock.yaml, so no application code knows the difference.
+
+api:
+  listen: ":1984"
+  origin: "*"
+
+rtsp:
+  listen: ":8554"
+  # Force TCP transport. Over UDP, RTP negotiates a client port and hands the
+  # camera the container's 172.x address, which is unreachable. TCP keeps this
+  # working on the default bridge network.
+  default_query: "video&audio&transport=tcp"
+
+webrtc:
+  listen: ":8555"
+  candidates:
+    # Replace with the server's LAN address if the display is a different machine.
+    - stun:8555
+
+streams:
+  cam_main:
+    - rtsp://${CAM_USER}:${CAM_PASS}@${CAM_HOST}:554/Streaming/Channels/101#media=video#backchannel=0
+  cam_sub:
+    - rtsp://${CAM_USER}:${CAM_PASS}@${CAM_HOST}:554/Streaming/Channels/102#media=video#backchannel=0
+
+log:
+  level: info
