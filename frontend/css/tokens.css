@@ -68,15 +68,13 @@
 
   --gap: 10px;
   --hdr-h: 62px;
-  /* The footer row, and the slice of its WIDTH the Grafana embeds get — the
-     two panels sit side by side, so the second number is a width. The iframes
-     are the one of the pair that must not grow: four stat panels are four
-     numbers however much room they are given, while the frame list turns width
-     into legible rows and height into more passes. So --graf-strip-w is a
-     ceiling the embeds may shrink below, and everything --graf-h buys goes to
-     the frames. The row template in layout.css supplies the height floor. */
-  --graf-h: 180px;
-  --graf-strip-w: 52%;
+  /* The footer band. It carries four panels abreast in equal columns — decoded
+     frames, the satellite selector, the 5024 feed and the Grafana embeds — so
+     there is one number here and the widths follow from it. Everything this
+     buys is height: rows in the frame list, entries in the feed, and the room
+     the embeds need to sit two-by-two rather than in a thin file. The row
+     template in layout.css supplies the floor. */
+  --graf-h: 240px;
   --radius: 4px;
 
   /* --- legacy aliases, so older rules keep working -------------------- */

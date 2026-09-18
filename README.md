@@ -4,28 +4,30 @@ An operator display for the KNACKSAT-2 ground control station run by **SatNOGS
 station 5024 — INSTED-Ground Station (UHF)**, grid OK03gt, 60 m ASL.
 
 The camera sits in the centre of the screen, with live satellite tracking to its
-left, pass and antenna information to its right, radio and the last pass's
-signal under them, and KNACKSAT-2 telemetry along the bottom. It is built for a
-wall-mounted display that is left running, and reflows down to a phone.
+left, the next pass and the antenna to its right, radio and the last pass's
+signal under them. Along the bottom is one band of four equal panels: the frames
+SatNOGS decoded, which satellite is being tracked, what station 5024 has been
+doing, and the team's Grafana. It is built for a wall-mounted display that is
+left running, and reflows down to a phone.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ KNACKSAT-2 · 67683 │ UTC/ICT │ NEXT AOS -00:14:22 │ ● API ● CAM ● ROT ● TLE  │
 ├─────────────────┬────────────────────────────────┬───────────────────────────┤
-│  GROUND TRACK   │                                │ SATELLITE  amateur cat.   │
-│  footprint,     │            CAMERA              │ NEXT PASS  AOS/TCA/LOS    │
-│  terminator     │        one tile, main          │ ROTATOR    polar+control  │
-├─────────────────┤    (dark instrument window)    │ SATNOGS    5024 activity  │
+│  GROUND TRACK   │                                │ NEXT PASS  AOS/TCA/LOS    │
+│  footprint,     │            CAMERA              │ ROTATOR    polar plot,    │
+│  terminator     │        one tile, main          │            cable wrap     │
+├─────────────────┤    (dark instrument window)    │            + control      │
 │  ORBIT (3D)     │                                │                           │
 │  earth-fixed    │                                │                           │
 ├─────────────────┼────────────────────────────────┴───────────────────────────┤
 │ RADIO           │ LAST SIGNAL   waterfall of the most recent 5024 pass       │
 │ tuned + doppler │ time ─────────────────────────────────────────────────▶    │
-├─────────────────┴────────────────────────────────────────┬───────────────────┤
-│ DECODED FRAMES  2 h ago       SatNOGS network · 8 frames │ GRAFANA     ↗     │
-│  10:31:06Z WH6GVF UHF 165 B HS0K→HS0AK-11 90A66082964076 │ [beacon] [batt V] │
-│  10:30:36Z WH6GVF UHF 165 B HS0K→HS0AK-11 90A66082964076 │ [solar W] [bat°C] │
-└──────────────────────────────────────────────────────────┴───────────────────┘
+├─────────────────┴─┬───────────────────┬───────────────────┬──────────────────┤
+│ DECODED FRAMES    │ SATELLITE         │ SATNOGS 5024      │ GRAFANA       ↗  │
+│ 48 min ago        │ search the        │ client, next job  │ [beacon][batt V] │
+│  01:34Z 165 B HS0K│ amateur catalogue │ recent obs        │ [solar][batt °C] │
+└───────────────────┴───────────────────┴───────────────────┴──────────────────┘
 ```
 
 Light paper chrome, dark instrument windows — see
@@ -172,16 +174,16 @@ a strip.
 ## Decoded frames
 
 `GET /api/telemetry` is the most recent frames SatNOGS has for the tracked
-satellite, newest first. It takes the left of the footer, with the Grafana
-embeds beside it on the right. The headline is the **age of the newest frame**.
+satellite, newest first. It is the leftmost of the four panels along the bottom.
+The headline is the **age of the newest frame**.
 That is the point of the panel: a satellite propagating perfectly and a
 satellite that has been silent for two days look identical on the map, the
 globe and the polar plot, and "heard 2 h ago" is the only line on this display
 that tells them apart.
 
-The two sit on one line because Grafana's leftmost panel — *time since last
-beacon* — is asking exactly the question the frame list answers, and the two
-disagreeing is worth seeing at a glance rather than one above the other.
+It sits on the same line as Grafana because Grafana's leftmost panel — *time
+since last beacon* — is asking exactly the question the frame list answers, and
+the two disagreeing is worth seeing at a glance rather than one above the other.
 
 There are two sources, and the panel says which one it is showing.
 
@@ -209,17 +211,23 @@ anyone's frame; "did *we* hear it" is a different question, and it gets a
 marked row rather than an empty panel.
 
 **Grafana gave up most of its width** to make room, from the full span of the
-wall to about half the footer, and the footer itself got shorter. Width is what
-does the work here: four stat panels are four numbers however much room they
-are given, so narrowing them costs nothing, while the frame list turns width
-into legible rows and height into more passes on screen.
+wall to a quarter of the band, and its four stat panels now wrap two-by-two
+inside that quarter. Four stat panels are four numbers however much room they
+are given, so narrowing them costs nothing that the frame list beside them does
+not use better.
 
-The two are not equally direct and are now sized that way: Grafana shows
-whatever last reached the team's InfluxDB, which is downstream of everything,
-while the frames are what SatNOGS demodulated out of the air. The gap is
-visible on the wall right now — Grafana's "time since last beacon" reads 6
-hours against the frame panel's 2, because they are measuring different things
-at different points in the same pipeline. Side by side, that is one glance.
+Grafana and the frames are not equally direct: Grafana shows whatever last
+reached the team's InfluxDB, which is downstream of everything, while the frames
+are what SatNOGS demodulated out of the air. The gap is visible on the wall
+right now — Grafana's "time since last beacon" reads 8 hours against the frame
+panel's 48 minutes, because they are measuring different things at different
+points in the same pipeline. On one line, that is one glance.
+
+**The satellite selector and the 5024 activity feed moved down here too**, out
+of the right-hand column. That column was carrying four panels and losing: the
+selector had collapsed to its own heading with no list under it. What is left
+up there — the next pass and the rotator — is what is watched *during* a pass,
+and what came down is what is consulted between them.
 
 ## Things that are the way they are for a reason
 

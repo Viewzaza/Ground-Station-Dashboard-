@@ -66,18 +66,13 @@
   </section>
 
   <!-- ─────────────────────────── right-hand column ──────────────────────── -->
+  <!-- Two panels used to sit above these and have moved to the footer: the
+       satellite selector and the 5024 activity feed. Both are about choosing
+       and checking rather than watching, and up here they were squeezing the
+       two that are watched during a pass — the selector had collapsed to its
+       own heading. What is left is the pass and the antenna, which is what
+       this column is for. -->
   <aside class="track-col" style="grid-area:track">
-
-    <!-- The list scrolls, so this is the panel that gives up height when the
-         column is short — the rotator controls below must not be clipped. -->
-    <section class="panel satpanel">
-      <h2>Satellite</h2>
-      <div class="satselect">
-        <input id="sat-search" type="search" placeholder="search the amateur catalogue…"
-               autocomplete="off" spellcheck="false">
-        <ul id="sat-list" class="sat-list"></ul>
-      </div>
-    </section>
 
     <section class="panel">
       <h2>Next pass</h2>
@@ -97,11 +92,6 @@
       <div class="rot-control" id="rot-control">
         <span class="muted">control state unknown</span>
       </div>
-    </section>
-
-    <section class="panel">
-      <h2>SatNOGS 5024</h2>
-      <div id="satnogs-activity"><p class="muted">awaiting SatNOGS</p></div>
     </section>
 
   </aside>
@@ -143,10 +133,36 @@
       <div class="tlm-body" id="tlm-body"><p class="tlm-note">awaiting SatNOGS</p></div>
     </section>
 
-    <div class="graf-top">
+    <!-- These three are one question asked at three removes, which is why they
+         are now one band rather than scattered up the right-hand column: which
+         spacecraft are we on, what has our station been doing about it, and
+         what came out of the air. They are `fpanel` and not `panel` because a
+         card inside a card draws two borders and means nothing extra — the
+         rule between them is enough. -->
+    <section class="fpanel satpanel">
+      <h2>Satellite</h2>
+      <div class="satselect">
+        <input id="sat-search" type="search" placeholder="search the catalogue…"
+               autocomplete="off" spellcheck="false">
+        <ul id="sat-list" class="sat-list"></ul>
+      </div>
+    </section>
+
+    <section class="fpanel">
+      <h2>SatNOGS 5024</h2>
+      <div id="satnogs-activity"><p class="muted">awaiting SatNOGS</p></div>
+    </section>
+
+    <!-- Wears the same heading as the three beside it, which also buys the
+         embeds the whole column: the "open full" link used to sit next to them
+         and take 72px off the width, which at a quarter of the band was the
+         difference between a readable panel title and a single letter. -->
+    <section class="fpanel graf-top">
+      <h2>Grafana
+        <a class="graf-open" id="graf-open" target="_blank" rel="noopener noreferrer">open full ↗</a>
+      </h2>
       <div class="graf-strip" id="graf-strip"></div>
-      <a class="graf-open" id="graf-open" target="_blank" rel="noopener noreferrer">open full ↗</a>
-    </div>
+    </section>
   </footer>
 
 </div>

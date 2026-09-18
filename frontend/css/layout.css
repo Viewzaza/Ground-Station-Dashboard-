@@ -15,7 +15,7 @@
      above it. It is lower than it was while the two panels were stacked — they
      now share this height rather than dividing it. */
   grid-template-rows:
-    var(--hdr-h) 1fr 1fr minmax(110px, 150px) minmax(150px, var(--graf-h));
+    var(--hdr-h) 1fr 1fr minmax(110px, 150px) minmax(200px, var(--graf-h));
   /* One camera instead of two frees the whole middle column, so the tile now
      spans both rows and the map and globe get a full row each rather than
      sharing one.
@@ -43,11 +43,10 @@
 .track-col .panel { flex: none; }
 /* The rotator panel carries the control row, which is a fixed height and must
    never be clipped — a GO button the operator cannot see is worse than a small
-   polar plot. So it has a floor, and the satellite panel below absorbs the
-   difference because its list already scrolls. */
+   polar plot. With the selector and the activity feed moved to the footer it
+   is no longer competing with them for this column, so it simply takes what is
+   left below the next-pass card. */
 .track-col .panel.grow { flex: 1 1 auto; min-height: 240px; }
-.track-col .panel.satpanel { flex: 0 1 auto; min-height: 0; overflow: hidden; }
-.track-col .panel.satpanel .sat-list { flex: 1 1 auto; max-height: 132px; min-height: 38px; }
 
 /* ---------- 4K wall: more frames, taller globe ---------- */
 /* The extra room here buys rows in the frame list, not a bigger Grafana: four
@@ -55,10 +54,10 @@
    to say, while the list can always show another pass. So the height goes up
    and Grafana's share of the width comes down. */
 @media (min-width: 2400px) {
-  :root { --hdr-h: 74px; --graf-h: 340px; --graf-strip-w: 38%; --gap: 12px; }
+  :root { --hdr-h: 74px; --graf-h: 340px; --gap: 12px; }
   .wall {
     grid-template-rows:
-      var(--hdr-h) 1fr 1.15fr minmax(140px, 190px) minmax(190px, var(--graf-h));
+      var(--hdr-h) 1fr 1.15fr minmax(140px, 190px) minmax(240px, var(--graf-h));
   }
 }
 
@@ -68,7 +67,7 @@
     grid-template-columns: 1fr 1fr;
     grid-template-rows:
       var(--hdr-h) minmax(240px, 1.2fr) 1fr 1fr minmax(110px, 150px)
-      minmax(150px, var(--graf-h));
+      minmax(200px, var(--graf-h));
     grid-template-areas:
       "hdr   hdr"
       "cam   cam"
@@ -104,7 +103,7 @@
       minmax(300px, 1fr)
       minmax(300px, 1fr)
       minmax(130px, 150px)
-      minmax(150px, var(--graf-h));
+      minmax(200px, var(--graf-h));
   }
 }
 
@@ -117,7 +116,7 @@
       minmax(260px, 1fr)
       minmax(260px, 1fr)
       minmax(130px, 150px)
-      minmax(150px, var(--graf-h));
+      minmax(200px, var(--graf-h));
   }
 }
 
@@ -243,35 +242,58 @@
   .hdr-chips { grid-column: 1 / -1; margin-left: 0; }
 }
 
-/* ---------- footer: decoded frames beside the grafana strip ----------
-   One card holding two panels, side by side. The frames take the left and grow;
-   Grafana takes a fixed share of the width on the right.
+/* ---------- footer: one band, four panels ----------
+   Decoded frames, the satellite selector, the 5024 activity feed, and the
+   Grafana embeds, left to right. They are one card rather than four because
+   they are one question at increasing remove — which spacecraft, what our
+   station did about it, what came out of the air, and what eventually reached
+   the team's database — and a rule between them says that better than four
+   separate borders would.
 
-   Width is what keeps the embeds small here, where height used to. Four stat
-   panels are a fixed amount of information — four numbers — so narrowing them
-   costs nothing, while the frame list turns every pixel it is given into
-   another pass on screen. That asymmetry is the whole reason for the split
-   being uneven rather than half and half.
+   The four share the band equally — one grid, four identical columns. They are
+   read as a set rather than ranked, and an even rhythm across the bottom of the
+   wall is easier to scan from a distance than four different widths. Every
+   panel inside is built to give something up as it narrows: the frame rows
+   ellipsize their hex, the selector's list scrolls, the feed scrolls, and the
+   embeds wrap two-by-two.
 
-   The frames are first in the DOM as well as on the left, so the reading order
-   a screen reader takes is the one the eye takes. */
+   DOM order is left-to-right order, so a screen reader takes the same path the
+   eye does. */
 .graf {
-  display: flex; flex-direction: row; gap: var(--gap);
+  display: grid; gap: var(--gap);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   background: var(--panel); border: 1px solid var(--rule);
   border-radius: var(--radius); padding: 8px; min-height: 0;
   box-shadow: var(--shadow);
 }
-.graf .tlm { flex: 1 1 auto; min-width: 0; }
-/* Allowed to shrink but not to grow: past about this width the stat panels are
-   only setting their own numbers in larger type, and the room is worth more to
-   the list beside them. */
-.graf-top {
-  display: flex; gap: var(--gap); align-items: stretch;
-  flex: 0 1 var(--graf-strip-w); min-width: 0;
+/* A hairline instead of a border box: these are divisions of one card, not
+   cards of their own. */
+.graf > * + * { border-left: 1px solid var(--rule-soft); padding-left: var(--gap); }
+
+.graf .tlm { min-width: 0; }
+.fpanel {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  overflow: hidden;
 }
+/* In the right-hand column this list was capped so it could not push the
+   search box out of a panel that was already losing the fight for height.
+   Here it has its own band and simply takes what is left under the box. */
+.graf .sat-list { max-height: none; flex: 1 1 auto; min-height: 38px; }
+/* Five rows of feed in a fixed band: scroll rather than clip, like every other
+   list on this page. */
+.graf #satnogs-activity { overflow-y: auto; min-height: 0; flex: 1 1 auto; }
+.graf-top .graf-strip { flex: 1 1 auto; min-height: 0; }
+/* Two columns rather than four in a line. Sharing the band with three other
+   panels leaves these about 200px each, and a stat panel that narrow clips its
+   own title and wraps "No data" mid-word — Grafana is cross-origin, so its
+   text is not ours to reflow. Wrapping them into a square uses the band's
+   height, which is otherwise spent on nothing, and each panel gets back twice
+   the width. A fifth panel would flow onto a third row and be cut off, so the
+   count in GS_GRAFANA_PANELS wants to stay even and small. */
 .graf-strip {
   display: grid; gap: var(--gap); flex: 1; min-width: 0;
-  grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
 }
 /* grafana.js requests these panels with theme=dark, and it is cross-origin, so
    each iframe is a near-black rectangle we cannot restyle — the only honest
@@ -316,35 +338,43 @@
   background: var(--graf-panel);
   pointer-events: none;
 }
-/* A quiet chrome button on the white strip, not a link in running text. */
+/* Sits in the heading now rather than beside the embeds, so it is a quiet link
+   at the right end of that line — the same place and weight as the `.hint` the
+   other three panels carry. A bordered button up here would be the loudest
+   thing in the band and it is the least urgent. */
 .graf-open {
-  align-self: flex-start; color: var(--ink-3); text-decoration: none;
-  font-size: 11px; padding: 4px 8px; border: 1px solid var(--rule); border-radius: 3px;
-  background: var(--chrome);
-  white-space: nowrap;
+  margin-left: auto; color: var(--ink-4); text-decoration: none;
+  font-size: 10px; letter-spacing: 0; font-weight: 400; white-space: nowrap;
 }
 .graf-open:hover {
   color: var(--track);
   color: color-mix(in srgb, var(--track) 75%, var(--ink));
-  border-color: var(--track);
-  background: var(--chrome-2);
+  text-decoration: underline;
 }
+.graf-open:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
 
-/* Two panels abreast need a wall to be abreast on. On a laptop the footer is
-   the full width of a two-column grid rather than a three-column one, so
-   Grafana gives up a little more of it and the frame rows stay on one line. */
-@media (max-width: 1400px) {
-  :root { --graf-strip-w: 40%; }
-  .graf-strip { grid-auto-columns: minmax(120px, 1fr); }
-}
+/* Four panels abreast need a wall to be abreast on. On a laptop the footer is
+   the width of a two-column grid rather than a three-column one, so everything
+   that is allowed to shrink does, and the frame rows keep their columns. */
+/* The embeds stay two-by-two here. A quarter of a laptop's footer is about
+   340px, and four panels in a single file inside that are 80px each — narrower
+   than the number they are drawing. Two columns of 160 is the readable shape at
+   every width that still has four panels abreast. */
 
-/* Below this there is no width to put two things beside each other, so the
-   footer goes back to being a column: frames first, Grafana under them. The
-   stat panels also get more height each here than on the wall, because a
-   single-column phone has the width to spare and nothing else is competing for
-   the fold. */
+/* Below this there is no width to put four things beside each other, so the
+   footer becomes a column in the same order: frames, selector, activity,
+   Grafana. The rule between them turns with them — a left border on stacked
+   blocks is a stripe down the side of nothing. The stat panels also get more
+   height each here than on the wall, because a single-column phone has the
+   width to spare and nothing else is competing for the fold. */
 @media (max-width: 1000px) {
-  .graf { flex-direction: column; }
-  .graf-top { flex: none; }
-  .graf-strip { grid-auto-flow: row; grid-auto-rows: 120px; }
+  .graf { grid-template-columns: 1fr; }
+  .graf > * + * {
+    border-left: 0; padding-left: 0;
+    border-top: 1px solid var(--rule-soft); padding-top: var(--gap);
+  }
+  .graf-strip { grid-template-columns: 1fr; grid-auto-rows: 120px; }
+  /* On the wall this list is capped so it cannot push the search box off the
+     panel. Stacked, there is nothing below it to protect. */
+  .graf .sat-list { max-height: 40vh; }
 }

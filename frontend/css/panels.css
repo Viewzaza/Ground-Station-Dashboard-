@@ -16,7 +16,7 @@
 /* .tlm sits inside the footer card rather than in one of its own, so it is not
    a .panel — but a heading that changed register at the bottom of the screen
    would read as a different application pasted in, so it wears this one. */
-.panel h2, .tlm h2 {
+.panel h2, .tlm h2, .fpanel h2 {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -32,7 +32,7 @@
 .globe-host { position: relative; background: var(--void); border-radius: 4px; overflow: hidden; }
 
 /* ---------- satellite selector ---------- */
-.satselect { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.satselect { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1 1 auto; }
 #sat-search {
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
   color: var(--text); font: inherit; padding: 6px 8px;
