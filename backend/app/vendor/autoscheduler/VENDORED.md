@@ -68,11 +68,30 @@ one, and a local editable install would break the Docker build context
    surfacing, instead of a run that quietly excluded satellites looking
    identical to a totally clean one.
 
+6. **`network_client.py`: added `all_stations()`**, cached like every other
+   catalogue read in this package (new `STATIONS_ALL_TTL_S` in `config.py`).
+   Upstream has no "list every station" call because nothing in the CLI ever
+   needed one - the dashboard's network campaign scheduler needs the whole
+   catalogue to find candidate stations for the mission satellite, since
+   there is no server-side "stations that can hear this transmitter" filter.
+
+7. **New file `campaign.py`, not from upstream at all.** The satnogs-network
+   web app's own multi-station "Schedule Observations" form does this same
+   job (given one satellite, find bookable windows across many stations)
+   but its calculation runs behind an authenticated Django session, not the
+   public token-authed API this package talks to. `campaign.py` reimplements
+   the equivalent computation using the Skyfield/`Predictor`/`Calendar`
+   pieces already in this package, then submits through the same
+   `NetworkClient.schedule()` this package already had. See its module
+   docstring for the deliberate simplification (no pass-splitting) this
+   entails.
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this
   vendored copy with a normal dependency (submodule or pinned pip package).
-- Upstream both patches above to that repo.
+- Upstream patches 1-6 above to that repo (7 is dashboard-specific, not
+  upstream material).
 - `satnogs-autoscheduler` currently has no LICENSE file. This dashboard is
   MIT. Confirm licensing intent before this vendored copy is redistributed
   beyond this repo (same author/org, so likely fine, but not yet explicit).

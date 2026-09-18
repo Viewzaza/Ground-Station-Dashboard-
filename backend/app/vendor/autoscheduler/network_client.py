@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .cache import Cache
-from .config import HISTORY_TTL_S, STATION_TTL_S, Settings
+from .config import HISTORY_TTL_S, STATIONS_ALL_TTL_S, STATION_TTL_S, Settings
 from .http import SatnogsHTTPError, make_session, paginate, request
 
 log = logging.getLogger(__name__)
@@ -159,6 +159,32 @@ class NetworkClient:
 
     def get_station(self, station_id: int) -> Station:
         return Station.from_api(self.raw_station(station_id))
+
+    def all_stations(self) -> list[Station]:
+        """Every station SatNOGS Network knows about, schedulable ones only.
+
+        Used by the network campaign scheduler to find candidate stations for
+        the mission satellite - there is no server-side "list stations that
+        can hear this transmitter" filter, so this fetches the whole
+        catalogue (~160+ stations, walked across several cursor pages, same
+        pagination style as future_bookings()) and the caller filters by
+        antenna coverage itself via DbClient.transmitters_for_station().
+        """
+        def fetch() -> list[dict]:
+            url = f"{self.s.network_base_url}/stations/"
+            return list(paginate(self.session, url, params={"format": "json"}, max_pages=50))
+
+        raw = self.cache.get_or_fetch("network-stations-all", STATIONS_ALL_TTL_S, fetch)
+        stations = []
+        for row in raw:
+            try:
+                stations.append(Station.from_api(row))
+            except (KeyError, ValueError, TypeError) as exc:
+                # A station with no location set yet (lat/lng missing) is not
+                # schedulable anyway - skip it rather than losing the whole
+                # ~160-station fetch to one malformed record.
+                log.warning("skipping unparseable station %r: %s", row.get("id"), exc)
+        return [s for s in stations if s.schedulable]
 
     def future_bookings(self, station_id: int, now: datetime | None = None) -> list[Booking]:
         """Every observation already booked on this station that has not ended.

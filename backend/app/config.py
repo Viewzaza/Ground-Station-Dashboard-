@@ -128,6 +128,19 @@ class Settings(BaseSettings):
     schedule_hours: float = 48.0
     schedule_history_pages: int = 12
 
+    # --- network campaign -------------------------------------------------
+    # Daily, not more often: SatNOGS itself won't accept a booking more than
+    # ~48h out, so there is nothing new to book within the same day anyway.
+    campaign_poll_s: int = 86400
+    # KNACKSAT-2 rarely has more than a couple of useful passes at any one
+    # station within a 48h window - this is a backstop, not a tuning knob
+    # meant to be raised casually.
+    campaign_max_per_station: int = 2
+    # Bounds the worst case (~160+ candidate stations) well below anything
+    # that could look like spamming the community's shared stations from one
+    # run, without hardcoding today's exact station count.
+    campaign_max_total: int = 150
+
     # --- derived ------------------------------------------------------------
     @property
     def pinned_norad_ids(self) -> list[int]:

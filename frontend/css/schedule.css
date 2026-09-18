@@ -116,6 +116,72 @@
 .sched-settings-result { margin: 0 0 8px; min-height: 12px; }
 .sched-settings-note { font-size: 10px; line-height: 1.4; margin: 0 0 8px; }
 .sched-settings-save-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.sched-settings-divider { border: none; border-top: 1px solid var(--rule-soft); margin: 10px 0; }
+.sched-settings-subhead {
+  font-size: 10px; letter-spacing: .12em; color: var(--muted); font-weight: 600;
+  margin: 0 0 8px;
+}
+
+/* ── mode tabs (Station Schedule vs Network Campaign) ───────────────────────
+   One modal, two modes: the tabs sit below the shared header so CLOSE and
+   the settings gear (station id/tokens are account-level, not per-mode)
+   stay common to both. */
+.sched-mode-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--rule-soft);
+  flex: none;
+}
+.sched-mode-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  padding: 6px 4px 8px;
+  cursor: pointer;
+}
+.sched-mode-tab:hover { color: var(--ink-2); }
+.sched-mode-tab.is-active { color: var(--track); border-bottom-color: var(--track); }
+
+/* ── network campaign ─────────────────────────────────────────────────────── */
+.sched-campaign-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.sched-campaign-row label { font-size: 11px; color: var(--ink-3); }
+.sched-campaign-row input[type="number"] {
+  width: 80px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 4px 6px;
+}
+#campaign-preview-result { margin-bottom: 8px; }
+#campaign-commit-btn { margin-bottom: 8px; }
+
+/* Distinguishes an unattended timer-triggered run from one a human
+   confirmed - reuses the .rx-tag sizing, .sched-prio-mode's two-tone
+   auto/manual palette for the same underlying idea (system-decided vs
+   human-decided). */
+.sched-run-trigger {
+  font-size: 9px; letter-spacing: .08em; padding: 1px 6px; border-radius: 10px;
+  border: 1px solid var(--line); color: var(--ink-3);
+}
+.sched-run-trigger.manual {
+  color: var(--ink-2);
+  border-color: color-mix(in srgb, var(--track) 55%, var(--panel));
+  background: color-mix(in srgb, var(--track) 8%, var(--panel));
+}
 
 /* ── named priority lists ─────────────────────────────────────────────────── */
 .sched-list-bar { display: flex; align-items: center; gap: 4px; min-width: 0; }

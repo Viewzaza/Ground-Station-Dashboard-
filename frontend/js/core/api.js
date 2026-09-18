@@ -73,7 +73,7 @@ export const api = {
   transmittersFor: (norad)    => get(`/api/schedule/transmitters/${norad}`),
 
   scheduleConfig:      ()                     => get('/api/schedule/config'),
-  saveScheduleConfig:  (station_id, db_token) => post('/api/schedule/config', { station_id, db_token }),
+  saveScheduleConfig:  (config)                => post('/api/schedule/config', config),
   verifyStation:       (station_id)           => post('/api/schedule/config/verify-station', { station_id }),
 
   priorityLists:       ()                     => get('/api/schedule/priority-lists'),
@@ -82,4 +82,10 @@ export const api = {
   loadPriorityList:    (slug)                 => post(`/api/schedule/priority-lists/${encodeURIComponent(slug)}/load`, {}),
   renamePriorityList:  (slug, name)           =>
     post(`/api/schedule/priority-lists/${encodeURIComponent(slug)}/rename`, { name }),
+
+  campaignLastRun:     ()         => get('/api/schedule/campaign'),
+  runCampaignPreview:  ()         => post('/api/schedule/campaign/preview', {}),
+  campaignPreview:     ()         => get('/api/schedule/campaign/preview'),
+  commitCampaign:      (items)    => post('/api/schedule/campaign/commit', { items: items || null }),
+  campaignHistory:     ()         => get('/api/schedule/campaign/history'),
 };

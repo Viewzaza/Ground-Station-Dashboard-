@@ -14,6 +14,7 @@ from typing import Awaitable, Callable
 
 from .config import Settings
 from .hub import hub
+from .services.campaign_service import CampaignService
 from .services.control import ControlService
 from .services.predictor import Predictor
 from .services.rig_service import RigService
@@ -43,6 +44,7 @@ class Scheduler:
             settings, self.rotator, self.satnogs, predictor, on_state=self.set_state
         )
         self.schedule_service = ScheduleService(settings, on_state=self.set_state)
+        self.campaign_service = CampaignService(settings, self.schedule_service, on_state=self.set_state)
 
     # --- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
@@ -58,6 +60,7 @@ class Scheduler:
         self._spawn("control", self._control_loop)
         self._spawn("rig", self.rig.run)
         self._spawn("schedule", self._schedule_loop)
+        self._spawn("campaign", self._campaign_loop)
 
     async def stop(self) -> None:
         await self.rotator.stop()
@@ -149,6 +152,19 @@ class Scheduler:
         while True:
             await self.schedule_service.run_plan(hours=self.s.schedule_hours)
             await asyncio.sleep(self.s.schedule_poll_s)
+
+    async def _campaign_loop(self) -> None:
+        """Keep the ~48h network-campaign booking window full on a timer.
+
+        Always previews; only actually books if the operator has explicitly
+        turned campaign_auto_commit_enabled on (default off) - see
+        CampaignService.run_auto_cycle()'s own docstring for why the timer
+        path is allowed to auto-commit at all while the UI's manual trigger
+        never does.
+        """
+        while True:
+            await self.campaign_service.run_auto_cycle()
+            await asyncio.sleep(self.s.campaign_poll_s)
 
     async def _control_loop(self) -> None:
         """Publish the interlock whenever it changes.

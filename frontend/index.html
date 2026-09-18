@@ -204,6 +204,20 @@
                 Saved as entered — SatNOGS DB reads are unauthenticated, so
                 this can't actually be verified.
               </p>
+
+              <hr class="sched-settings-divider">
+              <h4 class="sched-settings-subhead">Network Campaign</h4>
+              <div class="sched-settings-row">
+                <label for="schedule-cfg-network-token">Network token</label>
+                <input id="schedule-cfg-network-token" type="password" autocomplete="off"
+                       placeholder="unchanged">
+              </div>
+              <p class="sched-notice sched-settings-note">
+                Enables real bookings on community stations via
+                network.satnogs.org — unlike the DB token above, this token
+                can act. Only set it if you intend to run Network Campaign.
+              </p>
+
               <div class="sched-settings-save-row">
                 <span id="schedule-cfg-save-status" class="hint"></span>
                 <button class="btn" id="schedule-cfg-save" type="button">SAVE</button>
@@ -214,44 +228,85 @@
         </div>
       </header>
 
-      <section class="schedule-section">
-        <div class="schedule-section-head">
-          <h3>Last auto schedule</h3>
-          <button class="btn" id="schedule-run" type="button">RUN NOW</button>
-        </div>
-        <div id="schedule-last-run"><p class="muted">loading…</p></div>
-      </section>
+      <div class="sched-mode-tabs">
+        <button class="sched-mode-tab is-active" id="schedule-mode-station" type="button">
+          STATION SCHEDULE
+        </button>
+        <button class="sched-mode-tab" id="schedule-mode-campaign" type="button">
+          NETWORK CAMPAIGN
+        </button>
+      </div>
 
-      <section class="schedule-section">
-        <div class="schedule-section-head">
-          <div class="sched-list-bar">
-            <div class="sched-list-picker-wrap">
-              <button class="sched-list-btn" id="schedule-list-current" type="button"
-                      aria-label="Choose a priority list">
-                <span id="schedule-list-name">Default</span>
-              </button>
-              <ul id="schedule-list-picker" class="sched-list-picker" hidden></ul>
+      <div id="schedule-mode-station-panel">
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <h3>Last auto schedule</h3>
+            <button class="btn" id="schedule-run" type="button">RUN NOW</button>
+          </div>
+          <div id="schedule-last-run"><p class="muted">loading…</p></div>
+        </section>
+
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <div class="sched-list-bar">
+              <div class="sched-list-picker-wrap">
+                <button class="sched-list-btn" id="schedule-list-current" type="button"
+                        aria-label="Choose a priority list">
+                  <span id="schedule-list-name">Default</span>
+                </button>
+                <ul id="schedule-list-picker" class="sched-list-picker" hidden></ul>
+              </div>
+              <input id="schedule-list-rename-input" class="sched-list-rename-input"
+                     type="text" hidden>
+              <button class="sched-icon-btn" id="schedule-list-rename" type="button"
+                      aria-label="Rename this list">✎</button>
             </div>
-            <input id="schedule-list-rename-input" class="sched-list-rename-input"
-                   type="text" hidden>
-            <button class="sched-icon-btn" id="schedule-list-rename" type="button"
-                    aria-label="Rename this list">✎</button>
+            <div class="schedule-save-row">
+              <span id="schedule-save-status" class="hint"></span>
+              <input id="schedule-saveas-input" class="sched-saveas-input" type="text"
+                     placeholder="new list name" hidden>
+              <button class="btn btn-quiet" id="schedule-saveas" type="button">SAVE AS</button>
+              <button class="btn" id="schedule-save" type="button">SAVE</button>
+            </div>
           </div>
-          <div class="schedule-save-row">
-            <span id="schedule-save-status" class="hint"></span>
-            <input id="schedule-saveas-input" class="sched-saveas-input" type="text"
-                   placeholder="new list name" hidden>
-            <button class="btn btn-quiet" id="schedule-saveas" type="button">SAVE AS</button>
-            <button class="btn" id="schedule-save" type="button">SAVE</button>
+          <div class="sched-add-search-wrap">
+            <input id="schedule-add-search" type="text" autocomplete="off"
+                   placeholder="search satellite by name or NORAD, then pick or press Enter…">
+            <ul id="schedule-add-suggest" class="sched-add-suggest" hidden></ul>
           </div>
-        </div>
-        <div class="sched-add-search-wrap">
-          <input id="schedule-add-search" type="text" autocomplete="off"
-                 placeholder="search satellite by name or NORAD, then pick or press Enter…">
-          <ul id="schedule-add-suggest" class="sched-add-suggest" hidden></ul>
-        </div>
-        <ul id="schedule-priorities" class="sched-prio-list"></ul>
-      </section>
+          <ul id="schedule-priorities" class="sched-prio-list"></ul>
+        </section>
+      </div>
+
+      <div id="schedule-mode-campaign-panel" hidden>
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <h3>Network Campaign</h3>
+            <button class="btn" id="campaign-preview-btn" type="button">PREVIEW</button>
+          </div>
+          <div class="sched-campaign-row">
+            <span class="muted">Target: KNACKSAT-2 · NORAD 67683</span>
+          </div>
+          <div class="sched-campaign-row">
+            <label for="campaign-max-total">Max bookings / run</label>
+            <input id="campaign-max-total" type="number" min="1" max="1000">
+            <span id="campaign-cfg-status" class="hint"></span>
+            <button class="btn btn-quiet" id="campaign-cfg-save" type="button">SAVE</button>
+          </div>
+          <p id="campaign-token-hint" class="sched-notice" hidden>
+            Set a Network token in ⚙ settings before Network Campaign can run.
+          </p>
+          <div id="campaign-preview-result"><p class="muted">no preview yet</p></div>
+          <button class="btn" id="campaign-commit-btn" type="button" hidden>CONFIRM &amp; SUBMIT</button>
+        </section>
+
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <h3>Run history</h3>
+          </div>
+          <div id="campaign-history"><p class="muted">no runs yet</p></div>
+        </section>
+      </div>
     </div>
   </div>
 

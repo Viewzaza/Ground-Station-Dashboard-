@@ -89,22 +89,60 @@ class ScheduleService:
     def _effective_db_token(self) -> str:
         return self._config.get("db_token") or self.s.satnogs_db_token
 
+    def _effective_network_token(self) -> str:
+        # Unlike station_id/db_token, there is no dashboard-wide default to
+        # fall back to here - a network token is never configured anywhere
+        # else in this codebase, on purpose (see network_client.py's
+        # schedule() docstring). Blank means "no real bookings possible".
+        return self._config.get("network_token") or ""
+
+    def campaign_auto_commit_enabled(self) -> bool:
+        return bool(self._config.get("campaign_auto_commit_enabled", False))
+
+    def campaign_max_per_station(self) -> int:
+        return int(self._config.get("campaign_max_per_station") or self.s.campaign_max_per_station)
+
+    def campaign_max_total(self) -> int:
+        return int(self._config.get("campaign_max_total") or self.s.campaign_max_total)
+
     async def get_config(self) -> dict:
         async with self._config_lock:
             return {
                 "station_id": self._effective_station_id(),
                 "station_id_is_override": bool(self._config.get("station_id")),
                 "db_token_set": bool(self._effective_db_token()),
+                "network_token_set": bool(self._effective_network_token()),
+                "campaign_auto_commit_enabled": self.campaign_auto_commit_enabled(),
+                "campaign_max_per_station": self.campaign_max_per_station(),
+                "campaign_max_total": self.campaign_max_total(),
             }
 
-    async def save_config(self, station_id: int | None, db_token: str | None) -> dict:
-        """`None` leaves a field unchanged; `""`/`0` clears the override back
-        to the dashboard's own default."""
+    async def save_config(
+        self,
+        station_id: int | None = None,
+        db_token: str | None = None,
+        network_token: str | None = None,
+        campaign_auto_commit_enabled: bool | None = None,
+        campaign_max_per_station: int | None = None,
+        campaign_max_total: int | None = None,
+    ) -> dict:
+        """`None` leaves a field unchanged; `""`/`0` clears an override back
+        to its default. `campaign_auto_commit_enabled` is a plain bool, not
+        subject to the "0 clears it" convention - pass it explicitly to
+        change it, omit it to leave it as-is."""
         async with self._config_lock:
             if station_id is not None:
                 self._config["station_id"] = station_id or None
             if db_token is not None:
                 self._config["db_token"] = db_token or None
+            if network_token is not None:
+                self._config["network_token"] = network_token or None
+            if campaign_auto_commit_enabled is not None:
+                self._config["campaign_auto_commit_enabled"] = bool(campaign_auto_commit_enabled)
+            if campaign_max_per_station is not None:
+                self._config["campaign_max_per_station"] = campaign_max_per_station or None
+            if campaign_max_total is not None:
+                self._config["campaign_max_total"] = campaign_max_total or None
             await asyncio.to_thread(self._write_config)
         return await self.get_config()
 

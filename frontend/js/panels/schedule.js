@@ -22,6 +22,10 @@ let activeListSlug = 'default';
 let listPickerOpen = false;
 let settingsOpen = false;
 
+let networkTokenSet = false;
+let campaignPreviewItems = null;   // the exact items last previewed, so CONFIRM submits what was shown
+let campaignConfigDirty = false;   // invalidates a stale preview if config changes after it
+
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
   document.getElementById('schedule-close').addEventListener('click', close);
@@ -40,6 +44,8 @@ export function mountSchedule() {
 
   mountSettings();
   mountPriorityLists();
+  mountModeTabs();
+  mountCampaign();
 
   // The transmitter picker, the settings popover and the list picker each
   // have no input to blur — all three are dismissed by clicking anywhere
@@ -67,7 +73,10 @@ const panel = () => document.getElementById('schedule-panel');
 
 async function open() {
   panel().hidden = false;
-  await Promise.all([loadLastRun(), loadPriorities(), loadConfig(), loadPriorityLists()]);
+  await Promise.all([
+    loadLastRun(), loadPriorities(), loadConfig(), loadPriorityLists(),
+    loadCampaignLastRun(), loadCampaignHistory(),
+  ]);
 }
 
 function close() {
@@ -624,6 +633,11 @@ async function loadConfig() {
     document.getElementById('schedule-cfg-station').value = cfg.station_id || '';
     document.getElementById('schedule-cfg-token').placeholder =
       cfg.db_token_set ? 'saved (hidden) — leave blank to keep' : 'unchanged';
+    document.getElementById('schedule-cfg-network-token').placeholder =
+      cfg.network_token_set ? 'saved (hidden) — leave blank to keep' : 'unchanged';
+    document.getElementById('campaign-max-total').value = cfg.campaign_max_total || '';
+    networkTokenSet = !!cfg.network_token_set;
+    updateCampaignGate();
   } catch (err) {
     console.error('[schedule] config', err);
   }
@@ -653,6 +667,7 @@ async function saveConfig() {
   const status = document.getElementById('schedule-cfg-save-status');
   const stationInput = document.getElementById('schedule-cfg-station');
   const tokenInput = document.getElementById('schedule-cfg-token');
+  const networkTokenInput = document.getElementById('schedule-cfg-network-token');
 
   const stationVal = stationInput.value.trim();
   // Blank clears the override back to the dashboard's own default (0 is
@@ -661,12 +676,16 @@ async function saveConfig() {
   // Blank token means "leave whatever is already saved alone" — the field
   // never redisplays a saved secret, so blank cannot mean "clear it".
   const tokenVal = tokenInput.value ? tokenInput.value : undefined;
+  const networkTokenVal = networkTokenInput.value ? networkTokenInput.value : undefined;
 
   btn.disabled = true;
   status.textContent = 'saving…';
   try {
-    await api.saveScheduleConfig(stationId, tokenVal);
+    await api.saveScheduleConfig({
+      station_id: stationId, db_token: tokenVal, network_token: networkTokenVal,
+    });
     tokenInput.value = '';
+    networkTokenInput.value = '';
     await loadConfig();
     status.textContent = 'saved';
   } catch (err) {
@@ -823,4 +842,271 @@ async function confirmSaveAs() {
     cancelSaveAs();
     setTimeout(() => { status.textContent = ''; }, 3000);
   }
+}
+
+// --- mode tabs (Station Schedule vs Network Campaign) -----------------------
+
+function mountModeTabs() {
+  document.getElementById('schedule-mode-station').addEventListener('click', () => setMode('station'));
+  document.getElementById('schedule-mode-campaign').addEventListener('click', () => setMode('campaign'));
+}
+
+function setMode(mode) {
+  const stationTab = document.getElementById('schedule-mode-station');
+  const campaignTab = document.getElementById('schedule-mode-campaign');
+  const stationPanel = document.getElementById('schedule-mode-station-panel');
+  const campaignPanel = document.getElementById('schedule-mode-campaign-panel');
+
+  const isCampaign = mode === 'campaign';
+  stationTab.classList.toggle('is-active', !isCampaign);
+  campaignTab.classList.toggle('is-active', isCampaign);
+  stationPanel.hidden = isCampaign;
+  campaignPanel.hidden = !isCampaign;
+}
+
+// --- network campaign ---------------------------------------------------------
+
+function mountCampaign() {
+  document.getElementById('campaign-preview-btn').addEventListener('click', runCampaignPreview);
+  document.getElementById('campaign-commit-btn').addEventListener('click', confirmCampaign);
+  document.getElementById('campaign-cfg-save').addEventListener('click', saveCampaignConfig);
+  document.getElementById('campaign-max-total').addEventListener('input', () => {
+    campaignConfigDirty = true;
+    updateCampaignGate();
+  });
+}
+
+function updateCampaignGate() {
+  const hint = document.getElementById('campaign-token-hint');
+  const previewBtn = document.getElementById('campaign-preview-btn');
+  hint.hidden = networkTokenSet;
+  previewBtn.disabled = !networkTokenSet;
+  if (campaignConfigDirty) invalidateCampaignPreview();
+}
+
+function invalidateCampaignPreview() {
+  campaignPreviewItems = null;
+  document.getElementById('campaign-commit-btn').hidden = true;
+}
+
+async function saveCampaignConfig() {
+  const btn = document.getElementById('campaign-cfg-save');
+  const status = document.getElementById('campaign-cfg-status');
+  const input = document.getElementById('campaign-max-total');
+  const val = input.value.trim();
+  btn.disabled = true;
+  status.textContent = 'saving…';
+  try {
+    await api.saveScheduleConfig({ campaign_max_total: val ? parseInt(val, 10) : 0 });
+    campaignConfigDirty = false;
+    status.textContent = 'saved';
+  } catch (err) {
+    status.textContent = `failed: ${err}`;
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { status.textContent = ''; }, 3000);
+  }
+}
+
+async function runCampaignPreview() {
+  const btn = document.getElementById('campaign-preview-btn');
+  const box = document.getElementById('campaign-preview-result');
+  invalidateCampaignPreview();
+  btn.disabled = true;
+  btn.textContent = 'CALCULATING…';
+  box.replaceChildren(note('computing candidate stations and passes…'));
+  try {
+    await api.runCampaignPreview();
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await sleep(POLL_MS);
+      const preview = await api.campaignPreview();
+      if (preview?.status && preview.status !== 'running') {
+        renderCampaignPreview(preview);
+        break;
+      }
+    }
+  } catch (err) {
+    console.error('[schedule] campaign preview', err);
+    box.replaceChildren(note(`could not compute preview: ${err}`));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'PREVIEW';
+  }
+}
+
+function renderCampaignPreview(preview) {
+  const box = document.getElementById('campaign-preview-result');
+  box.replaceChildren();
+
+  if (preview.status === 'error') {
+    box.appendChild(note(`preview failed: ${preview.error}`));
+    return;
+  }
+
+  const items = preview.items || [];
+  const meta = document.createElement('p');
+  meta.className = 'muted sched-meta';
+  meta.textContent = `Preview: ${preview.considered_stations} station(s) considered · `
+    + `${items.length} observation(s) would be booked`;
+  box.appendChild(meta);
+
+  if (items.length) {
+    const table = document.createElement('table');
+    table.className = 'sched-table';
+    const thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>Station</th><th>Start UTC</th><th>End UTC</th><th>Max El</th></tr>';
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    const shown = items.slice(0, 20);
+    for (const item of shown) {
+      const tr = document.createElement('tr');
+      for (const text of [
+        item.station_name || `Station ${item.station_id}`,
+        shortTime(item.start, 'UTC'),
+        shortTime(item.end, 'UTC'),
+        `${item.max_elevation_deg.toFixed(0)}°`,
+      ]) {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    if (items.length > shown.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 4;
+      td.className = 'muted';
+      td.textContent = `+${items.length - shown.length} more`;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    box.appendChild(table);
+  }
+
+  // What CONFIRM actually submits — exactly what was just shown, not a
+  // recompute at click time, so what's confirmed is what was reviewed.
+  campaignPreviewItems = items;
+  campaignConfigDirty = false;
+  document.getElementById('campaign-commit-btn').hidden = items.length === 0;
+}
+
+async function confirmCampaign() {
+  if (!campaignPreviewItems || !campaignPreviewItems.length) return;
+  const btn = document.getElementById('campaign-commit-btn');
+  btn.disabled = true;
+  btn.textContent = 'SUBMITTING…';
+  try {
+    await api.commitCampaign(campaignPreviewItems);
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    let last = null;
+    while (Date.now() < deadline) {
+      await sleep(POLL_MS);
+      const run = await api.campaignLastRun();
+      if (run?.status && run.status !== 'running') { last = run; break; }
+    }
+    if (last) renderCampaignLastRun(last);
+    await loadCampaignHistory();
+    invalidateCampaignPreview();
+  } catch (err) {
+    console.error('[schedule] campaign commit', err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'CONFIRM & SUBMIT';
+  }
+}
+
+async function loadCampaignLastRun() {
+  try {
+    renderCampaignLastRun(await api.campaignLastRun());
+  } catch (err) {
+    console.error('[schedule] campaign last run', err);
+  }
+}
+
+function renderCampaignLastRun(run) {
+  if (!run || run.status === 'never_run' || run.status === 'running') return;
+  const box = document.getElementById('campaign-preview-result');
+  const meta = document.createElement('p');
+  meta.className = 'muted sched-meta';
+
+  const trigger = document.createElement('span');
+  trigger.className = `sched-run-trigger ${run.trigger === 'manual' ? 'manual' : ''}`.trim();
+  trigger.textContent = run.trigger === 'auto' ? 'AUTO' : 'MANUAL';
+
+  const text = document.createElement('span');
+  if (run.status === 'error') {
+    text.textContent = `Last submit failed: ${run.error}`;
+  } else {
+    text.textContent = `Last submit: ${run.accepted} of ${run.submitted} booking(s) accepted`;
+  }
+  meta.append(trigger, text);
+
+  if (run.errors && run.errors.length) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'sched-notices-toggle';
+    toggle.textContent = `${run.errors.length} rejection(s) ▾`;
+    const list = document.createElement('ul');
+    list.className = 'sched-notices';
+    list.hidden = true;
+    for (const errMsg of run.errors) {
+      const li = document.createElement('li');
+      li.className = 'sched-notice error';
+      li.textContent = errMsg;
+      list.appendChild(li);
+    }
+    toggle.addEventListener('click', () => { list.hidden = !list.hidden; });
+    box.prepend(list);
+    meta.appendChild(toggle);
+  }
+  box.prepend(meta);
+}
+
+async function loadCampaignHistory() {
+  try {
+    const resp = await api.campaignHistory();
+    renderCampaignHistory(resp.history || []);
+  } catch (err) {
+    console.error('[schedule] campaign history', err);
+  }
+}
+
+function renderCampaignHistory(history) {
+  const box = document.getElementById('campaign-history');
+  box.replaceChildren();
+  if (!history.length) {
+    box.appendChild(note('no runs yet'));
+    return;
+  }
+  const table = document.createElement('table');
+  table.className = 'sched-table';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>Time UTC</th><th>Trigger</th><th>Booked</th><th>Rejected</th><th>Status</th></tr>';
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const run of history.slice().reverse()) {
+    const tr = document.createElement('tr');
+
+    const tdTime = document.createElement('td');
+    tdTime.textContent = run.generated_utc ? shortTime(run.generated_utc, 'UTC') : '—';
+    const tdTrigger = document.createElement('td');
+    const tag = document.createElement('span');
+    tag.className = `sched-run-trigger ${run.trigger === 'manual' ? 'manual' : ''}`.trim();
+    tag.textContent = run.trigger === 'auto' ? 'AUTO' : 'MANUAL';
+    tdTrigger.appendChild(tag);
+    const tdBooked = document.createElement('td');
+    tdBooked.textContent = String(run.accepted ?? 0);
+    const tdRejected = document.createElement('td');
+    tdRejected.textContent = String(run.rejected ?? 0);
+    const tdStatus = document.createElement('td');
+    tdStatus.textContent = run.status || '—';
+
+    tr.append(tdTime, tdTrigger, tdBooked, tdRejected, tdStatus);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
 }

@@ -56,6 +56,7 @@ async def lifespan(app: FastAPI):
     app.state.control = scheduler.control
     app.state.rig = scheduler.rig
     app.state.schedule_service = scheduler.schedule_service
+    app.state.campaign_service = scheduler.campaign_service
 
     await scheduler.start()
     try:

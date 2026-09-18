@@ -42,6 +42,11 @@ HISTORY_TTL_S = 86400
 # A station's antenna/connection status can change; shorter than the
 # catalogue TTLs above so a picker doesn't work off week-old station state.
 STATION_TTL_S = 3600
+# The full station list, for the network campaign scheduler. Same reasoning
+# as STATION_TTL_S - short enough that a newly-online station shows up within
+# the hour, long enough that a daily campaign run doesn't refetch ~160
+# stations' worth of data every time.
+STATIONS_ALL_TTL_S = 3600
 
 
 def load_dotenv(path: Path) -> dict[str, str]:

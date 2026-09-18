@@ -128,7 +128,7 @@ class ControlState(BaseModel):
 class Status(BaseModel):
     component: Literal[
         "backend", "rotctld", "tle", "satnogs", "camera", "predictor", "control",
-        "rig", "schedule",
+        "rig", "schedule", "campaign",
     ]
     state: ComponentState
     detail: str = ""
@@ -185,6 +185,17 @@ class ScheduleConfigUpdate(BaseModel):
     # "" clears the override back to the dashboard's own default; None
     # leaves the current value unchanged.
     db_token: str | None = None
+    # Unlike db_token (inert everywhere in this codebase), a network token
+    # enables real bookings via the Network Campaign feature - see
+    # network_client.py's schedule() docstring for the one call site that
+    # ever uses it.
+    network_token: str | None = None
+    # A plain bool, not subject to the ""/0-clears convention: omit to leave
+    # unchanged, pass explicitly to change it. Defaults False everywhere it
+    # is read (CampaignService) so a fresh setup never auto-books.
+    campaign_auto_commit_enabled: bool | None = None
+    campaign_max_per_station: int | None = None
+    campaign_max_total: int | None = None
 
 
 class StationVerifyRequest(BaseModel):
@@ -222,3 +233,54 @@ class ScheduleRun(BaseModel):
     rejected_capped: int
     notices: list[ScheduleNotice] = Field(default_factory=list)
     observations: list[ScheduleObservation]
+
+
+class CampaignItem(BaseModel):
+    station_id: int
+    station_name: str
+    transmitter_uuid: str
+    start: str
+    end: str
+    max_elevation_deg: float
+
+
+class CampaignSkip(BaseModel):
+    station_id: int | None = None
+    station_name: str = ""
+    reason: str
+
+
+class CampaignPreview(BaseModel):
+    status: Literal["ok", "error", "running"] = "ok"
+    generated_utc: str | None = None
+    window_start: str | None = None
+    window_end: str | None = None
+    considered_stations: int = 0
+    items: list[CampaignItem] = Field(default_factory=list)
+    skipped: list[CampaignSkip] = Field(default_factory=list)
+    error: str | None = None
+
+
+class CampaignCommitRequest(BaseModel):
+    # Omit to recompute a fresh preview and submit that; pass the exact
+    # items a client already previewed to submit precisely what was shown.
+    items: list[CampaignItem] | None = None
+
+
+class CampaignCommitResult(BaseModel):
+    status: Literal["ok", "ok_with_warnings", "error", "running"]
+    trigger: Literal["manual", "auto"] = "manual"
+    generated_utc: str | None = None
+    submitted: int = 0
+    accepted: int = 0
+    errors: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class CampaignHistoryEntry(BaseModel):
+    generated_utc: str | None = None
+    trigger: Literal["manual", "auto"] = "manual"
+    status: str | None = None
+    submitted: int = 0
+    accepted: int = 0
+    rejected: int = 0

@@ -12,8 +12,8 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 
 from ..schemas import (
-    PriorityListCreate, PriorityListRename, PriorityUpdate, ScheduleConfigUpdate,
-    StationVerifyRequest,
+    CampaignCommitRequest, PriorityListCreate, PriorityListRename, PriorityUpdate,
+    ScheduleConfigUpdate, StationVerifyRequest,
 )
 
 router = APIRouter()
@@ -23,6 +23,13 @@ def _service(request: Request):
     service = getattr(request.app.state, "schedule_service", None)
     if service is None:
         raise HTTPException(503, "schedule service not running")
+    return service
+
+
+def _campaign(request: Request):
+    service = getattr(request.app.state, "campaign_service", None)
+    if service is None:
+        raise HTTPException(503, "campaign service not running")
     return service
 
 
@@ -76,7 +83,10 @@ async def get_config(request: Request) -> dict:
 
 @router.post("/schedule/config")
 async def save_config(request: Request, body: ScheduleConfigUpdate) -> dict:
-    return await _service(request).save_config(body.station_id, body.db_token)
+    return await _service(request).save_config(
+        body.station_id, body.db_token, body.network_token,
+        body.campaign_auto_commit_enabled, body.campaign_max_per_station, body.campaign_max_total,
+    )
 
 
 @router.post("/schedule/config/verify-station")
@@ -113,3 +123,42 @@ async def rename_priority_list(request: Request, slug: str, body: PriorityListRe
         return await service.rename_priority_list(slug, body.name)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+# --- network campaign --------------------------------------------------------
+# Requesting other SatNOGS community stations to record the mission satellite.
+# This is the only feature in the dashboard that ever submits a real booking -
+# see campaign_service.py's module docstring.
+
+@router.get("/schedule/campaign")
+async def campaign_last_run(request: Request) -> dict:
+    return _campaign(request).get_last_run()
+
+
+@router.post("/schedule/campaign/preview")
+async def campaign_preview_start(request: Request) -> dict:
+    service = _campaign(request)
+    if service.is_running():
+        return {"status": "running"}
+    asyncio.create_task(service.preview_campaign())
+    return {"status": "started"}
+
+
+@router.get("/schedule/campaign/preview")
+async def campaign_preview_last(request: Request) -> dict:
+    return _campaign(request).get_last_preview()
+
+
+@router.post("/schedule/campaign/commit")
+async def campaign_commit(request: Request, body: CampaignCommitRequest) -> dict:
+    service = _campaign(request)
+    if service.is_running():
+        return {"status": "running"}
+    items = [item.model_dump() for item in body.items] if body.items is not None else None
+    asyncio.create_task(service.commit_campaign(items=items, trigger="manual"))
+    return {"status": "started"}
+
+
+@router.get("/schedule/campaign/history")
+async def campaign_history(request: Request) -> dict:
+    return {"history": _campaign(request).get_history()}
