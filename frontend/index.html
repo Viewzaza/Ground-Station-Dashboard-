@@ -187,7 +187,8 @@
         <div class="schedule-head-actions">
           <div class="sched-settings-wrap">
             <button class="sched-icon-btn" id="schedule-settings-toggle" type="button"
-                    aria-label="Station and token settings">⚙</button>
+                    aria-label="Station and token settings"
+                    aria-expanded="false" aria-controls="schedule-settings">⚙</button>
             <div id="schedule-settings" class="sched-settings-popover" hidden>
               <div class="sched-settings-row">
                 <label for="schedule-cfg-station">Station ID</label>
@@ -202,21 +203,27 @@
               </div>
               <p class="muted sched-settings-note">
                 Saved as entered — SatNOGS DB reads are unauthenticated, so
-                this can't actually be verified.
+                this can't actually be verified. Read-only: this token alone
+                can't book or change anything.
               </p>
 
               <hr class="sched-settings-divider">
               <h4 class="sched-settings-subhead">Network Campaign</h4>
-              <div class="sched-settings-row">
-                <label for="schedule-cfg-network-token">Network token</label>
-                <input id="schedule-cfg-network-token" type="password" autocomplete="off"
-                       placeholder="unchanged">
+              <div class="sched-settings-danger-block">
+                <div class="sched-settings-row">
+                  <label for="schedule-cfg-network-token" class="sched-settings-label-danger">
+                    <span aria-hidden="true">⚠</span> Network token
+                  </label>
+                  <input id="schedule-cfg-network-token" type="password" autocomplete="off"
+                         placeholder="unchanged">
+                </div>
+                <p class="sched-notice sched-settings-note">
+                  <strong>This is the dangerous one.</strong> It authorizes real
+                  bookings on other people's community stations via
+                  network.satnogs.org — unlike the DB token above, this token
+                  can act. Only set it if you intend to run Network Campaign.
+                </p>
               </div>
-              <p class="sched-notice sched-settings-note">
-                Enables real bookings on community stations via
-                network.satnogs.org — unlike the DB token above, this token
-                can act. Only set it if you intend to run Network Campaign.
-              </p>
 
               <div class="sched-settings-save-row">
                 <span id="schedule-cfg-save-status" class="hint"></span>
@@ -228,16 +235,18 @@
         </div>
       </header>
 
-      <div class="sched-mode-tabs">
-        <button class="sched-mode-tab is-active" id="schedule-mode-station" type="button">
+      <div class="sched-mode-tabs" role="tablist" aria-label="Station Schedule mode">
+        <button class="sched-mode-tab is-active" id="schedule-mode-station" type="button"
+                role="tab" aria-selected="true" aria-controls="schedule-mode-station-panel">
           STATION SCHEDULE
         </button>
-        <button class="sched-mode-tab" id="schedule-mode-campaign" type="button">
-          NETWORK CAMPAIGN
+        <button class="sched-mode-tab sched-mode-tab-danger" id="schedule-mode-campaign" type="button"
+                role="tab" aria-selected="false" aria-controls="schedule-mode-campaign-panel">
+          <span class="sched-mode-tab-dot" aria-hidden="true"></span>NETWORK CAMPAIGN
         </button>
       </div>
 
-      <div id="schedule-mode-station-panel">
+      <div id="schedule-mode-station-panel" role="tabpanel" aria-labelledby="schedule-mode-station">
         <section class="schedule-section">
           <div class="schedule-section-head">
             <h3>Last auto schedule</h3>
@@ -251,7 +260,8 @@
             <div class="sched-list-bar">
               <div class="sched-list-picker-wrap">
                 <button class="sched-list-btn" id="schedule-list-current" type="button"
-                        aria-label="Choose a priority list">
+                        aria-label="Choose a priority list"
+                        aria-expanded="false" aria-controls="schedule-list-picker">
                   <span id="schedule-list-name">Default</span>
                 </button>
                 <ul id="schedule-list-picker" class="sched-list-picker" hidden></ul>
@@ -278,8 +288,17 @@
         </section>
       </div>
 
-      <div id="schedule-mode-campaign-panel" hidden>
+      <div id="schedule-mode-campaign-panel" role="tabpanel" aria-labelledby="schedule-mode-campaign" hidden>
         <section class="schedule-section">
+          <div class="sched-campaign-warnbar" role="note">
+            <span class="sched-campaign-warnbar-icon" aria-hidden="true">⚠</span>
+            <span>
+              This books real observation time on other operators' community
+              stations via SatNOGS Network — not a simulation, and not yours to
+              undo once accepted. Always check PREVIEW before you
+              CONFIRM &amp; SUBMIT.
+            </span>
+          </div>
           <div class="schedule-section-head">
             <h3>Network Campaign</h3>
             <button class="btn" id="campaign-preview-btn" type="button">PREVIEW</button>
@@ -292,14 +311,19 @@
             <input id="campaign-max-total" type="range" min="1" max="150" step="1"
                    aria-describedby="campaign-max-total-value">
             <output id="campaign-max-total-value" for="campaign-max-total">150</output>
-            <span id="campaign-cfg-status" class="hint"></span>
+            <span id="campaign-cfg-status" class="hint" role="status"></span>
             <button class="btn btn-quiet" id="campaign-cfg-save" type="button">SAVE</button>
           </div>
           <p id="campaign-token-hint" class="sched-notice" hidden>
             Set a Network token in ⚙ settings before Network Campaign can run.
           </p>
-          <div id="campaign-preview-result"><p class="muted">no preview yet</p></div>
-          <button class="btn" id="campaign-commit-btn" type="button" hidden>CONFIRM &amp; SUBMIT</button>
+          <p id="campaign-status-live" class="sr-only" role="status" aria-live="polite"></p>
+          <div id="campaign-preview-result"><p class="muted">
+            No preview yet — run PREVIEW to see exactly which stations and
+            passes would be booked. Nothing is submitted until you review the
+            list and click CONFIRM &amp; SUBMIT.
+          </p></div>
+          <button class="btn btn-danger" id="campaign-commit-btn" type="button" hidden>CONFIRM &amp; SUBMIT</button>
         </section>
 
         <section class="schedule-section">
