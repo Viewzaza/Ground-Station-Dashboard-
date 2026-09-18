@@ -13,7 +13,7 @@
 */
 
 import { api } from '../core/api.js';
-import { set, setStatus } from '../core/store.js';
+import { set, setStatus, store } from '../core/store.js';
 
 // One tile: the station has one camera, and 101/102 are its main and sub
 // streams. Showing both meant half the wall was the same picture twice.
@@ -25,6 +25,14 @@ const SNAPSHOT_INTERVAL_MS = 1000;
 const SNAPSHOT_RETRY_MS = 15000;     // after repeated failures, stop hammering
 
 let elementLoaded = null;
+
+/* What the backend said about the video bridge when the inventory was fetched.
+   The tile discovers that it has no picture some seconds later, by which point
+   the only thing it knows on its own is that no frame arrived — which is true
+   of a stopped bridge, an unplugged camera and a blocked port alike. */
+function bridgeDetail() {
+  return store.cameraBridge?.detail || '';
+}
 
 /** Load go2rtc's custom element once, from the proxied go2rtc instance. */
 function loadVideoStreamElement() {
@@ -46,6 +54,7 @@ class CameraTile {
     this.slot = document.getElementById(slotId);
     this.label = document.getElementById(labelId);
     this.badge = null;
+    this.note = null;
     this.snapshotTimer = null;
     this.fallbackTimer = null;
   }
@@ -55,6 +64,9 @@ class CameraTile {
     clearTimeout(this.fallbackTimer);
     this.snapshotTimer = this.fallbackTimer = null;
     this.slot.replaceChildren();
+    // Both were children of the slot that has just been emptied; holding the
+    // stale references would append the next badge to a detached node.
+    this.badge = this.note = null;
   }
 
   setBadge(text, kind) {
@@ -74,12 +86,30 @@ class CameraTile {
     this.slot.appendChild(p);
   }
 
+  /* A sentence under the badge saying what is actually wrong. Replaced rather
+     than appended, so a tile that has been up for a month has one of these and
+     not thirty. */
+  explain(text) {
+    if (!text) return;
+    this.note?.remove();
+    this.note = document.createElement('p');
+    this.note.className = 'cam-note';
+    this.note.textContent = text;
+    this.slot.appendChild(this.note);
+  }
+
   async mount(camera) {
     this.clear();
     if (this.label) this.label.textContent = camera.label || camera.id;
 
     const ok = await loadVideoStreamElement();
-    if (!ok) return this.useSnapshot(camera, 'BRIDGE UNREACHABLE');
+    if (!ok) {
+      // The element is served BY go2rtc, so failing to load it is already
+      // proof the bridge is not there — no need to wait out the video
+      // timeout to say so.
+      this.useSnapshot(camera, 'BRIDGE UNREACHABLE');
+      return this.explain(bridgeDetail());
+    }
 
     const el = document.createElement('video-stream');
     el.setAttribute('mode', 'webrtc,mse,hls,mjpeg');
@@ -162,6 +192,12 @@ class CameraTile {
         img.hidden = true;                 // leave the tile empty, not broken
         this.setBadge('CAMERA DOWN', 'down');
         setStatus('cam', 'down', 'no frames from the bridge or the camera');
+        // CAMERA DOWN on its own reads as a broken camera, and it usually is
+        // not: the bridge said why when the inventory was fetched, and that
+        // sentence is the difference between checking a mast and starting a
+        // container. It goes under the badge rather than in it — the badge is
+        // read from across the room, this is read by whoever walks over.
+        this.explain(bridgeDetail());
       }
       schedule();
     };
@@ -179,6 +215,9 @@ export async function mountCameras() {
     const resp = await api.cameras();
     cameras = resp.items || [];
     set('cameras', cameras);
+    // Stored before the tile mounts, because the tile reads it on failure and
+    // that happens seconds later, after the video element has given up.
+    set('cameraBridge', resp.bridge || null);
   } catch (err) {
     console.error('[cameras]', err);
     setStatus('cam', 'down', String(err));

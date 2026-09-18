@@ -104,6 +104,37 @@
 .cam-badge.fallback { color: var(--on-void-warn); border-color: rgba(255, 176, 32, .45); }
 .cam-badge.down     { color: var(--on-void-bad);  border-color: rgba(255, 95, 110, .5); }
 
+/* The sentence explaining why there is no picture, when the bridge has told us.
+   Lower case running text: the badge above it is the thing read from across the
+   room, this is for whoever walks over to find out why.
+
+   Placed BELOW the badge rather than beside it. Beside looks tidier and is
+   wrong — the badge is sized by its own text, so a rule that clears "CAMERA
+   DOWN" is overlapped by "BRIDGE UNREACHABLE", and the note that explains a
+   fault would be the thing that renders broken. Below costs nothing: the tile
+   is empty whenever this is on screen.
+
+   It wraps, because "GS_GO2RTC_URL points at a Docker service name" does not
+   fit on one line of a camera tile, and truncating the one line that explains
+   the fault would defeat having it. */
+.cam-note {
+  position: absolute;
+  top: 28px;
+  left: 6px;
+  right: 6px;
+  margin: 0;
+  max-width: 62ch;
+  font-size: 10px;
+  line-height: 1.35;
+  letter-spacing: 0;
+  color: var(--on-void-ink);
+  background: rgba(6, 10, 14, .72);
+  border: 1px solid rgba(168, 184, 192, .18);
+  border-radius: 3px;
+  padding: 3px 7px;
+  pointer-events: none;
+}
+
 /* Double-click the tile to fill the screen with it. There is no light chrome
    left in view, so the bezel and its elevation come off with it. */
 .cam-slot:fullscreen {

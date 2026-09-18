@@ -17,7 +17,10 @@ def _service(request: Request) -> CameraService:
 
 @router.get("/cameras")
 async def cameras(request: Request) -> dict:
-    return {"items": await _service(request).inventory()}
+    items, bridge = await _service(request).inventory()
+    # `bridge` is what lets the tile distinguish "go2rtc is not running" from
+    # "the camera is not answering". Both used to arrive as one dead tile.
+    return {"items": items, "bridge": bridge}
 
 
 @router.get("/cameras/{stream}/snapshot.jpg")

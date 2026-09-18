@@ -343,6 +343,19 @@ Each of these cost time to find. Please read before changing them.
   KNACKSAT team turns it off, the panels go blank and `GS_GRAFANA_TOKEN` plus a
   backend proxy become necessary.
 
+- **"CAMERA DOWN" is usually not the camera.** The tile had one word for every
+  way of having no picture, and the reason was logged on the server — which is
+  not where the person looking at the wall is standing. It was asked three
+  times in one afternoon what was wrong with the camera; the answer each time
+  was that go2rtc was not running. `/api/cameras` now returns a `bridge`
+  object and the tile prints it under the badge, because a stopped bridge, a
+  `GS_GO2RTC_URL` still pointing at the compose service name `video`, a
+  timeout and an unplugged Hikvision are four different jobs — start a
+  container, edit an env file, look at the network, walk to the mast. The
+  commonest by a distance is the second: running the backend outside Docker
+  leaves that default pointing at a hostname with no DNS behind it, so the
+  failure is a name lookup and has nothing to do with a camera.
+
 - **The camera password never reaches the browser.** Snapshots are proxied
   through `/api/cameras/{id}/snapshot.jpg` rather than linked, because the
   camera speaks plain HTTP with Digest auth: a direct URL would be blocked as
@@ -433,7 +446,16 @@ so there are no `if mock:` branches in the business logic.
 
 - **Cameras** — `deploy/go2rtc/go2rtc.mock.yaml` declares the *same stream
   names* as production, backed by generated video. No frontend or backend code
-  differs between the two.
+  differs between the two. Running `tools/dev_server.py` on its own does **not**
+  start it, so the tile will say the bridge is unreachable and name the reason:
+  `GS_GO2RTC_URL` defaults to `http://video:1984`, which is the compose service
+  and does not resolve outside it. For a picture on a laptop, run go2rtc beside
+  the dev server and point the backend at it:
+
+  ```bash
+  go2rtc -config deploy/go2rtc/go2rtc.mock.yaml
+  GS_GO2RTC_URL=http://127.0.0.1:1984 python tools/dev_server.py
+  ```
 - **Rotator** — a simulator driven by the real predictor, so it tracks an actual
   KNACKSAT-2 pass, crosses 360° into the cable-wrap range and injects link
   faults. `tools/fake_rotctld.py` additionally speaks the real wire protocol, so

@@ -22,6 +22,7 @@ export const store = {
   rig: null,           // what the station's receiver is tuned to, live
   control: null,       // interlock state: gates, lease, mode
   cameras: [],
+  cameraBridge: null,  // why the video bridge is or is not reachable
 };
 
 export function set(key, value) {

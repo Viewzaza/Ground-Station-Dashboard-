@@ -33,18 +33,58 @@ LABELS = {
 }
 
 
+def _explain(url: str, exc: Exception) -> str:
+    """Why the bridge could not be reached, in the operator's terms.
+
+    The commonest cause by a distance is running the backend outside Docker
+    with the default `GS_GO2RTC_URL`. That default is `http://video:1984` —
+    `video` is the compose service name, so outside the compose network it does
+    not resolve at all, and the failure is a DNS error rather than anything to
+    do with a camera. An operator seeing CAMERA DOWN on a laptop is almost
+    always seeing that, and it is worth saying outright instead of making them
+    deduce it.
+    """
+    authority = url.split("//", 1)[-1].split("/", 1)[0]
+    # The name on its own for the DNS case — "the host video:1984 does not
+    # resolve" is not true of a port, and the whole point of this sentence is
+    # to be precise about which half is wrong.
+    host = authority.rsplit(":", 1)[0] if ":" in authority else authority
+    if isinstance(exc, httpx.ConnectError) and "getaddrinfo" in str(exc).lower():
+        return (f"the video bridge host “{host}” does not resolve — "
+                f"GS_GO2RTC_URL points at a Docker service name, so this is "
+                f"the backend running outside compose rather than a camera fault")
+    if isinstance(exc, httpx.ConnectError):
+        return f"nothing is listening at {authority} — go2rtc is not running"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"the video bridge at {authority} did not answer in time"
+    return f"the video bridge at {authority} could not be reached"
+
+
 class CameraService:
     def __init__(self, settings: Settings) -> None:
         self.s = settings
 
-    async def inventory(self) -> list[dict]:
+    async def inventory(self) -> tuple[list[dict], dict]:
+        """The streams, and the state of the bridge they come through.
+
+        The reason the bridge is unreachable used to be logged here and nowhere
+        else, so the tile could only ever say CAMERA DOWN — which reads as "the
+        camera is broken" when nine times in ten it means "go2rtc is not
+        running". Those are different problems with different fixes, and the
+        person standing in front of the wall is not the person reading the
+        journal. So the reason is published.
+        """
         streams: dict[str, dict] = {}
+        reason = ""
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{self.s.go2rtc_url}/api/streams")
             if resp.status_code == 200:
                 streams = resp.json() or {}
+            else:
+                reason = f"the video bridge answered HTTP {resp.status_code}"
         except httpx.HTTPError as exc:
+            reason = _explain(self.s.go2rtc_url, exc)
             log.warning("go2rtc unreachable: %s", exc)
 
         if not streams:
@@ -52,10 +92,12 @@ class CameraService:
             # so the operator sees "camera down" instead of "no cameras".
             streams = {name: {} for name in LABELS}
             online = False
+            reason = reason or "the video bridge is running but has no streams"
         else:
             online = True
+            reason = ""
 
-        return [
+        items = [
             {
                 "id": name,
                 "label": LABELS.get(name, name),
@@ -66,6 +108,7 @@ class CameraService:
             }
             for name in streams
         ]
+        return items, {"reachable": online, "url": self.s.go2rtc_url, "detail": reason}
 
     async def snapshot(self, stream: str) -> tuple[int, bytes, str]:
         url = f"{self.s.go2rtc_url}/api/frame.jpeg"
