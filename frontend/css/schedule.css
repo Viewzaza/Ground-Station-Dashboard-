@@ -148,6 +148,32 @@
 .sched-mode-tab:hover { color: var(--ink-2); }
 .sched-mode-tab.is-active { color: var(--track); border-bottom-color: var(--track); }
 
+/* The tab panels have to be flex items of .schedule-card, not plain blocks.
+   Adding the tab wrappers pushed every .schedule-section one level down, which
+   silently killed `.schedule-section:last-child { flex: 1 1 auto }` and its
+   `min-height: 0` — neither element was a flex item any more. The sections'
+   own `overflow-y: auto` then had nothing to scroll against (an auto-height
+   block parent is never short enough to overflow), so everything past the
+   card's max-height was simply clipped by its `overflow: hidden`, with no
+   scrollbar anywhere: ~a dozen priority rows put the bottom of the list out
+   of reach, and campaign history (up to 200 rows) far worse. Re-establishing
+   the chain here restores the scrolling the sections were always written for. */
+#schedule-mode-station-panel,
+#schedule-mode-campaign-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* Same trap as .schedule-overlay[hidden] and .sched-notices[hidden] above:
+   author CSS's display:flex beats the UA stylesheet's [hidden] rule at equal
+   specificity, so without this the inactive tab would stay on screen and both
+   panels would render at once. */
+#schedule-mode-station-panel[hidden],
+#schedule-mode-campaign-panel[hidden] {
+  display: none;
+}
+
 /* ── network campaign ─────────────────────────────────────────────────────── */
 .sched-campaign-row {
   display: flex;
