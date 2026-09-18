@@ -20,7 +20,9 @@ from types import SimpleNamespace
 
 from ..config import Settings
 from ..vendor.autoscheduler import cli as auto_cli
+from ..vendor.autoscheduler.cache import Cache
 from ..vendor.autoscheduler.config import Settings as AutoSettings
+from ..vendor.autoscheduler.db_client import DbClient
 from ..vendor.autoscheduler.priorities import Priority, parse_priority_file, write_priority_file
 from ..vendor.autoscheduler.report import _selection_payload
 
@@ -135,18 +137,68 @@ class ScheduleService:
             return {"status": "never_run"}
 
     # --- priorities ------------------------------------------------------------
-    def get_priorities(self) -> list[dict]:
+    async def get_priorities(self) -> list[dict]:
         if not self.priority_file.is_file():
             return []
-        entries = parse_priority_file(self.priority_file)
-        return [
-            {
+        entries = sorted(parse_priority_file(self.priority_file).values(), key=lambda p: p.line)
+        try:
+            return await asyncio.to_thread(self._enrich_priorities_sync, entries)
+        except Exception as exc:
+            # The satellite name and transmitter description are display-only -
+            # a SatNOGS DB hiccup should not stop the priority list from
+            # rendering (and definitely should not stop it from being saved).
+            log.warning("priority enrichment failed: %s", exc)
+            return [self._bare_entry(p) for p in entries]
+
+    def _bare_entry(self, p: Priority) -> dict:
+        return {
+            "norad_cat_id": p.norad_cat_id,
+            "weight": p.weight,
+            "transmitter_uuid": p.transmitter_uuid,
+            "satellite": "",
+            "transmitter_desc": "",
+        }
+
+    def _enrich_priorities_sync(self, entries: list[Priority]) -> list[dict]:
+        """Look up each entry's satellite name and transmitter description.
+
+        Uses the same cached DbClient the planner itself uses (24h TTL on both
+        catalogues), so this only costs a real request the first time - or
+        never, if a plan run has already warmed the cache.
+        """
+        cache = Cache(self.cache_dir, offline=self.s.offline)
+        db = DbClient(self._build_autoscheduler_settings(0.0), cache)
+        try:
+            satellites = db.satellites_by_norad()
+        except Exception as exc:
+            log.warning("could not load satellite catalogue: %s", exc)
+            satellites = {}
+        try:
+            transmitters = db.transmitters_by_uuid()
+        except Exception as exc:
+            log.warning("could not load transmitter catalogue: %s", exc)
+            transmitters = {}
+
+        out = []
+        for p in entries:
+            satellite = (satellites.get(p.norad_cat_id) or {}).get("name") or ""
+            if not p.transmitter_uuid:
+                transmitter_desc = "auto (best available)"
+            else:
+                tx = transmitters.get(p.transmitter_uuid)
+                if tx is None:
+                    transmitter_desc = "unknown transmitter"
+                else:
+                    mhz = (tx.get("downlink_low") or 0) / 1e6
+                    transmitter_desc = f"{mhz:.3f} MHz {tx.get('mode') or ''}".strip()
+            out.append({
                 "norad_cat_id": p.norad_cat_id,
                 "weight": p.weight,
                 "transmitter_uuid": p.transmitter_uuid,
-            }
-            for p in sorted(entries.values(), key=lambda p: p.line)
-        ]
+                "satellite": satellite,
+                "transmitter_desc": transmitter_desc,
+            })
+        return out
 
     async def save_priorities(self, entries: list[dict]) -> None:
         async with self._priorities_lock:

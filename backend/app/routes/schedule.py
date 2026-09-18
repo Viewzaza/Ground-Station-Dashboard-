@@ -39,11 +39,11 @@ async def run(request: Request) -> dict:
 
 @router.get("/schedule/priorities")
 async def priorities(request: Request) -> dict:
-    return {"entries": _service(request).get_priorities()}
+    return {"entries": await _service(request).get_priorities()}
 
 
 @router.post("/schedule/priorities")
 async def save_priorities(request: Request, body: PriorityUpdate) -> dict:
     service = _service(request)
     await service.save_priorities([e.model_dump() for e in body.entries])
-    return {"entries": service.get_priorities()}
+    return {"entries": await service.get_priorities()}

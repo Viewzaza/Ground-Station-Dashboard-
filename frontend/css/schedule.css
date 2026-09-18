@@ -102,6 +102,23 @@
 }
 .sched-table tr.mission td { color: var(--track); font-weight: 600; }
 
+.sched-add-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.sched-add-row input[type="number"] {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 4px 6px;
+}
+#schedule-add-norad { width: 110px; }
+#schedule-add-weight { width: 70px; }
+
 .sched-prio-list {
   list-style: none;
   margin: 0;
@@ -121,13 +138,37 @@
 }
 .sched-prio-row:active { cursor: grabbing; }
 .sched-drag { color: var(--ink-4); flex: none; }
+
+.sched-prio-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  overflow: hidden;
+}
+.sched-prio-name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sched-prio-name.unknown { color: var(--ink-4); font-style: italic; }
 .sched-prio-norad {
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  min-width: 64px;
+  font-size: 10px;
+  color: var(--ink-3);
 }
+.sched-prio-tx {
+  font-size: 10px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sched-prio-row input[type="number"] {
   width: 70px;
+  flex: none;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 3px;
@@ -135,6 +176,23 @@
   font: inherit;
   padding: 3px 6px;
   margin-left: auto;
+}
+
+.sched-prio-del {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink-3);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.sched-prio-del:hover {
+  border-color: var(--bad);
+  color: var(--bad);
 }
 
 @media (max-width: 1000px) {

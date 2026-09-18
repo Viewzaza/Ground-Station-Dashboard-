@@ -136,11 +136,19 @@ class Status(BaseModel):
 
 
 class PriorityEntry(BaseModel):
-    """One line of the station's priority file."""
+    """One line of the station's priority file.
+
+    ``satellite`` and ``transmitter_desc`` are display-only, filled in by the
+    backend from the SatNOGS DB catalogue on a GET; a client may send them
+    back unchanged on a POST (they are ignored - only norad/weight/uuid are
+    ever written to the file) or omit them entirely.
+    """
 
     norad_cat_id: int
     weight: float = Field(ge=0.0, le=1.0)
     transmitter_uuid: str | None = None
+    satellite: str | None = None
+    transmitter_desc: str | None = None
 
 
 class PriorityUpdate(BaseModel):

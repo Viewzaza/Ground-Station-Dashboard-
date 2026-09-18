@@ -18,6 +18,7 @@ export function mountSchedule() {
   document.getElementById('schedule-close').addEventListener('click', close);
   document.getElementById('schedule-run').addEventListener('click', runNow);
   document.getElementById('schedule-save').addEventListener('click', save);
+  document.getElementById('schedule-add').addEventListener('click', addEntry);
 }
 
 const panel = () => document.getElementById('schedule-panel');
@@ -160,9 +161,24 @@ function renderPriorities() {
     handle.className = 'sched-drag';
     handle.textContent = '⠿';
 
+    const info = document.createElement('span');
+    info.className = 'sched-prio-info';
+
+    const name = document.createElement('span');
+    name.className = 'sched-prio-name';
+    if (p.satellite) {
+      name.textContent = p.satellite;
+    } else {
+      name.textContent = 'unresolved — save to look up';
+      name.classList.add('unknown');
+    }
     const norad = document.createElement('span');
     norad.className = 'sched-prio-norad';
     norad.textContent = `NORAD ${p.norad_cat_id}`;
+    const tx = document.createElement('span');
+    tx.className = 'sched-prio-tx';
+    tx.textContent = p.transmitter_desc || (p.transmitter_uuid ? p.transmitter_uuid : 'auto (best available)');
+    info.append(name, norad, tx);
 
     const weight = document.createElement('input');
     weight.type = 'number';
@@ -174,7 +190,17 @@ function renderPriorities() {
       priorities[i].weight = clamp01(parseFloat(weight.value) || 0);
     });
 
-    li.append(handle, norad, weight);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'sched-prio-del';
+    del.title = `remove NORAD ${p.norad_cat_id}`;
+    del.textContent = '×';
+    del.addEventListener('click', () => {
+      priorities.splice(i, 1);
+      renderPriorities();
+    });
+
+    li.append(handle, info, weight, del);
     li.addEventListener('dragstart', () => { dragFrom = i; });
     li.addEventListener('dragover', (ev) => ev.preventDefault());
     li.addEventListener('drop', (ev) => {
@@ -188,6 +214,35 @@ function renderPriorities() {
     });
     ul.appendChild(li);
   });
+}
+
+function addEntry() {
+  const noradInput = document.getElementById('schedule-add-norad');
+  const weightInput = document.getElementById('schedule-add-weight');
+
+  const norad = parseInt(noradInput.value, 10);
+  if (!Number.isInteger(norad) || norad <= 0) {
+    noradInput.focus();
+    return;
+  }
+  if (priorities.some((p) => p.norad_cat_id === norad)) {
+    // Already listed — edit its weight in place rather than duplicating it.
+    noradInput.focus();
+    noradInput.select();
+    return;
+  }
+
+  priorities.push({
+    norad_cat_id: norad,
+    weight: clamp01(parseFloat(weightInput.value) || 0.5),
+    transmitter_uuid: null,
+    satellite: '',
+    transmitter_desc: '',
+  });
+  noradInput.value = '';
+  weightInput.value = '0.50';
+  noradInput.focus();
+  renderPriorities();
 }
 
 function rerank() {
