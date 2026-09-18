@@ -5,16 +5,10 @@
    retrofitting a new area into all of them would risk the wall's tuning for a
    feature that reads better as its own page anyway: a full observations
    table and a reorderable priority list both want more room than a grid cell
-   would give them. So this sits above the wall, opened from a header chip. */
-
-.chip-btn {
-  cursor: pointer;
-  font: inherit;
-}
-.chip-btn:hover {
-  color: var(--track);
-  border-color: var(--track);
-}
+   would give them. So this sits above the wall, opened from the header's
+   .hdr-menu button (layout.css) — deliberately not a status chip, since
+   header.js's paintChips() repaints every .chip element from live status
+   data and would otherwise fight over this button's class. */
 
 .schedule-overlay {
   position: fixed;

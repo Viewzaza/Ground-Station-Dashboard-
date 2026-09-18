@@ -40,7 +40,14 @@
       <span class="chip" data-chip="rot">ROT</span>
       <span class="chip" data-chip="tle">TLE</span>
       <span class="chip" data-chip="satnogs">SATNOGS</span>
-      <button class="chip chip-btn" id="schedule-toggle" type="button">SCHEDULE</button>
+    </div>
+
+    <!-- Deliberately not a .chip: paintChips() (header.js) repaints every
+         .chip element from live status data on every status update, which
+         would periodically strip any other class this carried. -->
+    <div class="hdr-menu">
+      <button class="hdr-menu-btn" id="schedule-toggle" type="button"
+              aria-label="Open station schedule">☰</button>
     </div>
   </header>
 

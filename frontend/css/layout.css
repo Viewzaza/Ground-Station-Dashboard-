@@ -222,6 +222,17 @@
   background: color-mix(in srgb, var(--bad) 10%, var(--panel));
 }
 
+/* A real action, not a status readout, so it lives outside .hdr-chips
+   entirely — paintChips() only ever touches .chip elements. */
+.hdr-menu { display: flex; align-items: center; }
+.hdr-menu-btn {
+  font-size: 13px; line-height: 1; padding: 5px 9px; border-radius: var(--radius);
+  background: var(--chrome-2); color: var(--ink-2); border: 1px solid var(--rule);
+  cursor: pointer;
+}
+.hdr-menu-btn:hover { border-color: var(--track); color: var(--track); }
+.hdr-menu-btn:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
+
 /* On a phone the header's fixed-width blocks overlap each other. These rules
    must live AFTER the base .hdr rules above: same specificity, so source order
    is what decides. */
@@ -240,6 +251,7 @@
   .hdr-aos { text-align: right; }
   .hdr-aos b { font-size: 16px; }
   .hdr-chips { grid-column: 1 / -1; margin-left: 0; }
+  .hdr-menu { grid-column: 1 / -1; justify-content: flex-end; }
 }
 
 /* ---------- footer: one band, four panels ----------
