@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="css/panels.css">
 <link rel="stylesheet" href="css/layout.css">
 <link rel="stylesheet" href="css/cameras.css">
+<link rel="stylesheet" href="css/schedule.css">
 </head>
 <body>
 
@@ -39,6 +40,7 @@
       <span class="chip" data-chip="rot">ROT</span>
       <span class="chip" data-chip="tle">TLE</span>
       <span class="chip" data-chip="satnogs">SATNOGS</span>
+      <button class="chip chip-btn" id="schedule-toggle" type="button">SCHEDULE</button>
     </div>
   </header>
 
@@ -167,6 +169,37 @@
       <div class="graf-strip" id="graf-strip"></div>
     </section>
   </footer>
+
+  <!-- ─────────────────────────────── station schedule ───────────────────── -->
+  <!-- An overlay rather than a grid tile: see schedule.css for why. Opened
+       from the SCHEDULE chip in the header. -->
+  <div id="schedule-panel" class="schedule-overlay" hidden>
+    <div class="schedule-card">
+      <header class="schedule-head">
+        <h2>Station Schedule <span class="hint">station 5024</span></h2>
+        <button class="btn" id="schedule-close" type="button">CLOSE</button>
+      </header>
+
+      <section class="schedule-section">
+        <div class="schedule-section-head">
+          <h3>Last auto schedule</h3>
+          <button class="btn" id="schedule-run" type="button">RUN NOW</button>
+        </div>
+        <div id="schedule-last-run"><p class="muted">loading…</p></div>
+      </section>
+
+      <section class="schedule-section">
+        <div class="schedule-section-head">
+          <h3>Satellite priority order</h3>
+          <div class="schedule-save-row">
+            <span id="schedule-save-status" class="hint"></span>
+            <button class="btn" id="schedule-save" type="button">SAVE</button>
+          </div>
+        </div>
+        <ul id="schedule-priorities" class="sched-prio-list"></ul>
+      </section>
+    </div>
+  </div>
 
 </div>
 

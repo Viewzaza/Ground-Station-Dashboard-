@@ -1,0 +1,143 @@
+/* Station Schedule: an overlay, not a grid tile.
+
+   The wall's grid-template-areas are tuned pixel by pixel across half a dozen
+   breakpoints for the panels that were already there (see layout.css) —
+   retrofitting a new area into all of them would risk the wall's tuning for a
+   feature that reads better as its own page anyway: a full observations
+   table and a reorderable priority list both want more room than a grid cell
+   would give them. So this sits above the wall, opened from a header chip. */
+
+.chip-btn {
+  cursor: pointer;
+  font: inherit;
+}
+.chip-btn:hover {
+  color: var(--track);
+  border-color: var(--track);
+}
+
+.schedule-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(14, 26, 31, .45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gap);
+}
+/* The [hidden] attribute and this rule have equal specificity, but author CSS
+   always beats the UA stylesheet's own [hidden] rule regardless of order — so
+   this has to be spelled out here, or the overlay never actually hides. */
+.schedule-overlay[hidden] {
+  display: none;
+}
+
+.schedule-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: min(760px, 100%);
+  max-height: min(720px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.schedule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--chrome);
+  flex: none;
+}
+.schedule-head h2 { font-size: 13px; letter-spacing: .06em; display: flex; gap: 8px; align-items: baseline; }
+
+.schedule-section {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--rule-soft);
+  overflow-y: auto;
+  min-height: 0;
+}
+.schedule-section:last-child { border-bottom: 0; flex: 1 1 auto; }
+
+.schedule-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.schedule-section-head h3 {
+  font-size: 10px; letter-spacing: .16em; color: var(--muted); font-weight: 600;
+}
+
+.schedule-save-row { display: flex; align-items: center; gap: 8px; }
+
+.sched-meta { margin: 0 0 8px; font-size: 11px; }
+
+.sched-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.sched-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .06em;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--rule);
+}
+.sched-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--rule-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sched-table tr.mission td { color: var(--track); font-weight: 600; }
+
+.sched-prio-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sched-prio-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  cursor: grab;
+}
+.sched-prio-row:active { cursor: grabbing; }
+.sched-drag { color: var(--ink-4); flex: none; }
+.sched-prio-norad {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  min-width: 64px;
+}
+.sched-prio-row input[type="number"] {
+  width: 70px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 3px 6px;
+  margin-left: auto;
+}
+
+@media (max-width: 1000px) {
+  .schedule-overlay { padding: 0; }
+  .schedule-card { width: 100%; height: 100%; max-height: 100%; border-radius: 0; }
+}

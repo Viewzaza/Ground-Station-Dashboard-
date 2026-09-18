@@ -22,6 +22,7 @@ import { mountSatnogs } from './panels/satnogs.js';
 import { mountControl, tickControl } from './panels/control.js';
 import { mountRadio } from './panels/radio.js';
 import { mountTelemetry } from './panels/telemetry.js';
+import { mountSchedule } from './panels/schedule.js';
 
 let orbit = null;
 let map = null;
@@ -49,6 +50,7 @@ async function boot() {
   mountControl();
   mountRadio();
   mountTelemetry();
+  mountSchedule();
 
   // Cameras first — they are why the operator is looking at this screen.
   mountCameras();

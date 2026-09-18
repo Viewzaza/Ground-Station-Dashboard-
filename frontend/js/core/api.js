@@ -65,4 +65,9 @@ export const api = {
   park:         ()            => post('/api/control/park'),
   track:        (norad)       => post('/api/control/track', { norad }),
   stopRotator:  ()            => post('/api/control/stop'),
+
+  scheduleLastRun: ()         => get('/api/schedule'),
+  runSchedule:     ()         => post('/api/schedule/run', {}),
+  getPriorities:   ()         => get('/api/schedule/priorities'),
+  savePriorities:  (entries)  => post('/api/schedule/priorities', { entries }),
 };

@@ -3,6 +3,8 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 pydantic==2.10.4
 pydantic-settings==2.7.1
-skyfield==1.49
-sgp4==2.23
+skyfield==1.55
+sgp4==2.27
 Pillow==12.3.0
+requests==2.32.5
+rich==14.2.0

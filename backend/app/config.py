@@ -121,6 +121,13 @@ class Settings(BaseSettings):
     satnogs_station_poll_s: int = 60
     satnogs_db_token: str = ""
 
+    # --- schedule -------------------------------------------------------
+    # The autoscheduler's own history-pages default (300 obs, ~75s uncached)
+    # is what makes triggering a run fire-and-poll rather than blocking.
+    schedule_poll_s: int = 1800
+    schedule_hours: float = 48.0
+    schedule_history_pages: int = 12
+
     # --- derived ------------------------------------------------------------
     @property
     def pinned_norad_ids(self) -> list[int]:

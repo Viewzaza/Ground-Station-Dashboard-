@@ -19,6 +19,7 @@ from .services.predictor import Predictor
 from .services.rig_service import RigService
 from .services.rotator_service import RotatorService
 from .services.satnogs import SatnogsService
+from .services.schedule_service import ScheduleService
 from .services.tle_store import TleStore
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class Scheduler:
         self.control = ControlService(
             settings, self.rotator, self.satnogs, predictor, on_state=self.set_state
         )
+        self.schedule_service = ScheduleService(settings, on_state=self.set_state)
 
     # --- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
@@ -55,6 +57,7 @@ class Scheduler:
         self._spawn("satnogs", self.satnogs.run)
         self._spawn("control", self._control_loop)
         self._spawn("rig", self.rig.run)
+        self._spawn("schedule", self._schedule_loop)
 
     async def stop(self) -> None:
         await self.rotator.stop()
@@ -139,6 +142,13 @@ class Scheduler:
             # 1 Hz while the satellite is up, otherwise every 5 s.
             fast = pos is not None and pos.el > -2.0
             await asyncio.sleep(1.0 if fast else 5.0)
+
+    async def _schedule_loop(self) -> None:
+        """Periodically re-run the autoscheduler, so the dashboard always has
+        a recent 'last schedule' even if nobody presses Run now."""
+        while True:
+            await self.schedule_service.run_plan(hours=self.s.schedule_hours)
+            await asyncio.sleep(self.s.schedule_poll_s)
 
     async def _control_loop(self) -> None:
         """Publish the interlock whenever it changes.

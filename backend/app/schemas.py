@@ -128,8 +128,46 @@ class ControlState(BaseModel):
 class Status(BaseModel):
     component: Literal[
         "backend", "rotctld", "tle", "satnogs", "camera", "predictor", "control",
-        "rig",
+        "rig", "schedule",
     ]
     state: ComponentState
     detail: str = ""
     since: datetime = Field(default_factory=_now)
+
+
+class PriorityEntry(BaseModel):
+    """One line of the station's priority file."""
+
+    norad_cat_id: int
+    weight: float = Field(ge=0.0, le=1.0)
+    transmitter_uuid: str | None = None
+
+
+class PriorityUpdate(BaseModel):
+    entries: list[PriorityEntry]
+
+
+class ScheduleObservation(BaseModel):
+    start: str
+    end: str
+    duration_s: int
+    norad_cat_id: int
+    satellite: str
+    max_elevation_deg: float
+    aos_azimuth_deg: float
+    los_azimuth_deg: float
+    transmitter_uuid: str
+    downlink_hz: int
+    mode: str | None = None
+    observed_here: int
+    score: float
+    is_mission: bool
+
+
+class ScheduleRun(BaseModel):
+    station: int
+    generated_utc: str
+    considered: int
+    rejected_conflict: int
+    rejected_capped: int
+    observations: list[ScheduleObservation]
