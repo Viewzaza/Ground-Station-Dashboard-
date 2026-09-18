@@ -30,6 +30,15 @@ from .schedule_service import ScheduleService
 
 log = logging.getLogger(__name__)
 
+# How long we keep treating an item this process just submitted as occupied,
+# independent of what SatNOGS Network's own read API reports back. Observed
+# in practice: its booking list can still omit an observation several
+# minutes after the write that created it succeeded, which otherwise lets
+# the very next preview recompute the identical "available" slot it just
+# used - and, worse, everything already rejected as a conflict too, since
+# nothing distinguishes "still lagging" from "genuinely free" on our end.
+RECENT_ATTEMPT_TTL = timedelta(hours=2)
+
 
 class CampaignService:
     def __init__(self, settings: Settings, schedule_service: ScheduleService, on_state=None) -> None:
@@ -43,12 +52,35 @@ class CampaignService:
 
         self._run_lock = asyncio.Lock()
         self._running = False
+        # [(station_id, start, end, attempted_at), ...] - every item this
+        # process has submitted recently, success or rejection alike; see
+        # RECENT_ATTEMPT_TTL and _recent_bookings_by_station().
+        self._recent_attempts: list[tuple[int, datetime, datetime, datetime]] = []
 
     def is_running(self) -> bool:
         return self._running
 
     def _effective_mock(self) -> bool:
         return self.s.mock if self.s.campaign_mock is None else self.s.campaign_mock
+
+    def _record_attempts(self, items: list[dict], now: datetime) -> None:
+        cutoff = now - RECENT_ATTEMPT_TTL
+        self._recent_attempts = [a for a in self._recent_attempts if a[3] >= cutoff]
+        for item in items:
+            self._recent_attempts.append((
+                item["station_id"],
+                datetime.fromisoformat(item["start"]),
+                datetime.fromisoformat(item["end"]),
+                now,
+            ))
+
+    def _recent_bookings_by_station(self, now: datetime) -> dict[int, list[tuple[datetime, datetime]]]:
+        cutoff = now - RECENT_ATTEMPT_TTL
+        out: dict[int, list[tuple[datetime, datetime]]] = {}
+        for station_id, start, end, attempted_at in self._recent_attempts:
+            if attempted_at >= cutoff:
+                out.setdefault(station_id, []).append((start, end))
+        return out
 
     # --- settings ---------------------------------------------------------
     def _build_autoscheduler_settings(self) -> AutoSettings:
@@ -91,14 +123,16 @@ class CampaignService:
         auto_settings = self._build_autoscheduler_settings()
         db = DbClient(auto_settings, cache)
         network = NetworkClient(auto_settings, cache)
+        now = datetime.now(timezone.utc)
         preview = build_campaign(
             network, db,
             mission_norad=self.s.default_norad,
             transmitter_uuid=None,
-            now=datetime.now(timezone.utc),
+            now=now,
             exclude_station_id=self.schedule_service._effective_station_id(),
             max_per_station=self.schedule_service.campaign_max_per_station(),
             max_total=self.schedule_service.campaign_max_total(),
+            recent_attempts=self._recent_bookings_by_station(now),
         )
         return _campaign_preview_payload(preview)
 
@@ -170,6 +204,7 @@ class CampaignService:
 
         cache = Cache(self.schedule_service.cache_dir, offline=self.s.offline)
         network = NetworkClient(auto_settings, cache)
+        now = datetime.now(timezone.utc)
 
         if items is None:
             db = DbClient(auto_settings, cache)
@@ -177,12 +212,19 @@ class CampaignService:
                 network, db,
                 mission_norad=self.s.default_norad,
                 transmitter_uuid=None,
-                now=datetime.now(timezone.utc),
+                now=now,
                 exclude_station_id=self.schedule_service._effective_station_id(),
                 max_per_station=self.schedule_service.campaign_max_per_station(),
                 max_total=self.schedule_service.campaign_max_total(),
+                recent_attempts=self._recent_bookings_by_station(now),
             )
             items = _campaign_preview_payload(preview)["items"]
+
+        # Recorded before submitting, not just on acceptance - a rejected
+        # item is still "just tried", and retrying it immediately (before
+        # SatNOGS's own read view has any chance of catching up) would only
+        # reproduce the same rejection. See RECENT_ATTEMPT_TTL.
+        self._record_attempts(items, now)
 
         schedule_items = [
             to_schedule_item(

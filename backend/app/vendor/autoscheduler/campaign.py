@@ -78,12 +78,21 @@ def build_campaign(
     exclude_station_id: int | None,
     max_per_station: int,
     max_total: int,
+    recent_attempts: dict[int, list[tuple[datetime, datetime]]] | None = None,
 ) -> CampaignPreview:
     """Work out which stations should be asked to record `mission_norad`,
     and when, within the next ~48 hours.
 
     Read-only: this never books anything. The caller (CampaignService)
     decides whether/when to submit the resulting items.
+
+    `recent_attempts` (station_id -> [(start, end), ...]) are windows this
+    process itself already tried to book recently, treated as occupied
+    alongside `network.future_bookings()`'s answer. SatNOGS's read API has
+    been observed to lag several minutes behind a just-completed write, so
+    the very next preview can otherwise recompute the identical "available"
+    slot it just submitted - our own write history is ground truth sooner
+    than their read view catches up to it.
     """
     window_start = now + timedelta(minutes=WINDOW_START_MARGIN_MIN)
     window_end = now + timedelta(minutes=WINDOW_END_MARGIN_MIN)
@@ -145,6 +154,8 @@ def build_campaign(
         calendar = Calendar(buffer_s=0.0)
         for booking in bookings:
             calendar.add(booking.start, booking.end)
+        for start, end in (recent_attempts or {}).get(station.id, []):
+            calendar.add(start, end)
 
         booked_here = 0
         for p in sorted(gated, key=lambda p: p.aos):
