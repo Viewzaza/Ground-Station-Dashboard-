@@ -93,6 +93,147 @@ Four services: `caddy` (single origin, `tls internal`), `backend`, `video`
 (go2rtc) and `groundstation` — the separate `sgoudelis/ground-station` suite,
 started only with `--profile sdr`.
 
+### What size VM this wants
+
+|  | vCPU | RAM | Disk |
+|---|---|---|---|
+| Minimum that works | 1 | 1.5 GB | 20 GB |
+| **Recommended** | **2** | **4 GB** | **32 GB** |
+| With `--profile sdr` | 4+ | 8 GB | 64 GB+ |
+
+Smaller than it looks, because **this is timer- and I/O-bound, not
+compute-bound**. Measured, not estimated: the backend sits at **81 MB RSS**
+with all six scheduler loops running and 96 satellites loaded, CPU at idle is
+below measurement resolution, and each browser costs **0.6 kB/s** on the
+WebSocket. There is no JPL ephemeris — propagation is SGP4 plus geodesy, so
+nothing mmaps a 120 MB kernel; `load.timescale()` uses builtin IERS data.
+
+The two real costs, both small:
+
+- **Pass prediction.** `_satpos_loop` recomputes `next_pass()` every second
+  while the satellite is up: a 24 h `find_events` at 8.0 ms plus look angles,
+  **~15 ms**, so about 1.5% of one core during a pass. It is recomputed from
+  scratch each tick rather than cached, which is the obvious thing to fix if
+  this ever needs to be cheaper.
+- **The waterfall.** One **286 ms** single-threaded burst per finished pass
+  and ~15 MB transient, of which 84 ms is `find_plot_box()` doing per-pixel
+  reads in Python. That is why it runs in `asyncio.to_thread`, and the main
+  reason to prefer 2 vCPU over 1 — on one core that burst competes with
+  go2rtc.
+
+**Video is passthrough, not transcode.** The camera is H.264 on both channels
+and `go2rtc.yaml` applies no `#video=` transform, so WebRTC and MSE are pure
+repacketisation of ~8 Mbit/s: a few percent of a core, no ffmpeg.
+
+**The exception is the snapshot fallback, and it is the likeliest way this box
+gets unexpectedly busy.** When `<video-stream>` produces no frame for 15 s the
+tile polls `/api/cameras/{id}/snapshot.jpg` at 1 Hz, and that path makes go2rtc
+decode H.264 and encode JPEG once a second, indefinitely. A display left stuck
+in fallback — usually a firewall blocking the WebRTC candidate — costs an order
+of magnitude more CPU than a working one. So a networking mistake here shows up
+as a *CPU* problem, and the tile now names the reason it fell back (see
+["CAMERA DOWN" is usually not the camera](#things-that-are-the-way-they-are-for-a-reason)).
+
+### One VM, and deliberately not two
+
+**Do not scale this horizontally, and do not autoscale it.** Two reasons, both
+load-bearing:
+
+- **Celestrak bans by IP.** `tle_store.py` never fetches while the cache is
+  under `GS_TLE_TTL_S` old and treats any non-200 as terminal, because 50
+  errors in two hours gets the station firewalled. `Scheduler.start()` fetches
+  eagerly on every process start, so the on-disk cache is what makes a restart
+  cost *zero* requests. `./backend/data:/data` is therefore **the rate
+  limiter, not an optimisation** — never reset it as part of a deploy. N
+  replicas mean N empty caches, N startup fetches and N× the steady rate from
+  one source IP.
+- **One writer to rotctld.** rotctld shares a single rotator handle across
+  connections with no mutex, so two clients can interleave writes mid-frame on
+  a 600-baud serial link. The code guarantees one socket *per process*; that
+  guarantee ends at the process boundary. Two instances is two sockets and 2 Hz
+  on a line that cannot sustain it. Want redundancy? A cold standby that is not
+  running.
+
+There is also nothing to scale *for*: one backend serves N browsers off one
+fan-out hub, computing the schedule once regardless of viewer count.
+
+### Proxmox specifics
+
+- **CPU type `host`**, not `kvm64` — numpy's OpenBLAS dispatches on CPUID, and
+  `kvm64` masks AVX silently. Costs nothing; there is no live-migration
+  requirement for a single wall display. 2 vCPU, one socket, NUMA off.
+- **Turn ballooning off** (`balloon: 0`). The footprint is flat and small, so
+  ballooning buys nothing, but the balloon driver reclaims page cache under
+  host pressure — and a reclaim stall during a pass is a rotctld read timing
+  out, which flips the chip to `ROT down` and triggers the poll backoff.
+- **Install qemu-guest-agent.** Without it there is no clean shutdown, so a
+  host reboot SIGKILLs the containers and can interrupt the TLE cache write
+  mid-`write_text`. The code survives that — and the cost of surviving it is
+  one unnecessary Celestrak fetch, which is the thing being avoided.
+- **VirtIO SCSI single** with `discard=on`, **VirtIO** network, `onboot=1`.
+  Disk speed is irrelevant here: the largest write is a 21 KB JSON every half
+  hour.
+- **x86-64.** Nothing requires it, but `alexxit/go2rtc:latest` is unpinned and
+  the SDR path is far better trodden on amd64. The workload is 2% of a core;
+  there is no ARM upside to buy with that risk.
+- Run a real NTP client **in the guest**. Doppler, pass times and the
+  `GS_GATE_MAX_STALE_S` staleness gate all read the guest clock, and that gate
+  fails *closed* — a drifting clock presents as rotator control being refused
+  for no visible reason.
+
+### Networking is the part that bites
+
+The station's devices are plain IPs in `config.py`, with no DNS and no
+discovery: rotctld `10.90.36.140:4533`, rigctld `:4534`, camera
+`10.90.36.130:554`. **Bridge the VM onto the station LAN** so it holds a
+`10.90.36.x` address itself. Docker's bridge handles container→LAN egress
+fine; it cannot invent a route the guest does not have.
+
+Everything outbound still works behind NAT — but **WebRTC does not**, and the
+fix is one line. `go2rtc.yaml` ships `candidates: - stun:8555` with a comment
+telling you to replace it, and on this LAN you must:
+
+```yaml
+webrtc:
+  candidates:
+    - 10.90.36.50:8555        # the VM's own LAN address, not stun:
+```
+
+`stun:` asks a public server for your external address, which is useless to a
+display on the same subnet and **times out entirely on an isolated LAN** — the
+same failure class as the Google Fonts `<link>` this project refuses for the
+same reason. Open **TCP and UDP 8555** inbound, plus 80/443 for Caddy. If both
+8555 paths are blocked the tile silently degrades to MSE and then to the 1 Hz
+JPEG transcode above.
+
+Caddy's `tls internal` mints its own CA, so install its root on every display
+machine once — `docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt .`
+— and **do not delete the `caddy_data` volume**, because recreating it
+regenerates the CA and every display starts failing its certificate check.
+
+### Before you call it deployed
+
+- **Check `/api/health` reports `"mock": false`.** `.env.example` ships
+  `GS_MOCK=1`, and the mock rotator is convincing: green `ROT` chip, moving
+  polar plot, a realistic fault every ten minutes. A VM deployed with the
+  default `.env` looks perfectly healthy and is talking to a simulator.
+- **Monitor component state, not the container.** The backend's healthcheck
+  returns `{"ok": true}` while `rotctld` is down and `satnogs` is degraded.
+  Poll `/api/health` and alert on the `components` map.
+- Compose **v2** is required (`profiles:`, the long-form `depends_on`), so
+  install from Docker's own apt repo, not distro `docker-compose`.
+- `chmod 600` the `.env` too. The camera password is in it in cleartext, and
+  that is the copy that actually reaches go2rtc — `deploy/secrets/camera_password.txt`
+  must exist for compose to start, but no backend code reads it.
+- `/video/*` is reverse-proxied with no authentication, and go2rtc's config
+  holds the camera credentials after env expansion. Fine on a closed LAN;
+  check it before the dashboard is reachable from anywhere you do not control.
+
+Log rotation is already configured (`x-logging` in `docker-compose.yml`, 10 MB
+× 3 per service). It is not optional on a box that runs for months: Caddy logs
+every request, one display is ~50k requests a day, and the default `json-file`
+driver never rotates.
+
 ## Architecture
 
 ```

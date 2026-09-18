@@ -5,10 +5,25 @@
 # already reach 10.90.36.x outbound, so host networking is NOT used — it would
 # only be needed for broadcast/multicast discovery, which nothing here does.
 
+# Docker's json-file driver does not rotate unless it is told to, and this stack
+# is meant to run unattended for months. Caddy logs every request to stdout, and
+# one display polls /api/radio every two seconds — roughly 50k requests a day,
+# 10-20 MB of access log. Two displays over six months is several gigabytes of
+# JSON on a disk sized for a 300 MB image, and the first symptom is the whole
+# VM wedging rather than anything about satellites. 30 MB per service is more
+# history than anyone reads and cannot fill anything.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    <<: *logging
     ports:
       - "80:80"
       - "443:443"
@@ -29,6 +44,7 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    <<: *logging
     env_file: [.env]
     environment:
       GS_DATA_DIR: /data
@@ -46,6 +62,7 @@ services:
   video:
     image: alexxit/go2rtc:latest
     restart: unless-stopped
+    <<: *logging
     environment:
       TZ: ${GS_TIMEZONE:-Asia/Bangkok}
       CAM_HOST: ${CAM_HOST}
@@ -70,6 +87,7 @@ services:
   groundstation:
     image: ghcr.io/sgoudelis/ground-station:latest
     restart: unless-stopped
+    <<: *logging
     profiles: ["sdr"]
     volumes:
       - groundstation_data:/app/data
