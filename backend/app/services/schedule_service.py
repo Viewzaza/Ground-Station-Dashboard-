@@ -158,6 +158,7 @@ class ScheduleService:
             "transmitter_uuid": p.transmitter_uuid,
             "satellite": "",
             "transmitter_desc": "",
+            "transmitter_status": None,
         }
 
     def _enrich_priorities_sync(self, entries: list[Priority]) -> list[dict]:
@@ -183,6 +184,7 @@ class ScheduleService:
         out = []
         for p in entries:
             satellite = (satellites.get(p.norad_cat_id) or {}).get("name") or ""
+            transmitter_status = None
             if not p.transmitter_uuid:
                 transmitter_desc = "auto (best available)"
             else:
@@ -192,12 +194,22 @@ class ScheduleService:
                 else:
                     mhz = (tx.get("downlink_low") or 0) / 1e6
                     transmitter_desc = f"{mhz:.3f} MHz {tx.get('mode') or ''}".strip()
+                    # transmitters_by_uuid() is unfiltered by status (only the
+                    # DB API's own alive=true query param is guaranteed) -
+                    # unlike the picker's list, a pinned transmitter here can
+                    # have gone inactive since it was chosen. That matters:
+                    # pick_transmitter() only honours a pin among a station's
+                    # *active* candidates, so a pin that has gone stale is
+                    # silently dropped to auto at the next plan run with no
+                    # other visible sign of it.
+                    transmitter_status = tx.get("status") or None
             out.append({
                 "norad_cat_id": p.norad_cat_id,
                 "weight": p.weight,
                 "transmitter_uuid": p.transmitter_uuid,
                 "satellite": satellite,
                 "transmitter_desc": transmitter_desc,
+                "transmitter_status": transmitter_status,
             })
         return out
 

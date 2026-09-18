@@ -240,6 +240,11 @@ button.sched-prio-tx {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A stale pin's status tag (see radio.js's own .rx-tag.dead for the same
+   state on the live transmitter list) — nudged off the text it follows. */
+button.sched-prio-tx .rx-tag {
+  margin-left: 5px;
+}
 button.sched-prio-tx:hover,
 button.sched-prio-tx:focus-visible {
   color: var(--track);

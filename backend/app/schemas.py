@@ -138,10 +138,11 @@ class Status(BaseModel):
 class PriorityEntry(BaseModel):
     """One line of the station's priority file.
 
-    ``satellite`` and ``transmitter_desc`` are display-only, filled in by the
-    backend from the SatNOGS DB catalogue on a GET; a client may send them
-    back unchanged on a POST (they are ignored - only norad/weight/uuid are
-    ever written to the file) or omit them entirely.
+    ``satellite``, ``transmitter_desc`` and ``transmitter_status`` are
+    display-only, filled in by the backend from the SatNOGS DB catalogue on a
+    GET; a client may send them back unchanged on a POST (they are ignored -
+    only norad/weight/uuid are ever written to the file) or omit them
+    entirely.
     """
 
     norad_cat_id: int
@@ -149,6 +150,12 @@ class PriorityEntry(BaseModel):
     transmitter_uuid: str | None = None
     satellite: str | None = None
     transmitter_desc: str | None = None
+    # The DB's own status for a *pinned* transmitter (e.g. "active",
+    # "inactive", "future") - unlike the transmitter-picker's option list,
+    # which only ever lists "active" candidates, a saved pin can go stale
+    # after the fact. None means "auto" or "not found in the DB", neither of
+    # which has a status to show.
+    transmitter_status: str | None = None
 
 
 class PriorityUpdate(BaseModel):

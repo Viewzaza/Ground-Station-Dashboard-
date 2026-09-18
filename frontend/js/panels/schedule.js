@@ -271,7 +271,20 @@ function buildTxControl(p) {
   btn.type = 'button';
   btn.className = 'sched-prio-tx';
   if (p.transmitter_uuid) btn.classList.add('is-pinned');
-  btn.textContent = p.transmitter_desc || (p.transmitter_uuid ? p.transmitter_uuid : 'auto (best available)');
+  btn.appendChild(document.createTextNode(
+    p.transmitter_desc || (p.transmitter_uuid ? p.transmitter_uuid : 'auto (best available)'),
+  ));
+  // A pin's status can drift after it was saved (the picker only ever offers
+  // "active" candidates, but nothing re-checks a pin once it is stored) - and
+  // pick_transmitter() silently drops a pin that is not active at plan time,
+  // with no other visible sign it happened. Surface it here, in the same
+  // .rx-tag vocabulary the radio panel uses for exactly this state.
+  if (p.transmitter_status && p.transmitter_status !== 'active') {
+    const tag = document.createElement('span');
+    tag.className = 'rx-tag dead';
+    tag.textContent = p.transmitter_status.toUpperCase();
+    btn.appendChild(tag);
+  }
   btn.addEventListener('click', () => {
     openTxNorad = openTxNorad === p.norad_cat_id ? null : p.norad_cat_id;
     renderPriorities();
@@ -367,12 +380,16 @@ function renderTxOptions(picker, list, p) {
 
     li.append(freq, mode);
     const desc = `${mhz} MHz ${tx.mode || ''}`.trim();
-    li.addEventListener('click', () => pickTransmitter(p.norad_cat_id, tx.uuid, desc));
+    // The picker only ever lists transmitters transmitters_for_station()
+    // already filtered to status "active", so this pick is known-active right
+    // now — worth recording immediately rather than leaving the row's status
+    // unknown until the next reload.
+    li.addEventListener('click', () => pickTransmitter(p.norad_cat_id, tx.uuid, desc, 'active'));
     picker.appendChild(li);
   }
 }
 
-function pickTransmitter(norad, uuid, desc) {
+function pickTransmitter(norad, uuid, desc, status = null) {
   // Looked up by NORAD, not a captured array index: the priorities array can
   // be reordered or have a different row deleted while this picker's fetch
   // was in flight, which would leave a stale index pointing at the wrong
@@ -381,6 +398,7 @@ function pickTransmitter(norad, uuid, desc) {
   if (!entry) return;   // the row itself was removed while its picker was open
   entry.transmitter_uuid = uuid;
   entry.transmitter_desc = desc;
+  entry.transmitter_status = status;
   openTxNorad = null;
   renderPriorities();
 }
@@ -463,6 +481,7 @@ function addEntry() {
     transmitter_uuid: null,
     satellite: name,
     transmitter_desc: '',
+    transmitter_status: null,
   });
   search.value = '';
   pendingAdd = null;
