@@ -41,6 +41,12 @@ log = logging.getLogger(__name__)
 WINDOW_START_MARGIN_MIN = 11
 WINDOW_END_MARGIN_MIN = 2880
 
+# The server's own minimum ("Duration of observation should be at least 180
+# seconds"). A pass this short is usually one clipped by the campaign
+# window's own start/end edge rather than a real full pass - submitting it
+# just spends the station's per-run cap on a guaranteed rejection.
+MIN_OBSERVATION_DURATION_S = 180
+
 
 @dataclass
 class CampaignItem:
@@ -119,7 +125,11 @@ def build_campaign(
             continue
 
         passes = predictor.passes_for(mission_norad, window_start, window_end, station.min_horizon)
-        gated = [p for p in passes if p.max_el >= station.min_culmination]
+        gated = [
+            p for p in passes
+            if p.max_el >= station.min_culmination
+            and (p.los - p.aos).total_seconds() >= MIN_OBSERVATION_DURATION_S
+        ]
         if not gated:
             preview.skipped.append({
                 "station_id": station.id, "station_name": station.name,

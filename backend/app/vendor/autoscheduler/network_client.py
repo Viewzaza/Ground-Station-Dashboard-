@@ -82,8 +82,15 @@ class Station:
 
     @property
     def schedulable(self) -> bool:
-        # The API enforces exactly this before accepting a booking.
-        return self.is_connected and self.lat is not None and self.lng is not None
+        # The API enforces exactly this before accepting a booking. A
+        # "Testing" station rejects scheduling from anyone but its owner -
+        # surfaces from the real API as "No permission to schedule
+        # observations on station: N" - and an "Offline" one will never
+        # actually perform whatever gets booked on it.
+        return (
+            self.is_connected and self.lat is not None and self.lng is not None
+            and self.status == "Online"
+        )
 
     @classmethod
     def from_api(cls, raw: dict) -> "Station":
