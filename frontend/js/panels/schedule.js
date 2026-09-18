@@ -20,7 +20,6 @@ export function mountSchedule() {
   document.getElementById('schedule-close').addEventListener('click', close);
   document.getElementById('schedule-run').addEventListener('click', runNow);
   document.getElementById('schedule-save').addEventListener('click', save);
-  document.getElementById('schedule-add').addEventListener('click', addEntry);
 
   const search = document.getElementById('schedule-add-search');
   search.addEventListener('input', onSearchInput);
@@ -287,17 +286,17 @@ function renderSuggestions(items) {
     li.addEventListener('mousedown', (ev) => {
       ev.preventDefault();
       pendingAdd = { norad: it.norad, name: it.name };
-      document.getElementById('schedule-add-search').value = `${it.name} (${it.norad})`;
-      hideSuggestions();
+      addEntry();
     });
     box.appendChild(li);
   }
   box.hidden = false;
 }
 
+const DEFAULT_ADD_WEIGHT = 0.5;
+
 function addEntry() {
   const search = document.getElementById('schedule-add-search');
-  const weightInput = document.getElementById('schedule-add-weight');
 
   let norad;
   let name = '';
@@ -321,13 +320,14 @@ function addEntry() {
 
   priorities.push({
     norad_cat_id: norad,
-    weight: clamp01(parseFloat(weightInput.value) || 0.5),
+    // No weight box on the add bar — a new entry starts neutral and the
+    // operator adjusts it in the row itself, same as any existing entry.
+    weight: DEFAULT_ADD_WEIGHT,
     transmitter_uuid: null,
     satellite: name,
     transmitter_desc: '',
   });
   search.value = '';
-  weightInput.value = '0.50';
   pendingAdd = null;
   hideSuggestions();
   search.focus();

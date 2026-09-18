@@ -196,14 +196,10 @@
             <button class="btn" id="schedule-save" type="button">SAVE</button>
           </div>
         </div>
-        <div class="sched-add-row">
-          <div class="sched-add-search-wrap">
-            <input id="schedule-add-search" type="text" autocomplete="off"
-                   placeholder="search satellite by name or NORAD…">
-            <ul id="schedule-add-suggest" class="sched-add-suggest" hidden></ul>
-          </div>
-          <input id="schedule-add-weight" type="number" min="0" max="1" step="0.05" value="0.50">
-          <button class="btn" id="schedule-add" type="button">ADD</button>
+        <div class="sched-add-search-wrap">
+          <input id="schedule-add-search" type="text" autocomplete="off"
+                 placeholder="search satellite by name or NORAD, then pick or press Enter…">
+          <ul id="schedule-add-suggest" class="sched-add-suggest" hidden></ul>
         </div>
         <ul id="schedule-priorities" class="sched-prio-list"></ul>
       </section>

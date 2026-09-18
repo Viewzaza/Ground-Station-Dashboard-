@@ -102,31 +102,23 @@
 }
 .sched-table tr.mission td { color: var(--track); font-weight: 600; }
 
-.sched-add-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
+.sched-add-search-wrap {
+  position: relative;
   margin-bottom: 8px;
 }
-.sched-add-row input {
+#schedule-add-search {
+  width: 100%;
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 3px;
   color: var(--text);
   font: inherit;
-  padding: 4px 6px;
+  padding: 5px 8px;
 }
-.sched-add-row input:focus {
+#schedule-add-search:focus {
   outline: none;
   border-color: var(--track);
 }
-.sched-add-search-wrap {
-  position: relative;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-#schedule-add-search { width: 100%; }
-#schedule-add-weight { width: 70px; flex: none; }
 
 .sched-add-suggest {
   position: absolute;
