@@ -49,12 +49,30 @@
   --warn: #b4670f;
   --bad:  #c42a6e;
 
-  /* --- globe surface, drawn into a canvas texture --------------------- */
-  /* These stay dark: they paint the instrument window, not the page. */
+  /* --- globe surface -------------------------------------------------- */
+  /* These stay dark: they paint the instrument window, not the page. None of
+     them is a data hue — the globe is the ground the three data hues are read
+     against, so these are allowed to be blue-green without competing with
+     --track.
+
+     The first four are painted into the canvas texture that carries the globe
+     when there is no NASA imagery on disk. The last three apply to whichever
+     surface is up. */
   --globe-ocean: #0b2033;
   --globe-land:  #2c4437;
   --globe-coast: #496b56;
   --globe-grat:  #27455a;
+
+  /* The limb. A back-faced shell brightened at grazing angles, additive, so
+     this is the colour of the ring just outside the planet's silhouette and
+     nothing else — it never lands flat on the disc. */
+  --globe-atmo:  #3f8fb4;
+  /* Phong specular for the drawn surface: near-black on purpose. A drawn
+     diagram with a gloss highlight on it reads as a bug. */
+  --globe-spec:  #0d1820;
+  /* Sun glint on water, for the photographic surface only. Desaturated so that
+     a bright spot on the ocean cannot be mistaken for a fourth data hue. */
+  --globe-glint: #cfe4ee;
 
   --shadow: 0 1px 2px rgba(14, 26, 31, .06), 0 10px 26px -18px rgba(14, 26, 31, .34);
 

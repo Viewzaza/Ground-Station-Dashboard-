@@ -61,7 +61,10 @@
 
   <!-- ─────────────────────────────── 3D globe ───────────────────────────── -->
   <section class="panel" style="grid-area:globe">
-    <h2>Orbit <span class="hint" id="globe-hint">3D</span></h2>
+    <!-- Empty, like #map-hint: globe3d fills this with which surface is on
+         screen within a second, and a hardcoded "3D" is a word the reader has
+         to watch be replaced on every slow first paint. -->
+    <h2>Orbit <span class="hint" id="globe-hint"></span></h2>
     <div id="globe3d" class="fill globe-host"></div>
   </section>
 

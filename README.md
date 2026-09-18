@@ -41,7 +41,7 @@ Light paper chrome, dark instrument windows — see
 | Light instrument-panel theme, dark instrument windows | done |
 | Camera tile (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, **verified against the real camera** |
 | 2D ground track, footprint, terminator | done |
-| 3D orbit globe (three.js, offline, no imagery download) | done |
+| 3D orbit globe (three.js, NASA Blue Marble or drawn coastlines, offline) | done |
 | Radio panel — transmitters and live Doppler from SatNOGS DB | done |
 | "Last signal" — the previous pass's waterfall, cropped and lifted | done |
 | Satellite selector, pass prediction, next-pass card | done |
@@ -432,23 +432,43 @@ Each of these cost time to find. Please read before changing them.
   to the footprint ring, which additionally does not close at all when it
   contains a pole.
 
-- **The globe draws its own surface; there is no imagery to download.** It was
-  CesiumJS, which is 23 MB fetched by a setup script — and because it was
-  fetched rather than committed, a clone that skipped that step showed a black
-  rectangle with no hint why. That is exactly how it was found. It is now
-  three.js (1.3 MB, MIT, plain ES module) and the sphere's texture is drawn at
-  load time into a 2048×1024 canvas from `assets/ne_110m_land.json`, the same
-  public-domain Natural Earth outline the 2D map uses. So the 3D and 2D
-  coastlines cannot disagree, and nothing is fetched at runtime.
+- **The globe draws its own surface when there is no imagery, and says which
+  one it is using.** It was CesiumJS, which is 23 MB fetched by a setup script
+  — and because it was fetched rather than committed, a clone that skipped that
+  step showed a black rectangle with no hint why. That is exactly how it was
+  found, and it is the rule the globe has been held to since: **it must render
+  correctly with nothing downloaded.**
 
-- **A dark palette plus a directional light is a black disc.** The first
-  version used the console's own near-black surface colours and let lighting do
-  the rest; every one of them multiplied down to indistinguishable black, and
-  the globe rendered as a silhouette with a track floating on it. The surface
-  now uses its texture as an `emissiveMap` as well as a `map`: emissive is a
-  floor that puts the coastlines on screen wherever the sun is, and the
-  directional light adds the day side on top so the terminator is still
-  visible. Ambient is kept low, because raising it washes the terminator out.
+  It now does both. `tools/fetch_vendor.sh` fetches NASA Blue Marble
+  (public domain, 4096×2048 by default) to `assets/earth-surface.jpg`, which is
+  gitignored and optional; when that file is absent — or wider than the GPU's
+  `MAX_TEXTURE_SIZE` — the sphere's texture is drawn at load time into a canvas
+  from `assets/ne_110m_land.json`, the same public-domain Natural Earth outline
+  the 2D map uses, so the 3D and 2D coastlines cannot disagree. The panel's
+  heading says `Blue Marble 4096` or `drawn coastlines`, with a tooltip naming
+  the missing file and the script that fetches it. That readout is the actual
+  fix for the Cesium bug: not "never download anything", but *never be silently
+  wrong about what you are looking at*. Nothing is fetched at runtime either
+  way — a station on an isolated LAN skips the script and the panel is still
+  right.
+
+- **A dark palette plus a directional light is a black disc**, and the two
+  surfaces need different answers to it. The first version used the console's
+  own near-black colours and let lighting do the rest; every one multiplied
+  down to indistinguishable black and the globe rendered as a silhouette with a
+  track floating on it.
+
+  The **drawn** surface uses its texture as an `emissiveMap` as well as a
+  `map`: emissive is a floor that puts the coastlines on screen wherever the
+  sun is, and the directional light adds the day side on top. That works
+  because it is four flat colours. Doing the same to a **photograph** lifts
+  both hemispheres equally and flattens the terminator into a smear, so the
+  imagery path is a small shader with a *multiplicative* night floor instead —
+  the dark half is dimmed rather than lit, which keeps the day side's full
+  contrast and leaves a terminator you can actually read. Its gamma is explicit
+  because three.js's output-colourspace conversion is a chunk only its own
+  materials include; a raw `ShaderMaterial` that omits it comes out washed out.
+  Ambient stays low either way, for the same reason as before.
 
 - **The frame is earth-fixed, not inertial.** Spinning the planet under a fixed
   orbit ring looks better in isolation, but this panel sits beside a 2D ground
@@ -647,5 +667,14 @@ MIT — see `LICENSE`. The `sgoudelis/ground-station` suite referenced in
 from it is present in this repository.
 
 Coastlines are Natural Earth (public domain). three.js is MIT and is fetched by
-`tools/fetch_vendor.sh` (with its licence) rather than committed. Transmitter
-data comes from SatNOGS DB at runtime and is cached, not vendored.
+`tools/fetch_vendor.sh` (with its licence) rather than committed. The globe's
+optional surface imagery is NASA Blue Marble, a work of the U.S. Government and
+therefore public domain; it is fetched by the same script and is not committed.
+Transmitter data comes from SatNOGS DB at runtime and is cached, not vendored.
+
+The globe's day/night shading, its atmosphere rim, the GPU texture-ceiling and
+anisotropy checks and the WMS request that gets the imagery are adapted from
+[SattrackSlop](https://github.com/ColaBear101/SattrackSlop) (MIT), the
+operator's other tool — the same one this console's light palette follows. Its
+runtime fetching is deliberately *not* adapted: see
+[the globe bullet](#things-that-are-the-way-they-are-for-a-reason).
