@@ -31,12 +31,15 @@ from .schedule_service import ScheduleService
 log = logging.getLogger(__name__)
 
 # How long we keep treating an item this process just submitted as occupied,
-# independent of what SatNOGS Network's own read API reports back. Observed
-# in practice: its booking list can still omit an observation several
-# minutes after the write that created it succeeded, which otherwise lets
-# the very next preview recompute the identical "available" slot it just
-# used - and, worse, everything already rejected as a conflict too, since
-# nothing distinguishes "still lagging" from "genuinely free" on our end.
+# independent of what SatNOGS Network's own read API reports back. Measured
+# against the real API: its booking list can still omit an observation more
+# than an hour after the write that created it succeeded - long enough that
+# a routine backend restart (e.g. to deploy a fix) can easily outlast it,
+# which is exactly why this is persisted to disk rather than kept in memory
+# only. Without it, the very next preview recomputes the identical
+# "available" slot it just used - and, worse, everything already rejected
+# as a conflict too, since nothing distinguishes "still lagging" from
+# "genuinely free" on our end.
 RECENT_ATTEMPT_TTL = timedelta(hours=2)
 
 
@@ -49,13 +52,17 @@ class CampaignService:
         self.preview_path = settings.data_dir / "campaign_last_preview.json"
         self.result_path = settings.data_dir / "campaign_last_run.json"
         self.history_path = settings.data_dir / "campaign_history.json"
+        self.recent_attempts_path = settings.data_dir / "campaign_recent_attempts.json"
 
         self._run_lock = asyncio.Lock()
         self._running = False
         # [(station_id, start, end, attempted_at), ...] - every item this
         # process has submitted recently, success or rejection alike; see
-        # RECENT_ATTEMPT_TTL and _recent_bookings_by_station().
-        self._recent_attempts: list[tuple[int, datetime, datetime, datetime]] = []
+        # RECENT_ATTEMPT_TTL and _recent_bookings_by_station(). Persisted so
+        # a restart can't discard it out from under an in-flight lag window.
+        self._recent_attempts: list[tuple[int, datetime, datetime, datetime]] = (
+            self._load_recent_attempts()
+        )
 
     def is_running(self) -> bool:
         return self._running
@@ -73,6 +80,10 @@ class CampaignService:
                 datetime.fromisoformat(item["end"]),
                 now,
             ))
+        self._write_json(self.recent_attempts_path, [
+            [station_id, start.isoformat(), end.isoformat(), attempted_at.isoformat()]
+            for station_id, start, end, attempted_at in self._recent_attempts
+        ])
 
     def _recent_bookings_by_station(self, now: datetime) -> dict[int, list[tuple[datetime, datetime]]]:
         cutoff = now - RECENT_ATTEMPT_TTL
@@ -80,6 +91,22 @@ class CampaignService:
         for station_id, start, end, attempted_at in self._recent_attempts:
             if attempted_at >= cutoff:
                 out.setdefault(station_id, []).append((start, end))
+        return out
+
+    def _load_recent_attempts(self) -> list[tuple[int, datetime, datetime, datetime]]:
+        raw = self._read_json(self.recent_attempts_path, [])
+        now = datetime.now(timezone.utc)
+        cutoff = now - RECENT_ATTEMPT_TTL
+        out: list[tuple[int, datetime, datetime, datetime]] = []
+        for entry in raw:
+            try:
+                station_id, start, end, attempted_at = entry
+                attempted_dt = datetime.fromisoformat(attempted_at)
+                if attempted_dt >= cutoff:
+                    out.append((station_id, datetime.fromisoformat(start),
+                                datetime.fromisoformat(end), attempted_dt))
+            except (ValueError, TypeError) as exc:
+                log.warning("skipping unparseable recent-attempt entry %r: %s", entry, exc)
         return out
 
     # --- settings ---------------------------------------------------------
