@@ -961,8 +961,10 @@ function renderCampaignPreview(preview) {
     thead.innerHTML = '<tr><th>Station</th><th>Start UTC</th><th>End UTC</th><th>Max El</th></tr>';
     table.appendChild(thead);
     const tbody = document.createElement('tbody');
-    const shown = items.slice(0, 20);
-    for (const item of shown) {
+    // Every candidate is shown, not just the first N - CONFIRM & SUBMIT
+    // books real time on other people's stations, so truncating the review
+    // list would let some of what gets booked go unseen.
+    for (const item of items) {
       const tr = document.createElement('tr');
       for (const text of [
         item.station_name || `Station ${item.station_id}`,
@@ -976,17 +978,11 @@ function renderCampaignPreview(preview) {
       }
       tbody.appendChild(tr);
     }
-    if (items.length > shown.length) {
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      td.colSpan = 4;
-      td.className = 'muted';
-      td.textContent = `+${items.length - shown.length} more`;
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    }
     table.appendChild(tbody);
-    box.appendChild(table);
+    const wrap = document.createElement('div');
+    wrap.className = 'sched-campaign-table-wrap';
+    wrap.appendChild(table);
+    box.appendChild(wrap);
   }
 
   // What CONFIRM actually submits — exactly what was just shown, not a

@@ -179,6 +179,19 @@
   color: var(--text);
 }
 #campaign-preview-result { margin-bottom: 8px; }
+.sched-campaign-table-wrap {
+  max-height: 280px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid var(--rule-soft);
+  border-radius: 4px;
+}
+.sched-campaign-table-wrap .sched-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+}
 #campaign-commit-btn { margin-bottom: 8px; }
 
 /* Distinguishes an unattended timer-triggered run from one a human
