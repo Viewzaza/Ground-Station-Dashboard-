@@ -32,6 +32,12 @@ class Priority:
     weight: float
     transmitter_uuid: str | None = None
     line: int = 0
+    # "auto" (default): the dashboard is free to recompute this weight from
+    # list order (e.g. on a drag-reorder). "manual": the operator pinned this
+    # exact weight and it must survive reorders elsewhere in the list. The
+    # scheduler itself only ever reads `weight` - this flag is dashboard-side
+    # bookkeeping, round-tripped through the file so it survives a reload.
+    mode: str = "auto"
 
 
 def parse_priority_file(path: Path) -> dict[int, Priority]:
@@ -42,6 +48,14 @@ def parse_priority_file(path: Path) -> dict[int, Priority]:
     fields malformed - so two spaces between columns silently loses a line.
     Splitting on runs of whitespace accepts every file that reader accepts,
     and some it does not.
+
+    A 4th field is a local addition: "manual" marks a weight the dashboard
+    must not overwrite on reorder (see `Priority.mode`). It is optional and
+    backward-compatible - a plain 2-3 field line (everything written before
+    this addition, and everything the official tool writes) still parses
+    exactly as before, defaulting to "auto". A literal "-" in the 3rd column
+    means "no transmitter, but a mode follows in the 4th" - written by
+    write_priority_file() only when needed to keep the columns positional.
     """
     priorities: dict[int, Priority] = {}
     if not path.is_file():
@@ -58,7 +72,8 @@ def parse_priority_file(path: Path) -> dict[int, Priority]:
         except (ValueError, IndexError):
             log.warning("%s:%d is not 'norad weight [uuid]', skipping: %r", path, lineno, raw)
             continue
-        uuid = fields[2] if len(fields) > 2 else None
+        uuid = fields[2] if len(fields) > 2 and fields[2] != "-" else None
+        mode = "manual" if len(fields) > 3 and fields[3] == "manual" else "auto"
         if not 0.0 <= weight <= 1.0:
             log.warning("%s:%d weight %s is outside 0.0-1.0, clamping", path, lineno, weight)
             weight = min(1.0, max(0.0, weight))
@@ -67,7 +82,7 @@ def parse_priority_file(path: Path) -> dict[int, Priority]:
             # satellite listed twice quietly loses its first transmitter.
             log.warning("%s:%d NORAD %d is already listed on line %d; the later line wins",
                         path, lineno, norad, priorities[norad].line)
-        priorities[norad] = Priority(norad, weight, uuid, lineno)
+        priorities[norad] = Priority(norad, weight, uuid, lineno, mode)
 
     log.info("loaded %d priorit%s from %s",
              len(priorities), "y" if len(priorities) == 1 else "ies", path)
@@ -82,18 +97,27 @@ def write_priority_file(path: Path, entries: list[Priority]) -> None:
     existing weights/UUIDs). This is what lets the dashboard round-trip an
     edited priority list back to the file the scheduler itself reads.
 
+    A "manual"-mode entry always writes all 4 fields (using "-" as the
+    transmitter placeholder if none is set) so the mode stays positional; an
+    "auto" entry (the common case) writes only 2-3 fields, exactly as before
+    this field existed, keeping the file identical to what the official tool
+    itself would write for the same data.
+
     Atomic write, matching the tmp-write + ``Path.replace()`` pattern
     ``cache.py`` uses, so a crash mid-write cannot truncate the file the next
     scheduler run depends on.
     """
     lines = [
         "# Edited from the Station Schedule dashboard panel.",
-        "# Format: norad_id  weight(0.0-1.0)  [transmitter_uuid]",
+        "# Format: norad_id  weight(0.0-1.0)  [transmitter_uuid|-]  [manual]",
         "",
     ]
     for entry in entries:
         fields = [str(entry.norad_cat_id), f"{entry.weight:.3f}"]
-        if entry.transmitter_uuid:
+        if entry.mode == "manual":
+            fields.append(entry.transmitter_uuid or "-")
+            fields.append("manual")
+        elif entry.transmitter_uuid:
             fields.append(entry.transmitter_uuid)
         lines.append(" ".join(fields))
     tmp = path.with_suffix(".tmp")

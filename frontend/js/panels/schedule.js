@@ -10,12 +10,17 @@ import { shortTime } from '../core/format.js';
 const POLL_MS = 3000;
 const POLL_TIMEOUT_MS = 120_000;
 
-let priorities = [];   // [{norad_cat_id, weight, transmitter_uuid}], current display order
+let priorities = [];   // [{norad_cat_id, weight, transmitter_uuid, mode}], current display order
 let dragFrom = -1;
 let pendingAdd = null;  // {norad, name} once a search suggestion is picked
 let searchDebounce;
 let openTxNorad = null;          // NORAD of the row whose transmitter picker is open
 const txCache = new Map();       // norad -> transmitters[] already fetched this session
+
+let priorityLists = [];          // [{slug, name}], as last fetched from the backend
+let activeListSlug = 'default';
+let listPickerOpen = false;
+let settingsOpen = false;
 
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
@@ -33,15 +38,28 @@ export function mountSchedule() {
   // before blur clears the list, or a click on it would never register.
   search.addEventListener('blur', () => setTimeout(hideSuggestions, 150));
 
-  // The transmitter picker has no input to blur — it is dismissed by
-  // clicking anywhere outside it, or Escape.
+  mountSettings();
+  mountPriorityLists();
+
+  // The transmitter picker, the settings popover and the list picker each
+  // have no input to blur — all three are dismissed by clicking anywhere
+  // outside them, or Escape. One shared pair of listeners for all three.
   document.addEventListener('click', (ev) => {
     if (openTxNorad !== null && !ev.target.closest('.sched-prio-tx-wrap')) {
       closeTxPicker();
     }
+    if (settingsOpen && !ev.target.closest('.sched-settings-wrap')) {
+      closeSettings();
+    }
+    if (listPickerOpen && !ev.target.closest('.sched-list-picker-wrap')) {
+      closeListPicker();
+    }
   });
   document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && openTxNorad !== null) closeTxPicker();
+    if (ev.key !== 'Escape') return;
+    if (openTxNorad !== null) closeTxPicker();
+    if (settingsOpen) closeSettings();
+    if (listPickerOpen) closeListPicker();
   });
 }
 
@@ -49,12 +67,14 @@ const panel = () => document.getElementById('schedule-panel');
 
 async function open() {
   panel().hidden = false;
-  await Promise.all([loadLastRun(), loadPriorities()]);
+  await Promise.all([loadLastRun(), loadPriorities(), loadConfig(), loadPriorityLists()]);
 }
 
 function close() {
   panel().hidden = true;
   openTxNorad = null;
+  settingsOpen = false;
+  listPickerOpen = false;
 }
 
 async function loadLastRun() {
@@ -85,9 +105,37 @@ function renderLastRun(run) {
 
   const meta = document.createElement('p');
   meta.className = 'muted sched-meta';
-  meta.textContent = `Generated ${shortTime(run.generated_utc, 'UTC')} UTC · `
+  const text = document.createElement('span');
+  text.textContent = `Generated ${shortTime(run.generated_utc, 'UTC')} UTC · `
     + `${run.observations.length} of ${run.considered} candidate pass(es) booked`;
-  box.appendChild(meta);
+  meta.appendChild(text);
+
+  const notices = run.notices || [];
+  if (notices.length) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'sched-notices-toggle';
+    toggle.textContent = `${notices.length} warning${notices.length === 1 ? '' : 's'} ▾`;
+    const list = document.createElement('ul');
+    list.className = 'sched-notices';
+    list.hidden = true;
+    for (const n of notices) {
+      const li = document.createElement('li');
+      li.className = `sched-notice ${n.severity === 'error' ? 'error' : ''}`.trim();
+      li.textContent = n.message;
+      list.appendChild(li);
+    }
+    toggle.addEventListener('click', () => { list.hidden = !list.hidden; });
+    meta.appendChild(toggle);
+    box.appendChild(meta);
+    box.appendChild(list);
+  } else {
+    const ok = document.createElement('span');
+    ok.className = 'sched-status-ok';
+    ok.textContent = 'OK';
+    meta.appendChild(ok);
+    box.appendChild(meta);
+  }
 
   if (!run.observations.length) return;
 
@@ -167,6 +215,10 @@ async function loadPriorities() {
     console.error('[schedule] priorities', err);
     priorities = [];
   }
+  // Unflagged rows (anything saved before this feature existed) default to
+  // "auto" — preserves today's exact drag-reorder behavior for anyone who
+  // has not touched this yet.
+  for (const p of priorities) p.mode = p.mode === 'manual' ? 'manual' : 'auto';
   renderPriorities();
 }
 
@@ -206,6 +258,25 @@ function renderPriorities() {
     norad.textContent = `NORAD ${p.norad_cat_id}`;
     info.append(name, norad, buildTxControl(p));
 
+    const mode = document.createElement('button');
+    mode.type = 'button';
+    mode.className = 'sched-prio-mode';
+    const isManual = p.mode === 'manual';
+    if (isManual) mode.classList.add('is-manual');
+    mode.textContent = isManual ? 'MANUAL' : 'AUTO';
+    mode.title = isManual
+      ? 'weight is pinned — reordering other rows will not change it'
+      : 'weight follows list position — dragging any row recomputes it';
+    mode.addEventListener('click', () => {
+      priorities[i].mode = isManual ? 'auto' : 'manual';
+      if (isManual) {
+        // Switching back to auto: don't leave the weight stale until the
+        // next drag — recompute right away.
+        rerank();
+      }
+      renderPriorities();
+    });
+
     const weight = document.createElement('input');
     weight.type = 'number';
     weight.min = '0';
@@ -226,7 +297,7 @@ function renderPriorities() {
       renderPriorities();
     });
 
-    li.append(handle, info, weight, del);
+    li.append(handle, info, mode, weight, del);
 
     li.addEventListener('dragstart', (ev) => {
       dragFrom = i;
@@ -479,6 +550,7 @@ function addEntry() {
     // operator adjusts it in the row itself, same as any existing entry.
     weight: DEFAULT_ADD_WEIGHT,
     transmitter_uuid: null,
+    mode: 'auto',
     satellite: name,
     transmitter_desc: '',
     transmitter_status: null,
@@ -493,9 +565,14 @@ function addEntry() {
 function rerank() {
   // A drag reorders the DOM, but the scheduler only ever reads weight, never
   // file line order — so the reorder has to move the number too, or the drag
-  // would look interactive while doing nothing.
-  const n = priorities.length;
-  priorities.forEach((p, i) => {
+  // would look interactive while doing nothing. Rows pinned to "Manual" are
+  // skipped entirely, and the spacing is spread across only the remaining
+  // "Auto" rows — by their rank among themselves, not raw list index — so a
+  // manual row sitting in the middle of the list doesn't leave a gap in the
+  // auto rows' weights.
+  const autoRows = priorities.filter((p) => p.mode !== 'manual');
+  const n = autoRows.length;
+  autoRows.forEach((p, i) => {
     p.weight = clamp01(n <= 1 ? 1 : 1 - i / (n - 1));
   });
 }
@@ -518,6 +595,232 @@ async function save() {
     status.textContent = `failed: ${err}`;
   } finally {
     btn.disabled = false;
+    setTimeout(() => { status.textContent = ''; }, 3000);
+  }
+}
+
+// --- station id / token settings ---------------------------------------------
+
+function mountSettings() {
+  document.getElementById('schedule-settings-toggle').addEventListener('click', toggleSettings);
+  document.getElementById('schedule-cfg-verify').addEventListener('click', verifyStation);
+  document.getElementById('schedule-cfg-save').addEventListener('click', saveConfig);
+}
+
+function toggleSettings() {
+  settingsOpen = !settingsOpen;
+  document.getElementById('schedule-settings').hidden = !settingsOpen;
+  if (settingsOpen) loadConfig();
+}
+
+function closeSettings() {
+  settingsOpen = false;
+  document.getElementById('schedule-settings').hidden = true;
+}
+
+async function loadConfig() {
+  try {
+    const cfg = await api.scheduleConfig();
+    document.getElementById('schedule-cfg-station').value = cfg.station_id || '';
+    document.getElementById('schedule-cfg-token').placeholder =
+      cfg.db_token_set ? 'saved (hidden) — leave blank to keep' : 'unchanged';
+  } catch (err) {
+    console.error('[schedule] config', err);
+  }
+}
+
+async function verifyStation() {
+  const input = document.getElementById('schedule-cfg-station');
+  const result = document.getElementById('schedule-cfg-verify-result');
+  const stationId = parseInt(input.value, 10);
+  if (!Number.isInteger(stationId) || stationId <= 0) {
+    result.textContent = 'enter a station id first';
+    return;
+  }
+  result.textContent = 'checking…';
+  try {
+    const resp = await api.verifyStation(stationId);
+    result.textContent = resp.ok
+      ? `✓ ${resp.station_name || 'found'} (${resp.status || 'unknown'})`
+      : `✗ ${resp.error}`;
+  } catch (err) {
+    result.textContent = `✗ ${err}`;
+  }
+}
+
+async function saveConfig() {
+  const btn = document.getElementById('schedule-cfg-save');
+  const status = document.getElementById('schedule-cfg-save-status');
+  const stationInput = document.getElementById('schedule-cfg-station');
+  const tokenInput = document.getElementById('schedule-cfg-token');
+
+  const stationVal = stationInput.value.trim();
+  // Blank clears the override back to the dashboard's own default (0 is
+  // falsy but not None, so the backend reads it as "clear this").
+  const stationId = stationVal ? parseInt(stationVal, 10) : 0;
+  // Blank token means "leave whatever is already saved alone" — the field
+  // never redisplays a saved secret, so blank cannot mean "clear it".
+  const tokenVal = tokenInput.value ? tokenInput.value : undefined;
+
+  btn.disabled = true;
+  status.textContent = 'saving…';
+  try {
+    await api.saveScheduleConfig(stationId, tokenVal);
+    tokenInput.value = '';
+    await loadConfig();
+    status.textContent = 'saved';
+  } catch (err) {
+    status.textContent = `failed: ${err}`;
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { status.textContent = ''; }, 3000);
+  }
+}
+
+// --- named priority lists ------------------------------------------------------
+
+function mountPriorityLists() {
+  document.getElementById('schedule-list-current').addEventListener('click', toggleListPicker);
+  document.getElementById('schedule-list-rename').addEventListener('click', startRename);
+
+  const renameInput = document.getElementById('schedule-list-rename-input');
+  renameInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); commitRename(); }
+    if (ev.key === 'Escape') cancelRename();
+  });
+  renameInput.addEventListener('blur', commitRename);
+
+  document.getElementById('schedule-saveas').addEventListener('click', toggleSaveAs);
+  const saveAsInput = document.getElementById('schedule-saveas-input');
+  saveAsInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); confirmSaveAs(); }
+    if (ev.key === 'Escape') cancelSaveAs();
+  });
+}
+
+async function loadPriorityLists() {
+  try {
+    const resp = await api.priorityLists();
+    priorityLists = resp.lists || [];
+    activeListSlug = resp.active || activeListSlug;
+  } catch (err) {
+    console.error('[schedule] priority lists', err);
+  }
+  renderListName();
+}
+
+function renderListName() {
+  const entry = priorityLists.find((l) => l.slug === activeListSlug);
+  document.getElementById('schedule-list-name').textContent = entry ? entry.name : activeListSlug;
+}
+
+function toggleListPicker() {
+  listPickerOpen = !listPickerOpen;
+  if (listPickerOpen) renderListPicker();
+  document.getElementById('schedule-list-picker').hidden = !listPickerOpen;
+}
+
+function closeListPicker() {
+  listPickerOpen = false;
+  document.getElementById('schedule-list-picker').hidden = true;
+}
+
+function renderListPicker() {
+  const ul = document.getElementById('schedule-list-picker');
+  ul.replaceChildren();
+  for (const l of priorityLists) {
+    const li = document.createElement('li');
+    li.className = 'sched-list-opt' + (l.slug === activeListSlug ? ' is-selected' : '');
+    li.textContent = l.name;
+    li.addEventListener('click', () => selectList(l.slug));
+    ul.appendChild(li);
+  }
+}
+
+async function selectList(slug) {
+  closeListPicker();
+  if (slug === activeListSlug) return;
+  try {
+    const resp = await api.loadPriorityList(slug);
+    activeListSlug = resp.active;
+    priorities = resp.entries || [];
+    for (const p of priorities) p.mode = p.mode === 'manual' ? 'manual' : 'auto';
+    renderListName();
+    renderPriorities();
+  } catch (err) {
+    console.error('[schedule] load list', err);
+  }
+}
+
+function startRename() {
+  const btn = document.getElementById('schedule-list-current');
+  const input = document.getElementById('schedule-list-rename-input');
+  const entry = priorityLists.find((l) => l.slug === activeListSlug);
+  input.value = entry ? entry.name : '';
+  btn.hidden = true;
+  input.hidden = false;
+  input.focus();
+  input.select();
+}
+
+function cancelRename() {
+  document.getElementById('schedule-list-current').hidden = false;
+  document.getElementById('schedule-list-rename-input').hidden = true;
+}
+
+async function commitRename() {
+  const input = document.getElementById('schedule-list-rename-input');
+  if (input.hidden) return;   // already committed or cancelled
+  const name = input.value.trim();
+  cancelRename();
+  if (!name) return;
+  try {
+    const resp = await api.renamePriorityList(activeListSlug, name);
+    priorityLists = resp.lists || priorityLists;
+    renderListName();
+  } catch (err) {
+    console.error('[schedule] rename list', err);
+  }
+}
+
+function toggleSaveAs() {
+  const input = document.getElementById('schedule-saveas-input');
+  const btn = document.getElementById('schedule-saveas');
+  const opening = input.hidden;
+  input.hidden = !opening;
+  btn.hidden = opening;
+  if (opening) { input.value = ''; input.focus(); }
+}
+
+function cancelSaveAs() {
+  document.getElementById('schedule-saveas-input').hidden = true;
+  document.getElementById('schedule-saveas').hidden = false;
+}
+
+async function confirmSaveAs() {
+  const input = document.getElementById('schedule-saveas-input');
+  const name = input.value.trim();
+  if (!name) { cancelSaveAs(); return; }
+  const status = document.getElementById('schedule-save-status');
+  status.textContent = 'saving…';
+  try {
+    // Created empty, not a duplicate: the new list gets whatever is
+    // currently in the editor (via savePriorities below), not whatever was
+    // last written to disk for the list being "saved as".
+    const created = await api.createPriorityList(name, false);
+    const entry = created.lists[created.lists.length - 1];
+    await api.loadPriorityList(entry.slug);
+    activeListSlug = entry.slug;
+    priorityLists = created.lists;
+    const saved = await api.savePriorities(priorities);
+    priorities = saved.entries || priorities;
+    renderListName();
+    renderPriorities();
+    status.textContent = 'saved as new list';
+  } catch (err) {
+    status.textContent = `failed: ${err}`;
+  } finally {
+    cancelSaveAs();
     setTimeout(() => { status.textContent = ''; }, 3000);
   }
 }

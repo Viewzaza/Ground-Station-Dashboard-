@@ -50,6 +50,143 @@
   flex: none;
 }
 .schedule-head h2 { font-size: 13px; letter-spacing: .06em; display: flex; gap: 8px; align-items: baseline; }
+.schedule-head-actions { display: flex; align-items: center; gap: 8px; }
+
+/* A quiet icon trigger, deliberately not another .btn — matches this app's
+   existing preference (see .graf-open's own comment) for not making a
+   secondary control "the loudest thing in the band". Reused for the gear and
+   the list-rename pencil. */
+.sched-icon-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--ink-4);
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.sched-icon-btn:hover { color: var(--track); border-color: var(--rule); }
+
+.btn-quiet {
+  background: none;
+  color: var(--ink-3);
+}
+.btn-quiet:hover:not(:disabled) { color: var(--track); border-color: var(--track); }
+
+/* ── settings popover ─────────────────────────────────────────────────────
+   Station id + DB token, tucked behind the gear rather than a permanent
+   third section — this modal is already dense with two content sections
+   plus a search bar. */
+.sched-settings-wrap { position: relative; }
+.sched-settings-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 8;
+  width: 260px;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.sched-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.sched-settings-row label {
+  font-size: 10px;
+  color: var(--ink-3);
+  flex: none;
+  width: 62px;
+}
+.sched-settings-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 4px 6px;
+}
+.sched-settings-result { margin: 0 0 8px; min-height: 12px; }
+.sched-settings-note { font-size: 10px; line-height: 1.4; margin: 0 0 8px; }
+.sched-settings-save-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+
+/* ── named priority lists ─────────────────────────────────────────────────── */
+.sched-list-bar { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.sched-list-picker-wrap { position: relative; min-width: 0; }
+.sched-list-btn {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sched-list-btn:hover { border-color: var(--track); color: var(--track); }
+.sched-list-btn::after { content: " \25be"; color: var(--ink-4); }
+
+.sched-list-picker {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  min-width: 180px;
+  z-index: 6;
+  list-style: none;
+  margin: 0;
+  padding: 3px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+}
+.sched-list-opt {
+  padding: 5px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sched-list-opt:hover { background: var(--sunk); color: var(--track); }
+.sched-list-opt.is-selected { color: var(--track); font-weight: 600; }
+
+.sched-list-rename-input {
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 6px;
+  border: 1px solid var(--track);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--text);
+  width: 160px;
+}
+
+.sched-saveas-input {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--track);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--text);
+  width: 140px;
+}
 
 .schedule-section {
   padding: 12px 14px;
@@ -72,7 +209,54 @@
 
 .schedule-save-row { display: flex; align-items: center; gap: 8px; }
 
-.sched-meta { margin: 0 0 8px; font-size: 11px; }
+.sched-meta {
+  margin: 0 0 8px;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── run status pills ─────────────────────────────────────────────────────
+   Reuses .rx-tag (panels.css/radio.js) wholesale rather than inventing a
+   second status-pill language. */
+.sched-status-ok {
+  font-size: 9px; letter-spacing: .1em; padding: 1px 5px; border-radius: 2px;
+  border: 1px solid color-mix(in srgb, var(--ok) 55%, var(--panel));
+  color: var(--ok);
+}
+.sched-notices-toggle {
+  font-size: 9px; letter-spacing: .1em; padding: 1px 5px; border-radius: 2px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--panel));
+  color: var(--warn);
+  background: none;
+  font-family: inherit;
+  cursor: pointer;
+}
+.sched-notices-toggle:hover { border-color: var(--warn); }
+.sched-notices {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+/* Same fix as .schedule-overlay[hidden] above: author CSS's display:flex
+   beats the UA stylesheet's own [hidden] rule at equal specificity. */
+.sched-notices[hidden] {
+  display: none;
+}
+.sched-notice {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  border-left: 2px solid var(--warn);
+  color: var(--ink-2);
+}
+.sched-notice.error { border-left-color: var(--bad); }
 
 .sched-table {
   width: 100%;
@@ -299,6 +483,31 @@ button.sched-prio-tx.is-editing { color: var(--track); }
   cursor: default;
 }
 
+/* Absorbs the row's free space (moved here from the weight input below) so
+   the pill sits immediately to its left, both pushed flush against the
+   delete button on the right. */
+.sched-prio-mode {
+  flex: none;
+  margin-left: auto;
+  font-size: 9px;
+  letter-spacing: .08em;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  color: var(--ink-3);
+  background: var(--panel);
+  cursor: pointer;
+  line-height: 1.5;
+}
+.sched-prio-mode:hover { border-color: var(--track); color: var(--track); }
+/* A manual pin reads a step more prominent, the same way a pinned
+   transmitter (.sched-prio-tx.is-pinned) does. */
+.sched-prio-mode.is-manual {
+  color: var(--ink-2);
+  border-color: color-mix(in srgb, var(--track) 55%, var(--panel));
+  background: color-mix(in srgb, var(--track) 8%, var(--panel));
+}
+
 .sched-prio-row input[type="number"] {
   width: 70px;
   flex: none;
@@ -308,7 +517,6 @@ button.sched-prio-tx.is-editing { color: var(--track); }
   color: var(--text);
   font: inherit;
   padding: 3px 6px;
-  margin-left: auto;
 }
 
 .sched-prio-del {

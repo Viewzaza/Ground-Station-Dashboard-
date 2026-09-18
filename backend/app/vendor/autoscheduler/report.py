@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,9 +12,27 @@ from rich.console import Console
 from rich.table import Table
 
 from .network_client import Station
+from .priorities import Finding
 from .selector import TIER_MISSION, Selection
 
 console = Console()
+
+
+@dataclass
+class PlanReport:
+    """Everything a `plan()` run found worth flagging, beyond the selection
+    itself - previously only ever printed to the terminal (see cli.py) and
+    discarded. Kept separate from `Selection` because it is diagnostic, not
+    part of what got booked.
+    """
+
+    schedulable: bool = True
+    has_antennas: bool = True
+    passes_found: int = 0
+    passes_gated: int = 0
+    findings: list[Finding] = field(default_factory=list)
+    skipped: list[dict] = field(default_factory=list)   # [{"norad": int, "reason": str}]
+    thin_history: str | None = None
 
 
 def print_station(station: Station) -> None:

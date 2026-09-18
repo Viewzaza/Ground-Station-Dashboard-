@@ -11,7 +11,10 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
-from ..schemas import PriorityUpdate
+from ..schemas import (
+    PriorityListCreate, PriorityListRename, PriorityUpdate, ScheduleConfigUpdate,
+    StationVerifyRequest,
+)
 
 router = APIRouter()
 
@@ -62,3 +65,51 @@ async def transmitters(request: Request, norad_cat_id: int) -> dict:
         # "this satellite really has no transmitters", so a DB/network hiccup
         # has to fail loudly instead.
         raise HTTPException(503, f"SatNOGS DB temporarily unavailable: {exc}") from exc
+
+
+# --- station id / token config ---------------------------------------------
+
+@router.get("/schedule/config")
+async def get_config(request: Request) -> dict:
+    return await _service(request).get_config()
+
+
+@router.post("/schedule/config")
+async def save_config(request: Request, body: ScheduleConfigUpdate) -> dict:
+    return await _service(request).save_config(body.station_id, body.db_token)
+
+
+@router.post("/schedule/config/verify-station")
+async def verify_station(request: Request, body: StationVerifyRequest) -> dict:
+    return await _service(request).verify_station(body.station_id)
+
+
+# --- named priority lists ----------------------------------------------------
+
+@router.get("/schedule/priority-lists")
+async def priority_lists(request: Request) -> dict:
+    return await _service(request).list_priority_lists()
+
+
+@router.post("/schedule/priority-lists")
+async def create_priority_list(request: Request, body: PriorityListCreate) -> dict:
+    return await _service(request).create_priority_list(body.name, body.duplicate_current)
+
+
+@router.post("/schedule/priority-lists/{slug}/load")
+async def load_priority_list(request: Request, slug: str) -> dict:
+    service = _service(request)
+    try:
+        entries = await service.load_priority_list(slug)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"active": slug, "entries": entries}
+
+
+@router.post("/schedule/priority-lists/{slug}/rename")
+async def rename_priority_list(request: Request, slug: str, body: PriorityListRename) -> dict:
+    service = _service(request)
+    try:
+        return await service.rename_priority_list(slug, body.name)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc

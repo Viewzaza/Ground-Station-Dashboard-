@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,13 @@ from ..vendor.autoscheduler.report import _selection_payload
 log = logging.getLogger(__name__)
 
 _DEFAULT_PRIORITIES = Path(__file__).resolve().parent.parent / "vendor/autoscheduler/priorities.default.txt"
+_DEFAULT_LIST_SLUG = "default"
+_DEFAULT_LIST_NAME = "Default"
+
+
+def _slugify(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return slug or "list"
 
 
 class ScheduleService:
@@ -37,23 +45,91 @@ class ScheduleService:
         self.s = settings
         self.on_state = on_state or (lambda component, state, detail="": None)
 
-        self.priority_file = settings.data_dir / "priorities.txt"
         self.cache_dir = settings.data_dir / "autoscheduler_cache"
         self.result_path = settings.data_dir / "schedule_last_run.json"
+        self.config_file = settings.data_dir / "schedule_config.json"
+        self.priority_lists_dir = settings.data_dir / "priority_lists"
+        self.manifest_file = self.priority_lists_dir / "manifest.json"
+
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        if not self.priority_file.is_file() and _DEFAULT_PRIORITIES.is_file():
-            shutil.copyfile(_DEFAULT_PRIORITIES, self.priority_file)
+        self.priority_lists_dir.mkdir(parents=True, exist_ok=True)
+
+        self._config = self._load_config()
+        self._manifest = self._load_or_migrate_manifest()
 
         self._run_lock = asyncio.Lock()
-        self._priorities_lock = asyncio.Lock()
+        # Guards both "which list is active" and that list's file contents
+        # together, so a save from one browser tab can never land in a
+        # different file than the one that was active when the save started
+        # (the race: tab A saving list A while tab B's load_priority_list
+        # flips the active slug to B mid-write).
+        self._lists_lock = asyncio.Lock()
+        self._config_lock = asyncio.Lock()
         self._running = False
         self._last_error: str | None = None
+
+    # --- station id / token overrides ---------------------------------------
+    def _load_config(self) -> dict:
+        if not self.config_file.is_file():
+            return {}
+        try:
+            return json.loads(self.config_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("could not read %s: %s", self.config_file, exc)
+            return {}
+
+    def _write_config(self) -> None:
+        tmp = self.config_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._config, indent=2), encoding="utf-8")
+        tmp.replace(self.config_file)
+
+    def _effective_station_id(self) -> int:
+        return self._config.get("station_id") or self.s.station_id
+
+    def _effective_db_token(self) -> str:
+        return self._config.get("db_token") or self.s.satnogs_db_token
+
+    async def get_config(self) -> dict:
+        async with self._config_lock:
+            return {
+                "station_id": self._effective_station_id(),
+                "station_id_is_override": bool(self._config.get("station_id")),
+                "db_token_set": bool(self._effective_db_token()),
+            }
+
+    async def save_config(self, station_id: int | None, db_token: str | None) -> dict:
+        """`None` leaves a field unchanged; `""`/`0` clears the override back
+        to the dashboard's own default."""
+        async with self._config_lock:
+            if station_id is not None:
+                self._config["station_id"] = station_id or None
+            if db_token is not None:
+                self._config["db_token"] = db_token or None
+            await asyncio.to_thread(self._write_config)
+        return await self.get_config()
+
+    async def verify_station(self, station_id: int) -> dict:
+        """The only thing that can honestly be verified: does this station id
+        exist on SatNOGS Network. Neither the DB token nor a network token is
+        required by any read this service makes, so there is no call that
+        would prove a token itself is valid - callers must not claim one."""
+        return await asyncio.to_thread(self._verify_station_sync, station_id)
+
+    def _verify_station_sync(self, station_id: int) -> dict:
+        cache = Cache(self.cache_dir, offline=self.s.offline)
+        auto_settings = self._build_autoscheduler_settings(0.0)
+        network = NetworkClient(auto_settings, cache)
+        try:
+            station = network.get_station(station_id)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "station_name": station.name, "status": station.status}
 
     # --- schedule runs -------------------------------------------------------
     def _build_autoscheduler_settings(self, hours: float) -> AutoSettings:
         return AutoSettings(
-            station_id=self.s.station_id,
-            db_token=self.s.satnogs_db_token,
+            station_id=self._effective_station_id(),
+            db_token=self._effective_db_token(),
             cache_dir=self.cache_dir,
             hours=hours,
             mission_norad=self.s.default_norad,
@@ -61,17 +137,30 @@ class ScheduleService:
             offline=self.s.offline,
             db_base_url=self.s.satnogs_db,
             network_base_url=self.s.satnogs_network,
+            # network_token is deliberately never set here - see
+            # NetworkClient.schedule(), the only place it would matter, which
+            # this service never calls. Booking stays off no matter what a
+            # future settings field might hold.
         )
 
     def _mock_result(self) -> dict:
-        """A small canned plan, so GS_MOCK=1 never touches the live SatNOGS APIs."""
+        """A small canned plan, so GS_MOCK=1 never touches the live SatNOGS APIs.
+
+        Includes one canned notice so the "ok_with_warnings" UI path is
+        exercised by default in dev, not only against a real run.
+        """
         now = datetime.now(timezone.utc).isoformat()
         return {
-            "station": self.s.station_id,
+            "status": "ok_with_warnings",
+            "station": self._effective_station_id(),
             "generated_utc": now,
             "considered": 2,
             "rejected_conflict": 0,
             "rejected_capped": 0,
+            "notices": [
+                {"severity": "warning",
+                 "message": "12345 was not considered: SatNOGS DB has no TLE for it"},
+            ],
             "observations": [
                 {
                     "start": now, "end": now, "duration_s": 300,
@@ -120,8 +209,28 @@ class ScheduleService:
         outcome = auto_cli.plan(auto_settings, args)
         if outcome is None:
             raise RuntimeError("planning produced nothing schedulable - see backend logs")
-        station, selection = outcome
-        return _selection_payload(selection, station.id)
+        station, selection, plan_report = outcome
+        payload = _selection_payload(selection, station.id)
+
+        notices: list[dict] = []
+        for finding in plan_report.findings:
+            if finding.severity == "ok":
+                continue
+            notices.append({
+                "severity": finding.severity,
+                "message": f"{finding.satellite} ({finding.norad_cat_id}): {finding.message}",
+            })
+        for skip in plan_report.skipped:
+            notices.append({
+                "severity": "warning",
+                "message": f"{skip['norad']} was not considered: {skip['reason']}",
+            })
+        if plan_report.thin_history:
+            notices.append({"severity": "warning", "message": plan_report.thin_history})
+
+        payload["status"] = "ok_with_warnings" if notices else "ok"
+        payload["notices"] = notices
+        return payload
 
     def _write_result(self, result: dict) -> None:
         tmp = self.result_path.with_suffix(".tmp")
@@ -137,7 +246,95 @@ class ScheduleService:
             log.warning("could not read %s: %s", self.result_path, exc)
             return {"status": "never_run"}
 
-    # --- priorities ------------------------------------------------------------
+    # --- priority lists ------------------------------------------------------
+    def _load_or_migrate_manifest(self) -> dict:
+        if self.manifest_file.is_file():
+            try:
+                return json.loads(self.manifest_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                log.warning("could not read %s: %s", self.manifest_file, exc)
+
+        # First boot after this feature landed (or a fresh install): fold
+        # whatever priority data already exists into a single "Default" list
+        # rather than orphaning it.
+        default_path = self.priority_lists_dir / f"{_DEFAULT_LIST_SLUG}.txt"
+        if not default_path.is_file():
+            old = self.s.data_dir / "priorities.txt"
+            if old.is_file():
+                shutil.copyfile(old, default_path)
+            elif _DEFAULT_PRIORITIES.is_file():
+                shutil.copyfile(_DEFAULT_PRIORITIES, default_path)
+            else:
+                write_priority_file(default_path, [])
+
+        manifest = {
+            "active": _DEFAULT_LIST_SLUG,
+            "lists": [{"slug": _DEFAULT_LIST_SLUG, "name": _DEFAULT_LIST_NAME}],
+        }
+        self._manifest = manifest
+        self._write_manifest()
+        return manifest
+
+    def _write_manifest(self) -> None:
+        tmp = self.manifest_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._manifest, indent=2), encoding="utf-8")
+        tmp.replace(self.manifest_file)
+
+    @property
+    def priority_file(self) -> Path:
+        return self.priority_lists_dir / f"{self._manifest['active']}.txt"
+
+    def _list_entry(self, slug: str) -> dict | None:
+        return next((entry for entry in self._manifest["lists"] if entry["slug"] == slug), None)
+
+    def _unique_slug(self, name: str) -> str:
+        base = _slugify(name)
+        existing = {entry["slug"] for entry in self._manifest["lists"]}
+        slug = base
+        n = 2
+        while slug in existing:
+            slug = f"{base}-{n}"
+            n += 1
+        return slug
+
+    async def list_priority_lists(self) -> dict:
+        async with self._lists_lock:
+            return {"active": self._manifest["active"], "lists": list(self._manifest["lists"])}
+
+    async def load_priority_list(self, slug: str) -> list[dict]:
+        """Loading makes a list active immediately - there is no separate
+        "activate" step. The next auto-run (and any save) uses this list."""
+        async with self._lists_lock:
+            if self._list_entry(slug) is None:
+                raise ValueError(f"no priority list named {slug!r}")
+            self._manifest["active"] = slug
+            await asyncio.to_thread(self._write_manifest)
+        return await self.get_priorities()
+
+    async def create_priority_list(self, name: str, duplicate_current: bool = False) -> dict:
+        """Creating a list does not switch to it - only load_priority_list
+        does that, so there is exactly one rule for "what's active"."""
+        async with self._lists_lock:
+            slug = self._unique_slug(name)
+            new_path = self.priority_lists_dir / f"{slug}.txt"
+            if duplicate_current and self.priority_file.is_file():
+                await asyncio.to_thread(shutil.copyfile, self.priority_file, new_path)
+            else:
+                await asyncio.to_thread(write_priority_file, new_path, [])
+            self._manifest["lists"].append({"slug": slug, "name": name})
+            await asyncio.to_thread(self._write_manifest)
+            return {"active": self._manifest["active"], "lists": list(self._manifest["lists"])}
+
+    async def rename_priority_list(self, slug: str, new_name: str) -> dict:
+        async with self._lists_lock:
+            entry = self._list_entry(slug)
+            if entry is None:
+                raise ValueError(f"no priority list named {slug!r}")
+            entry["name"] = new_name
+            await asyncio.to_thread(self._write_manifest)
+            return {"active": self._manifest["active"], "lists": list(self._manifest["lists"])}
+
+    # --- priorities (the active list's contents) ------------------------------
     async def get_priorities(self) -> list[dict]:
         if not self.priority_file.is_file():
             return []
@@ -156,6 +353,7 @@ class ScheduleService:
             "norad_cat_id": p.norad_cat_id,
             "weight": p.weight,
             "transmitter_uuid": p.transmitter_uuid,
+            "mode": p.mode,
             "satellite": "",
             "transmitter_desc": "",
             "transmitter_status": None,
@@ -207,6 +405,7 @@ class ScheduleService:
                 "norad_cat_id": p.norad_cat_id,
                 "weight": p.weight,
                 "transmitter_uuid": p.transmitter_uuid,
+                "mode": p.mode,
                 "satellite": satellite,
                 "transmitter_desc": transmitter_desc,
                 "transmitter_status": transmitter_status,
@@ -233,7 +432,7 @@ class ScheduleService:
         if satellite is None:
             raise ValueError(f"NORAD {norad_cat_id} is not in the SatNOGS DB catalogue")
 
-        station = network.get_station(self.s.station_id)
+        station = network.get_station(self._effective_station_id())
         by_norad = db.transmitters_for_station(station.segments)
         transmitters = by_norad.get(norad_cat_id, [])
 
@@ -252,13 +451,18 @@ class ScheduleService:
         }
 
     async def save_priorities(self, entries: list[dict]) -> None:
-        async with self._priorities_lock:
+        async with self._lists_lock:
+            # Resolved while holding the lock, so a concurrent
+            # load_priority_list() can't switch the active list out from
+            # under this write.
+            target = self.priority_file
             priorities = [
                 Priority(
                     norad_cat_id=int(e["norad_cat_id"]),
                     weight=max(0.0, min(1.0, float(e["weight"]))),
                     transmitter_uuid=e.get("transmitter_uuid") or None,
+                    mode="manual" if e.get("mode") == "manual" else "auto",
                 )
                 for e in entries
             ]
-            await asyncio.to_thread(write_priority_file, self.priority_file, priorities)
+            await asyncio.to_thread(write_priority_file, target, priorities)

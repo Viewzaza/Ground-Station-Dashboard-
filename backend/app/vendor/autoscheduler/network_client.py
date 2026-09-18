@@ -236,6 +236,13 @@ class NetworkClient:
         whole list if any single entry is bad - usually a pass that somebody
         else booked in the seconds since we read the calendar - and losing
         nineteen good bookings to one stale one is not a good trade.
+
+        This is the *only* place ``settings.network_token`` matters anywhere
+        in this package - every read call (``get_station``, ``future_bookings``,
+        ``observation_history``) is unauthenticated. The dashboard's
+        ScheduleService never calls this method (it only ever calls ``plan()``,
+        never ``schedule --execute``), so a network token entered there has no
+        effect and booking stays off regardless of what is configured.
         """
         result = ScheduleResult(submitted=len(items))
         if not items:

@@ -148,6 +148,10 @@ class PriorityEntry(BaseModel):
     norad_cat_id: int
     weight: float = Field(ge=0.0, le=1.0)
     transmitter_uuid: str | None = None
+    # "auto" (default): the dashboard may recompute this weight from list
+    # order on a drag-reorder. "manual": the operator pinned this exact
+    # weight and it must survive reorders elsewhere in the list.
+    mode: Literal["auto", "manual"] = "auto"
     satellite: str | None = None
     transmitter_desc: str | None = None
     # The DB's own status for a *pinned* transmitter (e.g. "active",
@@ -160,6 +164,31 @@ class PriorityEntry(BaseModel):
 
 class PriorityUpdate(BaseModel):
     entries: list[PriorityEntry]
+
+
+class PriorityListInfo(BaseModel):
+    slug: str
+    name: str
+
+
+class PriorityListCreate(BaseModel):
+    name: str
+    duplicate_current: bool = False
+
+
+class PriorityListRename(BaseModel):
+    name: str
+
+
+class ScheduleConfigUpdate(BaseModel):
+    station_id: int | None = None
+    # "" clears the override back to the dashboard's own default; None
+    # leaves the current value unchanged.
+    db_token: str | None = None
+
+
+class StationVerifyRequest(BaseModel):
+    station_id: int
 
 
 class ScheduleObservation(BaseModel):
@@ -179,10 +208,17 @@ class ScheduleObservation(BaseModel):
     is_mission: bool
 
 
+class ScheduleNotice(BaseModel):
+    severity: Literal["warning", "error"]
+    message: str
+
+
 class ScheduleRun(BaseModel):
+    status: Literal["ok", "ok_with_warnings"] = "ok"
     station: int
     generated_utc: str
     considered: int
     rejected_conflict: int
     rejected_capped: int
+    notices: list[ScheduleNotice] = Field(default_factory=list)
     observations: list[ScheduleObservation]

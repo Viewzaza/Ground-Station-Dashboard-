@@ -25,7 +25,7 @@ from .priorities import (
     validate_priorities,
 )
 from .report import (
-    console, print_findings, print_plan, print_station, write_csv, write_json,
+    PlanReport, console, print_findings, print_plan, print_station, write_csv, write_json,
 )
 from .selector import TIER_MISSION, build_candidates, select
 
@@ -174,18 +174,28 @@ def resolve_limits(settings: Settings, station: Station) -> tuple[float, float]:
     return horizon, culmination
 
 
-def plan(settings: Settings, args) -> tuple[Station, object] | None:
-    """Run the whole pipeline and return the station plus the selection."""
+def plan(settings: Settings, args) -> tuple[Station, object, PlanReport] | None:
+    """Run the whole pipeline and return the station, the selection, and a
+    PlanReport of everything worth flagging along the way.
+
+    The PlanReport is purely additive: every console.print() below stays
+    exactly as it was, so the CLI's own output is unchanged. It exists so a
+    caller that isn't a terminal (the dashboard) can see what would otherwise
+    only ever reach stdout.
+    """
     cache = Cache(settings.cache_dir, offline=settings.offline)
     network = NetworkClient(settings, cache)
     db = DbClient(settings, cache)
+    report = PlanReport()
 
     console.print(f"[dim]Reading station {settings.station_id}...[/]")
     station = network.get_station(settings.station_id)
+    report.has_antennas = bool(station.antennas)
     if not station.antennas:
         console.print("[red]This station publishes no antennas, so nothing can be matched "
                       "to it.[/]")
         return None
+    report.schedulable = station.schedulable
     if not station.schedulable:
         console.print(
             f"[red]Station {station.id} is {station.status.lower()} and not connected.[/] "
@@ -247,13 +257,15 @@ def plan(settings: Settings, args) -> tuple[Station, object] | None:
         p for p in passes
         if p.max_el >= min_culmination and p.duration_s >= settings.min_duration_s
     ]
+    report.passes_found = len(passes)
+    report.passes_gated = len(gated)
     console.print(f"[dim]{len(passes)} pass(es) above {min_horizon:g}deg, "
                   f"{len(gated)} clear the {min_culmination:g}deg / "
                   f"{settings.min_duration_s / 60:g} min gates.[/]")
     if not gated:
         console.print("[yellow]Nothing to schedule in this window.[/]")
         return station, select([], [], buffer_s=settings.buffer_s, max_schedule=0,
-                               max_duration_s=settings.max_duration_s)
+                               max_duration_s=settings.max_duration_s), report
 
     if settings.priority_file:
         # Validate before using. A stale or mistyped UUID is silently dropped by
@@ -263,6 +275,7 @@ def plan(settings: Settings, args) -> tuple[Station, object] | None:
             priorities, station,
             db.transmitters_by_uuid(), db.satellites_by_norad(), set(tles),
         )
+        report.findings = findings
         if count_errors(findings):
             print_findings(findings, settings.priority_file)
         # A satellite you asked for by name should never just not appear. If one
@@ -284,6 +297,7 @@ def plan(settings: Settings, args) -> tuple[Station, object] | None:
             else:
                 why = "it is not marked 'in orbit' in SatNOGS DB"
             console.print(f"[yellow]Priority satellite {norad} was not considered:[/] {why}")
+            report.skipped.append({"norad": norad, "reason": why})
 
         if settings.only_priority:
             keep = set(priorities)
@@ -310,13 +324,15 @@ def plan(settings: Settings, args) -> tuple[Station, object] | None:
         # silently takes over. Say so rather than letting it look intentional.
         known = len(candidate_sats & set(history))
         if candidate_sats and known < len(candidate_sats) * 0.1:
-            console.print(
-                f"[yellow]Thin history:[/] this station has recorded only {known} of "
+            thin_msg = (
+                f"Thin history: this station has recorded only {known} of "
                 f"{len(candidate_sats)} candidate satellites, so the under-observed "
                 f"score is near-flat and pass geometry is effectively deciding. "
                 f"Raise --history-pages, or give a priority file with -P, to get a "
                 f"plan that reflects what you care about."
             )
+            console.print(f"[yellow]{thin_msg}[/]")
+            report.thin_history = thin_msg
 
     candidates = build_candidates(
         gated, by_norad, priorities, scarcity, history,
@@ -334,14 +350,14 @@ def plan(settings: Settings, args) -> tuple[Station, object] | None:
         max_duration_s=settings.max_duration_s,
     )
     console.print(f"[dim]{len(bookings)} existing booking(s) were left untouched.[/]")
-    return station, selection
+    return station, selection, report
 
 
 def command_plan(settings: Settings, args) -> int:
     outcome = plan(settings, args)
     if outcome is None:
         return 1
-    station, selection = outcome
+    station, selection, _report = outcome
     print_plan(selection, dry_run=True)
     _write_exports(args, selection, station.id)
     return 0
@@ -351,7 +367,7 @@ def command_schedule(settings: Settings, args) -> int:
     outcome = plan(settings, args)
     if outcome is None:
         return 1
-    station, selection = outcome
+    station, selection, _report = outcome
     print_plan(selection, dry_run=not settings.execute)
     _write_exports(args, selection, station.id)
 

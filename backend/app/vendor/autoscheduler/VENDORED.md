@@ -43,6 +43,31 @@ one, and a local editable install would break the Docker build context
    improvement, not a behavior change (station connection/antenna info
    does not change fast enough for an hour-old cache to matter).
 
+4. **`priorities.py`: `Priority` gained a `mode: str = "auto"` field**, with
+   a matching optional 4th column in the file format (`... [transmitter_uuid|-]
+   [manual]`). This is dashboard-side bookkeeping only — the scheduler itself
+   never reads `mode`, only `weight` — added so the dashboard's per-row
+   Auto/Manual weight toggle (a row pinned to "Manual" keeps its typed weight
+   across drag-reorders of other rows) survives a save/reload. Fully
+   backward compatible: a plain 2-3 field line (everything written before
+   this, and everything the official tool writes) still parses as
+   `mode="auto"` with no change in behavior, and `write_priority_file()`
+   only ever emits the 4th field for a "manual" entry, so an all-auto list's
+   file is byte-identical to what it would have been before this patch.
+
+5. **`cli.py`/`report.py`: `plan()` now returns a 3-tuple
+   `(station, selection, PlanReport)` instead of `(station, selection)`.**
+   `PlanReport` (new dataclass in `report.py`) carries everything `plan()`
+   already computed and printed via `console.print()` but previously
+   discarded — priority-file validation `findings`, per-satellite "was not
+   considered" `skipped` reasons, the thin-history warning, and pass/gate
+   counts. Every existing `console.print()` call is untouched, so CLI output
+   is identical; `command_plan`/`command_schedule` just unpack and ignore the
+   third element (`_report`). The dashboard's `ScheduleService` uses it to
+   report whether the last run was a clean success or had problems worth
+   surfacing, instead of a run that quietly excluded satellites looking
+   identical to a totally clean one.
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this

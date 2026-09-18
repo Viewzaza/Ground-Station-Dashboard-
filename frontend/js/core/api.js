@@ -71,4 +71,15 @@ export const api = {
   getPriorities:   ()         => get('/api/schedule/priorities'),
   savePriorities:  (entries)  => post('/api/schedule/priorities', { entries }),
   transmittersFor: (norad)    => get(`/api/schedule/transmitters/${norad}`),
+
+  scheduleConfig:      ()                     => get('/api/schedule/config'),
+  saveScheduleConfig:  (station_id, db_token) => post('/api/schedule/config', { station_id, db_token }),
+  verifyStation:       (station_id)           => post('/api/schedule/config/verify-station', { station_id }),
+
+  priorityLists:       ()                     => get('/api/schedule/priority-lists'),
+  createPriorityList:  (name, duplicate_current) =>
+    post('/api/schedule/priority-lists', { name, duplicate_current }),
+  loadPriorityList:    (slug)                 => post(`/api/schedule/priority-lists/${encodeURIComponent(slug)}/load`, {}),
+  renamePriorityList:  (slug, name)           =>
+    post(`/api/schedule/priority-lists/${encodeURIComponent(slug)}/rename`, { name }),
 };
