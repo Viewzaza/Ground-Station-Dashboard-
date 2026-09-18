@@ -76,8 +76,13 @@ class CampaignService:
             return result
         except Exception as exc:
             log.exception("campaign preview failed")
+            result = {
+                "status": "error", "error": str(exc),
+                "generated_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            self._write_json(self.preview_path, result)
             self.on_state("campaign", "degraded", str(exc))
-            return {"status": "error", "error": str(exc)}
+            return result
         finally:
             self._running = False
 

@@ -9,6 +9,12 @@ import { shortTime } from '../core/format.js';
 
 const POLL_MS = 3000;
 const POLL_TIMEOUT_MS = 120_000;
+// Network Campaign walks every candidate station's booking history one at a
+// time to stay polite to SatNOGS's rate limit - against real data (hundreds
+// of stations) that has taken several minutes in testing, not the seconds a
+// Station Schedule run or mock data returns in. The 120s timeout above would
+// give up on a still-healthy real run and misreport it as unresponsive.
+const CAMPAIGN_POLL_TIMEOUT_MS = 20 * 60_000;
 
 let priorities = [];   // [{norad_cat_id, weight, transmitter_uuid, mode}], current display order
 let dragFrom = -1;
@@ -919,15 +925,30 @@ async function runCampaignPreview() {
   btn.textContent = 'CALCULATING…';
   box.replaceChildren(note('computing candidate stations and passes…'));
   try {
-    await api.runCampaignPreview();
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    // A stale result already on disk from a previous run has a status other
+    // than 'running' too, so checking status alone can't tell "just
+    // finished" from "hasn't started yet" - only a changed generated_utc can.
+    const before = (await api.campaignPreview())?.generated_utc;
+    const started = await api.runCampaignPreview();
+    if (started?.status === 'running') {
+      box.replaceChildren(note(
+        'a campaign run (preview or submit) is already in progress - wait for it to finish, then try again.'));
+      return;
+    }
+    const deadline = Date.now() + CAMPAIGN_POLL_TIMEOUT_MS;
+    let finished = false;
     while (Date.now() < deadline) {
       await sleep(POLL_MS);
       const preview = await api.campaignPreview();
-      if (preview?.status && preview.status !== 'running') {
+      if (preview?.status && preview.status !== 'running' && preview.generated_utc !== before) {
         renderCampaignPreview(preview);
+        finished = true;
         break;
       }
+    }
+    if (!finished) {
+      box.replaceChildren(note(
+        'still computing after 20 minutes - it may still finish; reopen this panel later to check, or use PREVIEW again once it has.'));
     }
   } catch (err) {
     console.error('[schedule] campaign preview', err);
@@ -995,22 +1016,41 @@ function renderCampaignPreview(preview) {
 async function confirmCampaign() {
   if (!campaignPreviewItems || !campaignPreviewItems.length) return;
   const btn = document.getElementById('campaign-commit-btn');
+  const box = document.getElementById('campaign-preview-result');
   btn.disabled = true;
   btn.textContent = 'SUBMITTING…';
   try {
-    await api.commitCampaign(campaignPreviewItems);
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    // Same staleness problem as the preview poll: the last-run file already
+    // has a non-'running' status from any earlier commit, so only a changed
+    // generated_utc proves *this* submit actually finished.
+    const before = (await api.campaignLastRun())?.generated_utc;
+    const started = await api.commitCampaign(campaignPreviewItems);
+    if (started?.status === 'running') {
+      // Preview and commit share one "is a campaign op running" flag on the
+      // backend, so a still-running preview silently blocks this - nothing
+      // was submitted. Say so instead of quietly discarding the click.
+      box.prepend(note(
+        'not submitted: a campaign preview or submit is already running - wait for it to finish, then click CONFIRM & SUBMIT again.'));
+      return;
+    }
+    const deadline = Date.now() + CAMPAIGN_POLL_TIMEOUT_MS;
     let last = null;
     while (Date.now() < deadline) {
       await sleep(POLL_MS);
       const run = await api.campaignLastRun();
-      if (run?.status && run.status !== 'running') { last = run; break; }
+      if (run?.status && run.status !== 'running' && run.generated_utc !== before) { last = run; break; }
     }
-    if (last) renderCampaignLastRun(last);
-    await loadCampaignHistory();
-    invalidateCampaignPreview();
+    if (last) {
+      renderCampaignLastRun(last);
+      await loadCampaignHistory();
+      invalidateCampaignPreview();
+    } else {
+      box.prepend(note(
+        'still submitting after 20 minutes - it may still finish; reopen this panel later to check the result and history.'));
+    }
   } catch (err) {
     console.error('[schedule] campaign commit', err);
+    box.prepend(note(`submit failed: ${err}`));
   } finally {
     btn.disabled = false;
     btn.textContent = 'CONFIRM & SUBMIT';
