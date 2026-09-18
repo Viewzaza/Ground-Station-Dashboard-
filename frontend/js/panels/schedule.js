@@ -12,6 +12,8 @@ const POLL_TIMEOUT_MS = 120_000;
 
 let priorities = [];   // [{norad_cat_id, weight, transmitter_uuid}], current display order
 let dragFrom = -1;
+let pendingAdd = null;  // {norad, name} once a search suggestion is picked
+let searchDebounce;
 
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
@@ -19,6 +21,16 @@ export function mountSchedule() {
   document.getElementById('schedule-run').addEventListener('click', runNow);
   document.getElementById('schedule-save').addEventListener('click', save);
   document.getElementById('schedule-add').addEventListener('click', addEntry);
+
+  const search = document.getElementById('schedule-add-search');
+  search.addEventListener('input', onSearchInput);
+  search.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); addEntry(); }
+    if (ev.key === 'Escape') hideSuggestions();
+  });
+  // A delay, not an immediate hide: a suggestion's own mousedown must land
+  // before blur clears the list, or a click on it would never register.
+  search.addEventListener('blur', () => setTimeout(hideSuggestions, 150));
 }
 
 const panel = () => document.getElementById('schedule-panel');
@@ -201,10 +213,31 @@ function renderPriorities() {
     });
 
     li.append(handle, info, weight, del);
-    li.addEventListener('dragstart', () => { dragFrom = i; });
-    li.addEventListener('dragover', (ev) => ev.preventDefault());
+
+    li.addEventListener('dragstart', (ev) => {
+      dragFrom = i;
+      ev.dataTransfer.effectAllowed = 'move';
+      ev.dataTransfer.setData('text/plain', String(i));
+      // Deferred: the browser snapshots the drag ghost synchronously at
+      // dragstart, before any class added in the same tick can affect it —
+      // add the faded look one tick later so the ghost still shows the row
+      // at full opacity while the row left behind fades.
+      setTimeout(() => li.classList.add('dragging'), 0);
+    });
+    li.addEventListener('dragend', () => {
+      li.classList.remove('dragging');
+      ul.querySelectorAll('.drag-over').forEach((el) => el.classList.remove('drag-over'));
+      dragFrom = -1;
+    });
+    li.addEventListener('dragover', (ev) => {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+      if (i !== dragFrom) li.classList.add('drag-over');
+    });
+    li.addEventListener('dragleave', () => li.classList.remove('drag-over'));
     li.addEventListener('drop', (ev) => {
       ev.preventDefault();
+      li.classList.remove('drag-over');
       if (dragFrom < 0 || dragFrom === i) return;
       const [moved] = priorities.splice(dragFrom, 1);
       priorities.splice(i, 0, moved);
@@ -216,19 +249,73 @@ function renderPriorities() {
   });
 }
 
+function suggestBox() {
+  return document.getElementById('schedule-add-suggest');
+}
+
+function hideSuggestions() {
+  suggestBox().hidden = true;
+}
+
+function onSearchInput() {
+  pendingAdd = null;
+  const q = document.getElementById('schedule-add-search').value.trim();
+  clearTimeout(searchDebounce);
+  if (!q) { hideSuggestions(); return; }
+  searchDebounce = setTimeout(async () => {
+    try {
+      const resp = await api.satellites(q);
+      renderSuggestions((resp.items || []).slice(0, 8));
+    } catch (err) {
+      console.error('[schedule] satellite search', err);
+    }
+  }, 150);
+}
+
+function renderSuggestions(items) {
+  const box = suggestBox();
+  box.replaceChildren();
+  if (!items.length) {
+    hideSuggestions();
+    return;
+  }
+  for (const it of items) {
+    const li = document.createElement('li');
+    li.textContent = `${it.name} — NORAD ${it.norad}`;
+    // mousedown, not click: it has to fire before the search input's own
+    // blur handler hides this list, or the click would land on nothing.
+    li.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      pendingAdd = { norad: it.norad, name: it.name };
+      document.getElementById('schedule-add-search').value = `${it.name} (${it.norad})`;
+      hideSuggestions();
+    });
+    box.appendChild(li);
+  }
+  box.hidden = false;
+}
+
 function addEntry() {
-  const noradInput = document.getElementById('schedule-add-norad');
+  const search = document.getElementById('schedule-add-search');
   const weightInput = document.getElementById('schedule-add-weight');
 
-  const norad = parseInt(noradInput.value, 10);
+  let norad;
+  let name = '';
+  if (pendingAdd) {
+    ({ norad, name } = pendingAdd);
+  } else {
+    // No suggestion picked — take the box literally, as a NORAD id. This
+    // still works for a satellite the name search does not cover.
+    norad = parseInt(search.value, 10);
+  }
   if (!Number.isInteger(norad) || norad <= 0) {
-    noradInput.focus();
+    search.focus();
     return;
   }
   if (priorities.some((p) => p.norad_cat_id === norad)) {
     // Already listed — edit its weight in place rather than duplicating it.
-    noradInput.focus();
-    noradInput.select();
+    search.focus();
+    search.select();
     return;
   }
 
@@ -236,12 +323,14 @@ function addEntry() {
     norad_cat_id: norad,
     weight: clamp01(parseFloat(weightInput.value) || 0.5),
     transmitter_uuid: null,
-    satellite: '',
+    satellite: name,
     transmitter_desc: '',
   });
-  noradInput.value = '';
+  search.value = '';
   weightInput.value = '0.50';
-  noradInput.focus();
+  pendingAdd = null;
+  hideSuggestions();
+  search.focus();
   renderPriorities();
 }
 

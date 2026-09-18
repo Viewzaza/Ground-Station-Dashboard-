@@ -197,7 +197,11 @@
           </div>
         </div>
         <div class="sched-add-row">
-          <input id="schedule-add-norad" type="number" min="1" placeholder="NORAD id">
+          <div class="sched-add-search-wrap">
+            <input id="schedule-add-search" type="text" autocomplete="off"
+                   placeholder="search satellite by name or NORAD…">
+            <ul id="schedule-add-suggest" class="sched-add-suggest" hidden></ul>
+          </div>
           <input id="schedule-add-weight" type="number" min="0" max="1" step="0.05" value="0.50">
           <button class="btn" id="schedule-add" type="button">ADD</button>
         </div>

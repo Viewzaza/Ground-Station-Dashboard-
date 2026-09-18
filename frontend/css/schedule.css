@@ -104,11 +104,11 @@
 
 .sched-add-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   margin-bottom: 8px;
 }
-.sched-add-row input[type="number"] {
+.sched-add-row input {
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 3px;
@@ -116,8 +116,47 @@
   font: inherit;
   padding: 4px 6px;
 }
-#schedule-add-norad { width: 110px; }
-#schedule-add-weight { width: 70px; }
+.sched-add-row input:focus {
+  outline: none;
+  border-color: var(--track);
+}
+.sched-add-search-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#schedule-add-search { width: 100%; }
+#schedule-add-weight { width: 70px; flex: none; }
+
+.sched-add-suggest {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 5;
+  list-style: none;
+  margin: 0;
+  padding: 3px;
+  max-height: 180px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+}
+.sched-add-suggest li {
+  padding: 5px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sched-add-suggest li:hover {
+  background: var(--sunk);
+  color: var(--track);
+}
 
 .sched-prio-list {
   list-style: none;
@@ -135,9 +174,31 @@
   background: var(--panel-2);
   border-radius: 4px;
   cursor: grab;
+  transition: opacity .12s ease, box-shadow .12s ease, background .12s ease;
 }
+.sched-prio-row:hover { background: var(--sunk); }
 .sched-prio-row:active { cursor: grabbing; }
-.sched-drag { color: var(--ink-4); flex: none; }
+/* The row being dragged: faded, but never invisible — it must stay legible so
+   the operator can still see what they are carrying, not just where. */
+.sched-prio-row.dragging {
+  opacity: .4;
+  background: var(--panel-2);
+}
+/* The drop target: a track-coloured rule at the top edge. An inset box-shadow
+   rather than a border, so it draws without shifting the row's height and
+   shoving every row below it down by a pixel on every dragover. */
+.sched-prio-row.drag-over {
+  box-shadow: inset 0 2px 0 var(--track);
+}
+.sched-drag {
+  color: var(--ink-4);
+  flex: none;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 13px;
+  line-height: 1;
+}
+.sched-prio-row:hover .sched-drag { color: var(--ink-2); }
 
 .sched-prio-info {
   display: flex;
