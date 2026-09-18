@@ -23,6 +23,7 @@ from ..vendor.autoscheduler import cli as auto_cli
 from ..vendor.autoscheduler.cache import Cache
 from ..vendor.autoscheduler.config import Settings as AutoSettings
 from ..vendor.autoscheduler.db_client import DbClient
+from ..vendor.autoscheduler.network_client import NetworkClient
 from ..vendor.autoscheduler.priorities import Priority, parse_priority_file, write_priority_file
 from ..vendor.autoscheduler.report import _selection_payload
 
@@ -199,6 +200,44 @@ class ScheduleService:
                 "transmitter_desc": transmitter_desc,
             })
         return out
+
+    async def get_transmitters(self, norad_cat_id: int) -> dict:
+        """Transmitters this station can actually hear for one satellite.
+
+        Used by the priority-list picker to offer a real choice instead of a
+        UUID nobody can read - deliberately narrower than the whole alive
+        catalogue (`DbClient.transmitters_by_uuid()`), which would let an
+        operator pin something station 5024's antennas can never record.
+        """
+        return await asyncio.to_thread(self._get_transmitters_sync, norad_cat_id)
+
+    def _get_transmitters_sync(self, norad_cat_id: int) -> dict:
+        cache = Cache(self.cache_dir, offline=self.s.offline)
+        auto_settings = self._build_autoscheduler_settings(0.0)
+        db = DbClient(auto_settings, cache)
+        network = NetworkClient(auto_settings, cache)
+
+        satellite = db.satellites_by_norad().get(norad_cat_id)
+        if satellite is None:
+            raise ValueError(f"NORAD {norad_cat_id} is not in the SatNOGS DB catalogue")
+
+        station = network.get_station(self.s.station_id)
+        by_norad = db.transmitters_for_station(station.segments)
+        transmitters = by_norad.get(norad_cat_id, [])
+
+        return {
+            "norad_cat_id": norad_cat_id,
+            "satellite": satellite.get("name") or "",
+            "transmitters": [
+                {
+                    "uuid": tx.uuid,
+                    "downlink_hz": tx.downlink_hz,
+                    "mode": tx.mode,
+                    "description": tx.description,
+                }
+                for tx in transmitters
+            ],
+        }
 
     async def save_priorities(self, entries: list[dict]) -> None:
         async with self._priorities_lock:

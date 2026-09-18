@@ -197,7 +197,10 @@
   flex-direction: column;
   gap: 1px;
   min-width: 0;
-  overflow: hidden;
+  /* No overflow:hidden here (unlike the name/norad/tx children below, which
+     each clip and ellipsis themselves) — the transmitter picker below opens
+     as an absolutely-positioned child of this column, and a hidden overflow
+     on the column would clip the picker to the row's own tiny height. */
 }
 .sched-prio-name {
   font-size: 12px;
@@ -211,12 +214,90 @@
   font-size: 10px;
   color: var(--ink-3);
 }
-.sched-prio-tx {
+
+/* ── transmitter picker ───────────────────────────────────────────────────
+   The transmitter line is a button, not static text: click it to swap which
+   transmitter is pinned for this satellite, or clear it back to auto. Reuses
+   the radio panel's own .rx-freq/.rx-mode vocabulary (panels.css) inside the
+   option list, so a frequency reads the same way here as it does there. */
+.sched-prio-tx-wrap {
+  position: relative;
+  min-width: 0;
+}
+button.sched-prio-tx {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+  font: inherit;
   font-size: 10px;
   color: var(--ink-3);
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+button.sched-prio-tx:hover,
+button.sched-prio-tx:focus-visible {
+  color: var(--track);
+  outline: none;
+}
+/* A deliberately pinned transmitter reads a step more prominent than the
+   passive "auto" default, the same way radio.js lightens a live row. */
+button.sched-prio-tx.is-pinned { color: var(--ink-2); }
+button.sched-prio-tx.is-editing { color: var(--track); }
+
+.sched-tx-picker {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  /* .sched-prio-tx-wrap is only as wide as its own text content (the row
+     never stretches it — see the weight input's margin-left:auto trick that
+     pushes it to the row's right edge instead), which is often too narrow to
+     show a frequency + mode without cramped wrapping. min-width lets the
+     picker spill past its own trigger's edge; left stays anchored so it does
+     not drift away from the button that opened it. */
+  min-width: 180px;
+  z-index: 6;
+  list-style: none;
+  margin: 0;
+  padding: 3px;
+  max-height: 180px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+}
+.sched-tx-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.sched-tx-opt:hover { background: var(--sunk); color: var(--track); }
+.sched-tx-opt.is-selected { color: var(--track); font-weight: 600; }
+.sched-tx-opt .rx-freq { font-size: 11px; }
+.sched-tx-auto {
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--rule-soft);
+  border-radius: 3px 3px 0 0;
+  margin-bottom: 2px;
+}
+.sched-tx-loading,
+.sched-tx-empty {
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--ink-3);
+  font-style: italic;
+  cursor: default;
 }
 
 .sched-prio-row input[type="number"] {

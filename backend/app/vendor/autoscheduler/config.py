@@ -39,6 +39,9 @@ TLE_TTL_S = 7200
 TRANSMITTER_TTL_S = 86400
 SATELLITE_TTL_S = 86400
 HISTORY_TTL_S = 86400
+# A station's antenna/connection status can change; shorter than the
+# catalogue TTLs above so a picker doesn't work off week-old station state.
+STATION_TTL_S = 3600
 
 
 def load_dotenv(path: Path) -> dict[str, str]:

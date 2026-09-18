@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .cache import Cache
-from .config import HISTORY_TTL_S, Settings
+from .config import HISTORY_TTL_S, STATION_TTL_S, Settings
 from .http import SatnogsHTTPError, make_session, paginate, request
 
 log = logging.getLogger(__name__)
@@ -146,13 +146,19 @@ class NetworkClient:
 
     # -- reads ---------------------------------------------------------------
 
+    def raw_station(self, station_id: int) -> dict:
+        def fetch() -> dict:
+            url = f"{self.s.network_base_url}/stations/"
+            resp = request(self.session, "GET", url, params={"id": station_id, "format": "json"})
+            rows = resp.json()
+            if not rows:
+                raise RuntimeError(f"station {station_id} does not exist on SatNOGS Network")
+            return rows[0]
+
+        return self.cache.get_or_fetch(f"network-station-{station_id}", STATION_TTL_S, fetch)
+
     def get_station(self, station_id: int) -> Station:
-        url = f"{self.s.network_base_url}/stations/"
-        resp = request(self.session, "GET", url, params={"id": station_id, "format": "json"})
-        rows = resp.json()
-        if not rows:
-            raise RuntimeError(f"station {station_id} does not exist on SatNOGS Network")
-        return Station.from_api(rows[0])
+        return Station.from_api(self.raw_station(station_id))
 
     def future_bookings(self, station_id: int, now: datetime | None = None) -> list[Booking]:
         """Every observation already booked on this station that has not ended.

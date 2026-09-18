@@ -31,6 +31,18 @@ one, and a local editable install would break the Docker build context
    `schedule_last_run.json`) without writing to a throwaway file and
    reading it back.
 
+3. **`network_client.py`: `get_station()` now goes through a new
+   `raw_station()`, cached via the same `Cache.get_or_fetch()` every other
+   catalogue read in this package already uses** (new `STATION_TTL_S = 3600`
+   in `config.py`). Upstream, this was an uncached request on every call.
+   The dashboard's transmitter picker calls `get_station()` on demand
+   (whenever an operator opens a row's picker) purely to read the station's
+   antenna segments, so leaving it uncached would mean one live SatNOGS
+   Network request per picker open. This also means `cli.plan()` itself now
+   costs one fewer network round trip on a warm cache — a strict
+   improvement, not a behavior change (station connection/antenna info
+   does not change fast enough for an hour-old cache to matter).
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this

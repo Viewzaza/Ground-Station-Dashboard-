@@ -14,6 +14,8 @@ let priorities = [];   // [{norad_cat_id, weight, transmitter_uuid}], current di
 let dragFrom = -1;
 let pendingAdd = null;  // {norad, name} once a search suggestion is picked
 let searchDebounce;
+let openTxNorad = null;          // NORAD of the row whose transmitter picker is open
+const txCache = new Map();       // norad -> transmitters[] already fetched this session
 
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
@@ -30,6 +32,17 @@ export function mountSchedule() {
   // A delay, not an immediate hide: a suggestion's own mousedown must land
   // before blur clears the list, or a click on it would never register.
   search.addEventListener('blur', () => setTimeout(hideSuggestions, 150));
+
+  // The transmitter picker has no input to blur — it is dismissed by
+  // clicking anywhere outside it, or Escape.
+  document.addEventListener('click', (ev) => {
+    if (openTxNorad !== null && !ev.target.closest('.sched-prio-tx-wrap')) {
+      closeTxPicker();
+    }
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && openTxNorad !== null) closeTxPicker();
+  });
 }
 
 const panel = () => document.getElementById('schedule-panel');
@@ -41,6 +54,7 @@ async function open() {
 
 function close() {
   panel().hidden = true;
+  openTxNorad = null;
 }
 
 async function loadLastRun() {
@@ -145,6 +159,7 @@ async function runNow() {
 }
 
 async function loadPriorities() {
+  openTxNorad = null;
   try {
     const resp = await api.getPriorities();
     priorities = resp.entries || [];
@@ -166,7 +181,10 @@ function renderPriorities() {
   priorities.forEach((p, i) => {
     const li = document.createElement('li');
     li.className = 'sched-prio-row';
-    li.draggable = true;
+    // Not draggable while its own transmitter picker is open — a dragstart
+    // fired from inside the open popover would otherwise drag the row instead
+    // of letting the click land on an option.
+    li.draggable = openTxNorad !== p.norad_cat_id;
 
     const handle = document.createElement('span');
     handle.className = 'sched-drag';
@@ -186,10 +204,7 @@ function renderPriorities() {
     const norad = document.createElement('span');
     norad.className = 'sched-prio-norad';
     norad.textContent = `NORAD ${p.norad_cat_id}`;
-    const tx = document.createElement('span');
-    tx.className = 'sched-prio-tx';
-    tx.textContent = p.transmitter_desc || (p.transmitter_uuid ? p.transmitter_uuid : 'auto (best available)');
-    info.append(name, norad, tx);
+    info.append(name, norad, buildTxControl(p));
 
     const weight = document.createElement('input');
     weight.type = 'number';
@@ -246,6 +261,128 @@ function renderPriorities() {
     });
     ul.appendChild(li);
   });
+}
+
+function buildTxControl(p) {
+  const wrap = document.createElement('span');
+  wrap.className = 'sched-prio-tx-wrap';
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'sched-prio-tx';
+  if (p.transmitter_uuid) btn.classList.add('is-pinned');
+  btn.textContent = p.transmitter_desc || (p.transmitter_uuid ? p.transmitter_uuid : 'auto (best available)');
+  btn.addEventListener('click', () => {
+    openTxNorad = openTxNorad === p.norad_cat_id ? null : p.norad_cat_id;
+    renderPriorities();
+  });
+  wrap.appendChild(btn);
+
+  if (openTxNorad === p.norad_cat_id) {
+    btn.classList.add('is-editing');
+    btn.setAttribute('aria-expanded', 'true');
+    const picker = document.createElement('ul');
+    picker.className = 'sched-tx-picker';
+    picker.appendChild(loadingItem());
+    wrap.appendChild(picker);
+    loadTxOptions(picker, p);
+  }
+
+  return wrap;
+}
+
+function closeTxPicker() {
+  openTxNorad = null;
+  renderPriorities();
+}
+
+function loadingItem() {
+  const li = document.createElement('li');
+  li.className = 'sched-tx-loading';
+  li.textContent = 'loading transmitters…';
+  return li;
+}
+
+async function loadTxOptions(picker, p) {
+  let list = txCache.get(p.norad_cat_id);
+  if (!list) {
+    try {
+      const resp = await api.transmittersFor(p.norad_cat_id);
+      list = resp.transmitters || [];
+      txCache.set(p.norad_cat_id, list);
+    } catch (err) {
+      console.error('[schedule] transmitters', err);
+      // The picker for this row may already be closed, or replaced by a
+      // fresh render, by the time this resolves — only paint into it if it
+      // is still the one the operator is looking at.
+      if (openTxNorad === p.norad_cat_id) {
+        picker.replaceChildren(emptyItem(`could not load: ${err}`));
+      }
+      return;
+    }
+  }
+  if (openTxNorad === p.norad_cat_id) {
+    renderTxOptions(picker, list, p);
+  }
+}
+
+function emptyItem(text) {
+  const li = document.createElement('li');
+  li.className = 'sched-tx-empty';
+  li.textContent = text;
+  return li;
+}
+
+function renderTxOptions(picker, list, p) {
+  picker.replaceChildren();
+
+  const auto = document.createElement('li');
+  auto.className = 'sched-tx-opt sched-tx-auto';
+  if (!p.transmitter_uuid) auto.classList.add('is-selected');
+  auto.textContent = 'Auto — best available';
+  auto.addEventListener('click', () => pickTransmitter(p.norad_cat_id, null, ''));
+  picker.appendChild(auto);
+
+  if (!list.length) {
+    picker.appendChild(emptyItem('no transmitters found for this satellite'));
+    return;
+  }
+
+  for (const tx of list) {
+    const li = document.createElement('li');
+    li.className = 'sched-tx-opt';
+    if (tx.uuid === p.transmitter_uuid) li.classList.add('is-selected');
+
+    const mhz = (tx.downlink_hz / 1e6).toFixed(3);
+    const freq = document.createElement('span');
+    freq.className = 'rx-freq';
+    freq.textContent = mhz;
+    const unit = document.createElement('i');
+    unit.textContent = 'MHz';
+    freq.appendChild(unit);
+
+    const mode = document.createElement('span');
+    mode.className = 'rx-mode';
+    mode.textContent = tx.mode || '—';
+
+    li.append(freq, mode);
+    const desc = `${mhz} MHz ${tx.mode || ''}`.trim();
+    li.addEventListener('click', () => pickTransmitter(p.norad_cat_id, tx.uuid, desc));
+    picker.appendChild(li);
+  }
+}
+
+function pickTransmitter(norad, uuid, desc) {
+  // Looked up by NORAD, not a captured array index: the priorities array can
+  // be reordered or have a different row deleted while this picker's fetch
+  // was in flight, which would leave a stale index pointing at the wrong
+  // satellite.
+  const entry = priorities.find((p) => p.norad_cat_id === norad);
+  if (!entry) return;   // the row itself was removed while its picker was open
+  entry.transmitter_uuid = uuid;
+  entry.transmitter_desc = desc;
+  openTxNorad = null;
+  renderPriorities();
 }
 
 function suggestBox() {

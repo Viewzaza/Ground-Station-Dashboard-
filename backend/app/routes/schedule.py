@@ -47,3 +47,18 @@ async def save_priorities(request: Request, body: PriorityUpdate) -> dict:
     service = _service(request)
     await service.save_priorities([e.model_dump() for e in body.entries])
     return {"entries": await service.get_priorities()}
+
+
+@router.get("/schedule/transmitters/{norad_cat_id}")
+async def transmitters(request: Request, norad_cat_id: int) -> dict:
+    service = _service(request)
+    try:
+        return await service.get_transmitters(norad_cat_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:
+        # Unlike get_priorities()'s enrichment, this endpoint has no fallback
+        # display to degrade to - an empty list here would look identical to
+        # "this satellite really has no transmitters", so a DB/network hiccup
+        # has to fail loudly instead.
+        raise HTTPException(503, f"SatNOGS DB temporarily unavailable: {exc}") from exc

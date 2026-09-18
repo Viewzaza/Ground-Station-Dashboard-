@@ -70,4 +70,5 @@ export const api = {
   runSchedule:     ()         => post('/api/schedule/run', {}),
   getPriorities:   ()         => get('/api/schedule/priorities'),
   savePriorities:  (entries)  => post('/api/schedule/priorities', { entries }),
+  transmittersFor: (norad)    => get(`/api/schedule/transmitters/${norad}`),
 };
