@@ -115,6 +115,20 @@ class CameraService:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(url, params={"src": stream})
+            if resp.status_code == 200 and not resp.content:
+                # go2rtc answers 200 with an empty body when the stream is
+                # configured but its producer never connected. On station 5024
+                # that is what a wrong camera password looks like: the bridge
+                # is healthy, RTSP is open, and every frame request comes back
+                # successful and empty. Passing it through hands the browser a
+                # zero-byte JPEG, which is a success the tile has to discover
+                # is a failure. 502 is what it actually is — an upstream that
+                # gave us nothing — and it puts the tile straight into its
+                # backoff instead of polling a broken image once a second.
+                log.warning("snapshot for %s: the bridge returned an empty "
+                            "frame — the camera behind it is not producing "
+                            "(check CAM_USER/CAM_PASS)", stream)
+                return 502, b"", "text/plain"
             return (
                 resp.status_code,
                 resp.content,

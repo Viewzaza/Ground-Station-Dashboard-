@@ -169,6 +169,37 @@ async def test_the_endpoint_carries_the_reason_to_the_browser(monkeypatch):
     assert len(body["items"]) == 2
 
 
+# --------------------------------------------------------------------------
+# snapshots
+# --------------------------------------------------------------------------
+
+async def test_an_empty_frame_is_not_passed_off_as_a_successful_jpeg(monkeypatch):
+    """What a wrong camera password looks like on station 5024: go2rtc is
+    healthy, RTSP is open, and every frame comes back 200 with nothing in it.
+    Forwarding that gives the browser a zero-byte JPEG — a success it has to
+    discover is a failure, one request per second."""
+    answer_with(monkeypatch, lambda r: httpx.Response(
+        200, content=b"", headers={"content-type": "image/jpeg"}))
+
+    status, body, ctype = await service().snapshot("cam_main")
+
+    assert status == 502
+    assert body == b""
+    assert ctype == "text/plain"
+
+
+async def test_a_real_frame_is_forwarded_untouched(monkeypatch):
+    """The proxy exists to keep the camera password out of the page, not to
+    have opinions about the image."""
+    jpeg = b"\xff\xd8\xff\xe0" + b"payload"
+    answer_with(monkeypatch, lambda r: httpx.Response(
+        200, content=jpeg, headers={"content-type": "image/jpeg"}))
+
+    status, body, ctype = await service().snapshot("cam_main")
+
+    assert (status, body, ctype) == (200, jpeg, "image/jpeg")
+
+
 @pytest.mark.parametrize("url", ["http://video:1984", "http://[::1]:1984",
                                  "http://video", "video:1984"])
 def test_explaining_a_fault_never_raises_on_a_url_shape(url):
