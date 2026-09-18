@@ -48,6 +48,12 @@ INK_FRACTION = 0.55     # how much of a line must be non-white to be "the plot"
 SAMPLE_STEP = 6         # every 6th pixel is plenty to find a 600 px wide box
 CENTRE_FRACTION = 0.5   # of the band, kept around the centre frequency
 PANEL_W, PANEL_H = 760, 150
+# How hard the surviving signal is lifted. Below 1 brightens, and the curve is
+# steepest at the dark end where the faint mid-pass returns live. 1.0 is the
+# old behaviour. Far below ~0.45 the residual noise that got through the
+# stretch starts to read as signal, which is worse than a dim panel.
+SIGNAL_GAMMA = 0.62
+_GAMMA_LUT = [round(255 * (i / 255) ** SIGNAL_GAMMA) for i in range(256)]
 # Retry interval with nothing cached. Shorter than the full TTL so a station
 # that has just started shows a waterfall without waiting five minutes, but long
 # enough that a rate-limited or unreachable API is not asked once per request.
@@ -263,9 +269,25 @@ def render_signal(png_bytes: bytes) -> bytes | None:
     score = ImageChops.subtract(g, b, 1, 128)
     signal = ImageOps.autocontrast(score, cutoff=(88, 0.03))
 
-    # Tint: black ground, cyan signal. Reads on a light or a dark panel.
-    coloured = ImageOps.colorize(signal, black="#0b1622", white="#7ff5ff",
-                                 mid="#1f8fb0")
+    # Then lift it. The stretch above decides what IS signal; this decides how
+    # brightly what survived is drawn, and they are worth keeping separate —
+    # widening the stretch to brighten the panel would drag the noise floor up
+    # with the bursts and the strip would get lighter without getting more
+    # legible.
+    #
+    # A gamma curve rather than a brightness offset, because the interesting
+    # part of a pass is the faint end: the strong bursts near AOS are already
+    # at the top of the range and adding a constant only clips them, while
+    # gamma < 1 lifts the weak returns mid-pass that were previously a few
+    # levels above black. The floor stays where it is, at zero, so the panel is
+    # still an instrument window and not a grey rectangle.
+    signal = signal.point(_GAMMA_LUT)
+
+    # Tint: near-black ground, cyan signal. Reads on a light or a dark panel.
+    # The two upper stops are brighter than the cyan this started with; the
+    # black is not, for the same reason the gamma leaves the floor alone.
+    coloured = ImageOps.colorize(signal, black="#0b1622", white="#c8fdff",
+                                 mid="#34b9dd")
 
     # Time runs down a SatNOGS waterfall. Rotating puts it left-to-right, which
     # fits a short wide panel far better than a 300x1550 column would.
