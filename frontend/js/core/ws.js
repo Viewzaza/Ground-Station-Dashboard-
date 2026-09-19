@@ -163,10 +163,16 @@ function handle(frame) {
   }
 }
 
-/** Map a backend component name onto the header chip that shows it. */
+/** Map a backend component name onto the header chip that shows it.
+
+    A component with no chip here still lands in store.status under its own
+    name, and paintChips simply finds nothing to paint — which is what happens
+    to `spaceweather`. It has no chip on purpose: the Space weather panel shows
+    the age of its own newest reading, so a poller that has stopped is already
+    visible where someone is looking at it, and /api/health still reports the
+    component for anything watching from outside. */
 function chipFor(component) {
-  return { rotctld: 'rot', tle: 'tle', satnogs: 'satnogs', camera: 'cam',
-           spaceweather: 'sw' }[component]
+  return { rotctld: 'rot', tle: 'tle', satnogs: 'satnogs', camera: 'cam' }[component]
       || component;
 }
 
