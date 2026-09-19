@@ -130,6 +130,20 @@ b, .num, input[type="number"] { font-variant-numeric: tabular-nums; }
 .muted { color: var(--ink-3); }
 .hint  { margin-left: auto; color: var(--ink-4); font-weight: 400; letter-spacing: 0; }
 
+/* Announced to screen readers, invisible to everyone else — for status text
+   that has a visible equivalent already on screen (a table, a summary line)
+   so the live region can stay short instead of forcing a full re-read of a
+   table that can run to dozens or hundreds of rows. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }

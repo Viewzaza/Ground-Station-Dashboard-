@@ -122,6 +122,32 @@
   margin: 0 0 8px;
 }
 
+/* The Network token is not like the other fields in this popover — it is the
+   one that can act on other people's hardware, not just read data. It gets
+   its own tinted block so it visually stands apart from the Station ID and
+   DB token rows above, instead of reading as "one more field". */
+.sched-settings-danger-block {
+  padding: 8px;
+  margin: 0 -8px 8px;
+  border-radius: var(--radius);
+  border-left: 2px solid var(--bad);
+  background: color-mix(in srgb, var(--bad) 5%, var(--panel));
+}
+.sched-settings-danger-block .sched-settings-row { margin-bottom: 6px; }
+.sched-settings-danger-block .sched-settings-row label {
+  width: auto;
+  white-space: nowrap;
+}
+.sched-settings-danger-block .sched-notice.sched-settings-note { margin-bottom: 0; }
+/* Scoped to beat `.sched-settings-row label`'s own colour on specificity
+   rather than with !important, which nothing else in this codebase uses. */
+.sched-settings-row label.sched-settings-label-danger {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--bad);
+}
+
 /* ── mode tabs (Station Schedule vs Network Campaign) ───────────────────────
    One modal, two modes: the tabs sit below the shared header so CLOSE and
    the settings gear (station id/tokens are account-level, not per-mode)
@@ -148,13 +174,80 @@
 .sched-mode-tab:hover { color: var(--ink-2); }
 .sched-mode-tab.is-active { color: var(--track); border-bottom-color: var(--track); }
 
+/* Network Campaign reads as a different, higher-stakes territory than Station
+   Schedule from the moment the modal opens — before anyone has clicked into
+   it — so the dot lives on the tab itself, not just inside the panel. Quiet
+   on purpose (see .sched-campaign-warnbar below for the loud version): a
+   6px dot is enough for a glance to register "this one is different"
+   without turning the whole tab bar red. */
+.sched-mode-tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--bad);
+  vertical-align: middle;
+}
+.sched-mode-tab-danger.is-active { color: var(--bad); border-bottom-color: var(--bad); }
+.sched-mode-tab-danger:hover { color: var(--bad); }
+
+/* The tab panels have to be flex items of .schedule-card, not plain blocks.
+   Adding the tab wrappers pushed every .schedule-section one level down, which
+   silently killed `.schedule-section:last-child { flex: 1 1 auto }` and its
+   `min-height: 0` — neither element was a flex item any more. The sections'
+   own `overflow-y: auto` then had nothing to scroll against (an auto-height
+   block parent is never short enough to overflow), so everything past the
+   card's max-height was simply clipped by its `overflow: hidden`, with no
+   scrollbar anywhere: ~a dozen priority rows put the bottom of the list out
+   of reach, and campaign history (up to 200 rows) far worse. Re-establishing
+   the chain here restores the scrolling the sections were always written for. */
+#schedule-mode-station-panel,
+#schedule-mode-campaign-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* Same trap as .schedule-overlay[hidden] and .sched-notices[hidden] above:
+   author CSS's display:flex beats the UA stylesheet's [hidden] rule at equal
+   specificity, so without this the inactive tab would stay on screen and both
+   panels would render at once. */
+#schedule-mode-station-panel[hidden],
+#schedule-mode-campaign-panel[hidden] {
+  display: none;
+}
+
 /* ── network campaign ─────────────────────────────────────────────────────── */
+
+/* The one thing every operator must read before they touch PREVIEW: this tab
+   acts on strangers' hardware. Present every time the tab is open, not just
+   once — an operator who last saw this ten minutes ago should not have to
+   remember it. */
+.sched-campaign-warnbar {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--panel));
+  background: color-mix(in srgb, var(--bad) 6%, var(--panel));
+  border-radius: var(--radius);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+.sched-campaign-warnbar-icon { flex: none; color: var(--bad); font-size: 13px; line-height: 1.2; }
+
 .sched-campaign-row {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
   font-size: 12px;
+  /* The slider row carries five controls; below about 420px they would
+     otherwise compress the range input down to a few unusable pixels. */
+  flex-wrap: wrap;
 }
 .sched-campaign-row label { font-size: 11px; color: var(--ink-3); }
 .sched-campaign-row input[type="number"] {
@@ -179,20 +272,162 @@
   color: var(--text);
 }
 #campaign-preview-result { margin-bottom: 8px; }
-.sched-campaign-table-wrap {
+
+/* Generic scrollable table treatment — used for the campaign preview table,
+   the campaign run history, and Station Schedule's own last-run table, so a
+   table that grows past a handful of rows behaves the same way regardless of
+   which tab it's in (previously only the campaign preview had this; the
+   station-schedule table just grew the whole modal). Keyboard-focusable
+   (tabindex on the element this class is applied to) since a mouse wheel is
+   not the only way to reach a scrolling region. */
+.sched-table-wrap {
   max-height: 280px;
   overflow-y: auto;
   overflow-x: hidden;
   border: 1px solid var(--rule-soft);
   border-radius: 4px;
 }
-.sched-campaign-table-wrap .sched-table thead th {
+.sched-table-wrap:focus-visible {
+  outline: 2px solid var(--track);
+  outline-offset: -2px;
+}
+.sched-table-wrap .sched-table thead th {
   position: sticky;
   top: 0;
   background: var(--panel);
   z-index: 1;
 }
 #campaign-commit-btn { margin-bottom: 8px; }
+
+/* ── submit outcome: accepted/rejected stat chips ─────────────────────────
+   The old copy buried "12 of 47 accepted" in a sentence — same weight as
+   everything else on the line. These read at a glance, the same way
+   .rx-tag/.sched-status-ok already do for other pass/fail states here. */
+.sched-stat {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.sched-stat.ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--panel));
+  background: color-mix(in srgb, var(--ok) 10%, var(--panel));
+}
+.sched-stat.bad {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--panel));
+  background: color-mix(in srgb, var(--bad) 10%, var(--panel));
+}
+.sched-stat.zero {
+  color: var(--ink-3);
+  border-color: var(--rule-soft);
+  background: var(--panel-2);
+}
+
+/* ── rejection reasons: grouped, not a flat dump ──────────────────────────
+   A real campaign submit can reject dozens of items, but almost always for a
+   handful of underlying reasons (duration too short, no permission, overlap).
+   Grouping by reason with a count turns "scroll through 40 lines" into "scan
+   3-4 lines, expand the one you care about". */
+.sched-reject-summary {
+  margin: 6px 0 0;
+}
+.sched-reject-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 0;
+}
+/* Third instance of the same trap (see .schedule-overlay[hidden] above): this
+   list starts collapsed, and display:flex would otherwise defeat [hidden]. */
+.sched-reject-groups[hidden] {
+  display: none;
+}
+.sched-reject-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 11px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.sched-reject-group-toggle:hover { border-color: var(--bad); }
+.sched-reject-group-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 12%, var(--panel));
+  border-radius: 10px;
+  padding: 1px 7px;
+}
+.sched-reject-group-reason {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Scoped under .sched-reject-group on purpose: these lists also carry
+   .sched-notices, which is defined further down this file and would otherwise
+   win the margin and gap at equal specificity. */
+.sched-reject-group .sched-reject-group-items {
+  list-style: none;
+  margin: 3px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.sched-reject-group-items:focus-visible {
+  outline: 2px solid var(--track);
+  outline-offset: -2px;
+}
+.sched-reject-group-caret { flex: none; color: var(--ink-4); font-size: 9px; }
+
+/* The outcome of the last submit sits above the preview it replaced, so it
+   needs a visible edge of its own — otherwise "12 booked, 3 rejected" reads
+   as a caption on the table below it, which is a different run entirely. */
+.sched-campaign-outcome {
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--rule-soft);
+  border-left: 2px solid var(--track);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.sched-campaign-outcome .sched-meta { margin-bottom: 0; }
+
+/* The line between "this is a proposal" and "this is booked". It sits right
+   above the table an operator is reading before they commit. */
+.sched-preview-standby {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+
+/* A message that is neither idle copy nor a table: it happened, and it
+   matters. Block-level version of the .sched-notice band. */
+.sched-inline-notice {
+  margin: 0 0 8px;
+  line-height: 1.4;
+}
+
+.sched-cell-bad { color: var(--bad); }
 
 /* Distinguishes an unattended timer-triggered run from one a human
    confirmed - reuses the .rx-tag sizing, .sched-prio-mode's two-tone
@@ -630,4 +865,22 @@ button.sched-prio-tx.is-editing { color: var(--track); }
 @media (max-width: 1000px) {
   .schedule-overlay { padding: 0; }
   .schedule-card { width: 100%; height: 100%; max-height: 100%; border-radius: 0; }
+}
+
+@media (max-width: 520px) {
+  /* The popover is right-anchored to the gear, which sits near the card's
+     right edge; at a fixed 260px it ran off the left of a phone-width card.
+     Only the width is capped — `left: 0` would be wrong here, since the
+     containing block is the gear's own tiny wrapper, not the card. */
+  .sched-settings-popover {
+    width: min(260px, calc(100vw - 24px));
+  }
+  /* The tables stop being tables at this width — the useful move is to let
+     them use the full height available rather than a 280px window inside an
+     already short screen. */
+  .sched-table-wrap { max-height: 45vh; }
+  /* A long list name plus the rename pencil plus SAVE/SAVE AS cannot share a
+     line here. */
+  .schedule-section-head { flex-wrap: wrap; }
+  .sched-list-btn { max-width: 100%; }
 }

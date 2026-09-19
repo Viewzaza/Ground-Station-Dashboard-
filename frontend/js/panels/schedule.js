@@ -133,14 +133,22 @@ function renderLastRun(run) {
     toggle.textContent = `${notices.length} warning${notices.length === 1 ? '' : 's'} ▾`;
     const list = document.createElement('ul');
     list.className = 'sched-notices';
+    list.id = nextDomId('sched-notices');
     list.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', list.id);
     for (const n of notices) {
       const li = document.createElement('li');
       li.className = `sched-notice ${n.severity === 'error' ? 'error' : ''}`.trim();
       li.textContent = n.message;
       list.appendChild(li);
     }
-    toggle.addEventListener('click', () => { list.hidden = !list.hidden; });
+    toggle.addEventListener('click', () => {
+      const showing = list.hidden;
+      list.hidden = !showing;
+      toggle.setAttribute('aria-expanded', String(showing));
+      toggle.textContent = `${notices.length} warning${notices.length === 1 ? '' : 's'} ${showing ? '▴' : '▾'}`;
+    });
     meta.appendChild(toggle);
     box.appendChild(meta);
     box.appendChild(list);
@@ -183,12 +191,47 @@ function renderLastRun(run) {
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
-  box.appendChild(table);
+  box.appendChild(scrollableTable(
+    table, `Booked observations, ${run.observations.length} row(s)`));
+}
+
+/* Both tabs' tables get the same treatment now: a bounded, keyboard-reachable
+   scroll region with a sticky header, rather than one tab scrolling its table
+   and the other growing the modal until rows fall off the bottom. */
+function scrollableTable(table, label) {
+  const wrap = document.createElement('div');
+  wrap.className = 'sched-table-wrap';
+  // Focusable so the region can be scrolled from the keyboard — a div with
+  // overflow is not in the tab order by default in every browser, and these
+  // lists routinely run past their 280px window.
+  wrap.tabIndex = 0;
+  wrap.setAttribute('role', 'group');
+  wrap.setAttribute('aria-label', label);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+let domIdSeq = 0;
+function nextDomId(prefix) {
+  domIdSeq += 1;
+  return `${prefix}-${domIdSeq}`;
 }
 
 function note(text) {
   const p = document.createElement('p');
   p.className = 'muted';
+  p.textContent = text;
+  return p;
+}
+
+/* A note that has to be noticed: "nothing was submitted", "this timed out",
+   "that failed". These were plain grey text before, indistinguishable from
+   the idle "no preview yet" copy right next to them — on this tab the
+   difference between "nothing happened" and "something went wrong" is the
+   whole message. Reuses .sched-notice, the panel's existing warning band. */
+function alertNote(text, severity = 'warn') {
+  const p = document.createElement('p');
+  p.className = `sched-notice sched-inline-notice${severity === 'error' ? ' error' : ''}`;
   p.textContent = text;
   return p;
 }
@@ -377,7 +420,11 @@ function buildTxControl(p) {
   });
   wrap.appendChild(btn);
 
-  if (openTxNorad === p.norad_cat_id) {
+  if (openTxNorad !== p.norad_cat_id) {
+    // Spelled out rather than left absent: a toggle that only ever asserts
+    // "expanded" reads to a screen reader as stuck open once it has been used.
+    btn.setAttribute('aria-expanded', 'false');
+  } else {
     btn.classList.add('is-editing');
     btn.setAttribute('aria-expanded', 'true');
     const picker = document.createElement('ul');
@@ -625,12 +672,15 @@ function mountSettings() {
 function toggleSettings() {
   settingsOpen = !settingsOpen;
   document.getElementById('schedule-settings').hidden = !settingsOpen;
+  document.getElementById('schedule-settings-toggle')
+    .setAttribute('aria-expanded', String(settingsOpen));
   if (settingsOpen) loadConfig();
 }
 
 function closeSettings() {
   settingsOpen = false;
   document.getElementById('schedule-settings').hidden = true;
+  document.getElementById('schedule-settings-toggle').setAttribute('aria-expanded', 'false');
 }
 
 async function loadConfig() {
@@ -745,11 +795,14 @@ function toggleListPicker() {
   listPickerOpen = !listPickerOpen;
   if (listPickerOpen) renderListPicker();
   document.getElementById('schedule-list-picker').hidden = !listPickerOpen;
+  document.getElementById('schedule-list-current')
+    .setAttribute('aria-expanded', String(listPickerOpen));
 }
 
 function closeListPicker() {
   listPickerOpen = false;
   document.getElementById('schedule-list-picker').hidden = true;
+  document.getElementById('schedule-list-current').setAttribute('aria-expanded', 'false');
 }
 
 function renderListPicker() {
@@ -868,6 +921,8 @@ function setMode(mode) {
   const isCampaign = mode === 'campaign';
   stationTab.classList.toggle('is-active', !isCampaign);
   campaignTab.classList.toggle('is-active', isCampaign);
+  stationTab.setAttribute('aria-selected', String(!isCampaign));
+  campaignTab.setAttribute('aria-selected', String(isCampaign));
   stationPanel.hidden = isCampaign;
   campaignPanel.hidden = !isCampaign;
 }
@@ -923,7 +978,11 @@ async function runCampaignPreview() {
   invalidateCampaignPreview();
   btn.disabled = true;
   btn.textContent = 'CALCULATING…';
-  box.replaceChildren(note('computing candidate stations and passes…'));
+  box.replaceChildren(note(
+    'Computing candidate stations and passes… this walks every candidate '
+    + 'station\'s calendar and can take several minutes. Nothing is booked by a '
+    + 'preview.'));
+  announceCampaign('Computing preview…');
   try {
     // A stale result already on disk from a previous run has a status other
     // than 'running' too, so checking status alone can't tell "just
@@ -931,8 +990,10 @@ async function runCampaignPreview() {
     const before = (await api.campaignPreview())?.generated_utc;
     const started = await api.runCampaignPreview();
     if (started?.status === 'running') {
-      box.replaceChildren(note(
-        'a campaign run (preview or submit) is already in progress - wait for it to finish, then try again.'));
+      box.replaceChildren(alertNote(
+        'A campaign run (preview or submit) is already in progress — wait for it '
+        + 'to finish, then try again.'));
+      announceCampaign('A campaign run is already in progress.');
       return;
     }
     const deadline = Date.now() + CAMPAIGN_POLL_TIMEOUT_MS;
@@ -947,12 +1008,15 @@ async function runCampaignPreview() {
       }
     }
     if (!finished) {
-      box.replaceChildren(note(
-        'still computing after 20 minutes - it may still finish; reopen this panel later to check, or use PREVIEW again once it has.'));
+      box.replaceChildren(alertNote(
+        'Still computing after 20 minutes — it may still finish. Nothing has been '
+        + 'booked. Reopen this panel later to check, or use PREVIEW again once it has.'));
+      announceCampaign('Preview still computing after 20 minutes. Nothing booked.');
     }
   } catch (err) {
     console.error('[schedule] campaign preview', err);
-    box.replaceChildren(note(`could not compute preview: ${err}`));
+    box.replaceChildren(alertNote(`Could not compute preview: ${err}`, 'error'));
+    announceCampaign(`Preview failed: ${err}`);
   } finally {
     btn.disabled = false;
     btn.textContent = 'PREVIEW';
@@ -969,11 +1033,22 @@ function renderCampaignPreview(preview) {
   }
 
   const items = preview.items || [];
+  const stationCount = new Set(items.map((it) => it.station_id)).size;
   const meta = document.createElement('p');
   meta.className = 'muted sched-meta';
   meta.textContent = `Preview: ${preview.considered_stations} station(s) considered · `
     + `${items.length} observation(s) would be booked`;
   box.appendChild(meta);
+
+  // Spelled out immediately above the table the operator is about to approve:
+  // nothing here is booked yet, and this is exactly what CONFIRM would send.
+  if (items.length) {
+    const standby = document.createElement('p');
+    standby.className = 'sched-preview-standby';
+    standby.textContent = `Nothing has been submitted. CONFIRM & SUBMIT would book `
+      + `${items.length} observation(s) across ${stationCount} community station(s).`;
+    box.appendChild(standby);
+  }
 
   if (items.length) {
     const table = document.createElement('table');
@@ -1000,11 +1075,17 @@ function renderCampaignPreview(preview) {
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
-    const wrap = document.createElement('div');
-    wrap.className = 'sched-campaign-table-wrap';
-    wrap.appendChild(table);
-    box.appendChild(wrap);
+    box.appendChild(scrollableTable(
+      table,
+      `Observations that would be booked, ${items.length} row(s) across `
+        + `${stationCount} station(s)`,
+    ));
   }
+
+  announceCampaign(items.length
+    ? `Preview ready: ${items.length} observation(s) across ${stationCount} station(s) `
+      + 'would be booked. Nothing submitted yet.'
+    : 'Preview ready: no observations would be booked.');
 
   // What CONFIRM actually submits — exactly what was just shown, not a
   // recompute at click time, so what's confirmed is what was reviewed.
@@ -1013,12 +1094,35 @@ function renderCampaignPreview(preview) {
   document.getElementById('campaign-commit-btn').hidden = items.length === 0;
 }
 
+/* Short status text for screen readers only. Deliberately not wrapped around
+   the results box itself: that box holds a table that can run to 150+ rows,
+   and making it a live region would re-read the whole thing on every update. */
+function announceCampaign(text) {
+  const live = document.getElementById('campaign-status-live');
+  if (live) live.textContent = text;
+}
+
 async function confirmCampaign() {
   if (!campaignPreviewItems || !campaignPreviewItems.length) return;
   const btn = document.getElementById('campaign-commit-btn');
   const box = document.getElementById('campaign-preview-result');
+
+  // The last gate before real bookings land on real strangers' hardware. The
+  // preview above is the review step; this is only here so that the single
+  // click that spends other people's antenna time cannot be a stray one. It
+  // names the numbers rather than asking "are you sure?".
+  const stationCount = new Set(campaignPreviewItems.map((it) => it.station_id)).size;
+  const ok = window.confirm(
+    `Book ${campaignPreviewItems.length} observation(s) on ${stationCount} community `
+    + 'station(s) via SatNOGS Network?\n\n'
+    + 'These are other operators\' ground stations. Accepted bookings cannot be '
+    + 'undone from this dashboard.',
+  );
+  if (!ok) return;
+
   btn.disabled = true;
   btn.textContent = 'SUBMITTING…';
+  announceCampaign(`Submitting ${campaignPreviewItems.length} booking(s)…`);
   try {
     // Same staleness problem as the preview poll: the last-run file already
     // has a non-'running' status from any earlier commit, so only a changed
@@ -1029,8 +1133,10 @@ async function confirmCampaign() {
       // Preview and commit share one "is a campaign op running" flag on the
       // backend, so a still-running preview silently blocks this - nothing
       // was submitted. Say so instead of quietly discarding the click.
-      box.prepend(note(
-        'not submitted: a campaign preview or submit is already running - wait for it to finish, then click CONFIRM & SUBMIT again.'));
+      box.prepend(alertNote(
+        'Not submitted — a campaign preview or submit is already running. Nothing '
+        + 'was sent. Wait for it to finish, then click CONFIRM & SUBMIT again.'));
+      announceCampaign('Not submitted: a campaign run is already in progress.');
       return;
     }
     const deadline = Date.now() + CAMPAIGN_POLL_TIMEOUT_MS;
@@ -1045,12 +1151,18 @@ async function confirmCampaign() {
       await loadCampaignHistory();
       invalidateCampaignPreview();
     } else {
-      box.prepend(note(
-        'still submitting after 20 minutes - it may still finish; reopen this panel later to check the result and history.'));
+      box.prepend(alertNote(
+        'Still submitting after 20 minutes — some bookings may already have been '
+        + 'accepted. Do not resubmit: reopen this panel later to check the result '
+        + 'and history first.'));
+      announceCampaign('Still submitting after 20 minutes. Check history before resubmitting.');
     }
   } catch (err) {
     console.error('[schedule] campaign commit', err);
-    box.prepend(note(`submit failed: ${err}`));
+    box.prepend(alertNote(
+      `Submit failed: ${err}. Some bookings may still have been accepted — check `
+      + 'the run history below before trying again.', 'error'));
+    announceCampaign(`Submit failed: ${err}`);
   } finally {
     btn.disabled = false;
     btn.textContent = 'CONFIRM & SUBMIT';
@@ -1068,40 +1180,210 @@ async function loadCampaignLastRun() {
 function renderCampaignLastRun(run) {
   if (!run || run.status === 'never_run' || run.status === 'running') return;
   const box = document.getElementById('campaign-preview-result');
+
+  // Built as one block and prepended once. The previous version prepended the
+  // rejection list and the summary line separately, which put them at the top
+  // in reverse order of construction and was easy to get wrong.
+  const wrap = document.createElement('div');
+  wrap.className = 'sched-campaign-outcome';
+
   const meta = document.createElement('p');
   meta.className = 'muted sched-meta';
 
   const trigger = document.createElement('span');
   trigger.className = `sched-run-trigger ${run.trigger === 'manual' ? 'manual' : ''}`.trim();
   trigger.textContent = run.trigger === 'auto' ? 'AUTO' : 'MANUAL';
+  meta.appendChild(trigger);
 
-  const text = document.createElement('span');
   if (run.status === 'error') {
-    text.textContent = `Last submit failed: ${run.error}`;
+    const text = document.createElement('span');
+    text.className = 'sched-stat bad';
+    text.textContent = 'SUBMIT FAILED';
+    meta.appendChild(text);
+    const detail = document.createElement('span');
+    detail.textContent = run.error || 'no detail reported';
+    meta.appendChild(detail);
+    announceCampaign(`Submit failed: ${run.error || 'no detail reported'}`);
   } else {
-    text.textContent = `Last submit: ${run.accepted} of ${run.submitted} booking(s) accepted`;
+    const submitted = run.submitted ?? 0;
+    const accepted = run.accepted ?? 0;
+    const rejected = Math.max(0, submitted - accepted);
+
+    const label = document.createElement('span');
+    label.textContent = 'Last submit:';
+    meta.appendChild(label);
+
+    // Accepted first and always coloured, rejected second and only red when
+    // it is actually non-zero — a green 0 or a red 0 both misread at a glance.
+    const okStat = document.createElement('span');
+    okStat.className = `sched-stat ${accepted > 0 ? 'ok' : 'zero'}`;
+    okStat.textContent = `${accepted} booked`;
+    const badStat = document.createElement('span');
+    badStat.className = `sched-stat ${rejected > 0 ? 'bad' : 'zero'}`;
+    badStat.textContent = `${rejected} rejected`;
+    const ofText = document.createElement('span');
+    ofText.textContent = `of ${submitted} submitted`;
+    meta.append(okStat, badStat, ofText);
+    announceCampaign(
+      `Submit finished: ${accepted} booked, ${rejected} rejected, of ${submitted} submitted.`);
   }
-  meta.append(trigger, text);
+  wrap.appendChild(meta);
 
   if (run.errors && run.errors.length) {
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'sched-notices-toggle';
-    toggle.textContent = `${run.errors.length} rejection(s) ▾`;
-    const list = document.createElement('ul');
-    list.className = 'sched-notices';
-    list.hidden = true;
-    for (const errMsg of run.errors) {
+    wrap.appendChild(buildRejectionReport(run.errors));
+  }
+  box.prepend(wrap);
+}
+
+/* ── rejection reasons ────────────────────────────────────────────────────
+   The backend hands back one raw line per rejected booking, each of the form
+
+     <start> norad-transmitter <uuid>: HTTP <status> <body[:300]>
+
+   A real submit produces dozens of these, but nearly always for a handful of
+   underlying causes (too short, no permission on that station, overlaps an
+   existing booking). Dumped flat that is a wall of near-identical JSON; what
+   an operator actually needs first is "which reasons, and how many of each",
+   with the per-item detail one click away. Purely a display transform — the
+   raw line is still what gets shown inside each group.
+
+   Note the start is NOT ISO: it comes from the schedule item that was POSTed,
+   whose start went through format_api_datetime() — "YYYY-MM-DD HH:MM:SS",
+   space-separated and always UTC. Because that timestamp contains a space,
+   anchoring on " norad-transmitter " rather than on the first run of
+   whitespace is what makes this pattern match real data at all. */
+const CAMPAIGN_ERROR_RE = /^(.*?)\s+norad-transmitter\s+(\S+):\s*HTTP\s+(\d+)\s*([\s\S]*)$/;
+
+function parseCampaignError(raw) {
+  const m = CAMPAIGN_ERROR_RE.exec(raw);
+  if (!m) return { reason: raw, detail: raw };
+  const [, start, , status, body] = m;
+  const reason = extractRejectionReason(body) || `HTTP ${status}`;
+  return { reason: `HTTP ${status} · ${reason}`, detail: `${rejectionTime(start)} — ${reason}` };
+}
+
+/* new Date("2026-09-20 04:12:00") is read as *local* time by every engine that
+   accepts it at all, which would print a shifted hour under a "UTC" label —
+   on a panel where the operator is matching rows against a pass calendar,
+   that is worse than showing nothing. Normalise to ISO first, and fall back
+   to the raw string rather than guess. */
+function rejectionTime(start) {
+  const text = (start || '').trim();
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)
+    ? `${text.replace(' ', 'T')}Z`
+    : text;
+  if (Number.isNaN(new Date(iso).getTime())) return text || 'unknown time';
+  return `${shortTime(iso, 'UTC')} UTC`;
+}
+
+/* Best-effort: the body is a DRF error payload truncated to 300 characters, so
+   it may well not parse as JSON. Pull the human sentence out when one of the
+   familiar shapes is recognisable, and fall back to the trimmed body — never
+   to nothing, since an unrecognised rejection is exactly the one worth
+   reading. */
+function extractRejectionReason(body) {
+  const text = (body || '').trim();
+  if (!text) return '';
+  const patterns = [
+    /"non_field_errors"\s*:\s*\[\s*"([^"]+)"/,
+    /"detail"\s*:\s*"([^"]+)"/,
+    /"(?:start|end|ground_station|transmitter_uuid)"\s*:\s*\[\s*"([^"]+)"/,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (m) return m[1];
+  }
+  return text.length > 140 ? `${text.slice(0, 140)}…` : text;
+}
+
+function groupCampaignErrors(errors) {
+  const groups = new Map();
+  for (const raw of errors) {
+    const { reason, detail } = parseCampaignError(raw);
+    if (!groups.has(reason)) groups.set(reason, { reason, items: [] });
+    groups.get(reason).items.push(detail);
+  }
+  // Commonest cause first: that is the one worth fixing before a retry.
+  return [...groups.values()].sort((a, b) => b.items.length - a.items.length);
+}
+
+function buildRejectionReport(errors) {
+  const groups = groupCampaignErrors(errors);
+  const wrap = document.createElement('div');
+  wrap.className = 'sched-reject-summary';
+
+  const groupList = document.createElement('div');
+  groupList.className = 'sched-reject-groups';
+  groupList.id = nextDomId('sched-reject-groups');
+  groupList.hidden = true;
+
+  // Two levels of disclosure, both collapsed: the whole report is hidden until
+  // asked for, and each reason's itemised list is hidden inside that. A clean
+  // run should not have to scroll past a previous run's failures.
+  const top = document.createElement('button');
+  top.type = 'button';
+  top.className = 'sched-notices-toggle';
+  top.setAttribute('aria-controls', groupList.id);
+  const topLabel = (open) =>
+    `${errors.length} rejection${errors.length === 1 ? '' : 's'}, `
+    + `${groups.length} reason${groups.length === 1 ? '' : 's'} ${open ? '▴' : '▾'}`;
+  top.textContent = topLabel(false);
+  top.setAttribute('aria-expanded', 'false');
+  top.addEventListener('click', () => {
+    const showing = groupList.hidden;
+    groupList.hidden = !showing;
+    top.setAttribute('aria-expanded', String(showing));
+    top.textContent = topLabel(showing);
+  });
+  wrap.appendChild(top);
+
+  for (const group of groups) {
+    const items = document.createElement('ul');
+    items.className = 'sched-notices sched-reject-group-items';
+    items.id = nextDomId('sched-reject-items');
+    items.hidden = true;
+    items.tabIndex = 0;
+    items.setAttribute('aria-label', `${group.items.length} rejection(s): ${group.reason}`);
+    for (const detail of group.items) {
       const li = document.createElement('li');
       li.className = 'sched-notice error';
-      li.textContent = errMsg;
-      list.appendChild(li);
+      li.textContent = detail;
+      items.appendChild(li);
     }
-    toggle.addEventListener('click', () => { list.hidden = !list.hidden; });
-    box.prepend(list);
-    meta.appendChild(toggle);
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'sched-reject-group-toggle';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', items.id);
+
+    const count = document.createElement('span');
+    count.className = 'sched-reject-group-count';
+    count.textContent = `${group.items.length}×`;
+    const reason = document.createElement('span');
+    reason.className = 'sched-reject-group-reason';
+    reason.textContent = group.reason;
+    reason.title = group.reason;   // the full text, when it is ellipsised
+    const caret = document.createElement('span');
+    caret.className = 'sched-reject-group-caret';
+    caret.setAttribute('aria-hidden', 'true');
+    caret.textContent = '▾';
+    toggle.append(count, reason, caret);
+    toggle.addEventListener('click', () => {
+      const showing = items.hidden;
+      items.hidden = !showing;
+      toggle.setAttribute('aria-expanded', String(showing));
+      caret.textContent = showing ? '▴' : '▾';
+    });
+
+    const groupEl = document.createElement('div');
+    groupEl.className = 'sched-reject-group';
+    groupEl.append(toggle, items);
+    groupList.appendChild(groupEl);
   }
-  box.prepend(meta);
+
+  wrap.appendChild(groupList);
+  return wrap;
 }
 
 async function loadCampaignHistory() {
@@ -1138,14 +1420,20 @@ function renderCampaignHistory(history) {
     tdTrigger.appendChild(tag);
     const tdBooked = document.createElement('td');
     tdBooked.textContent = String(run.accepted ?? 0);
+    // Only a non-zero rejection count earns the colour — a column of red
+    // zeroes would make a run of clean submits look like a problem.
     const tdRejected = document.createElement('td');
     tdRejected.textContent = String(run.rejected ?? 0);
+    if ((run.rejected ?? 0) > 0) tdRejected.className = 'sched-cell-bad';
     const tdStatus = document.createElement('td');
     tdStatus.textContent = run.status || '—';
+    if (run.status === 'error') tdStatus.className = 'sched-cell-bad';
 
     tr.append(tdTime, tdTrigger, tdBooked, tdRejected, tdStatus);
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
-  box.appendChild(table);
+  // The backend keeps up to 200 runs; without a bounded scroll region this
+  // table alone could push everything else out of the card.
+  box.appendChild(scrollableTable(table, `Campaign run history, ${history.length} run(s)`));
 }
