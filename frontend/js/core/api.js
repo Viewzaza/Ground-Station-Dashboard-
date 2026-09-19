@@ -88,4 +88,5 @@ export const api = {
   campaignPreview:     ()         => get('/api/schedule/campaign/preview'),
   commitCampaign:      (items)    => post('/api/schedule/campaign/commit', { items: items || null }),
   campaignHistory:     ()         => get('/api/schedule/campaign/history'),
+  verifyCampaign:      ()         => post('/api/schedule/campaign/verify', {}),
 };

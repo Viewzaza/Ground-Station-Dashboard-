@@ -262,6 +262,26 @@ class CampaignService:
         ]
         # The one and only execute=True call in this codebase.
         result = network.schedule(schedule_items, execute=True)
+
+        # `schedule_items` is built 1:1 from `items` and `accepted_items` holds
+        # those same dict objects back, so identity maps the API's answer onto
+        # the richer preview rows without re-parsing anything. Keeping the
+        # per-item detail is what later lets a run be cross-checked against the
+        # real calendar - the aggregate counts alone cannot say which booking
+        # it was that landed.
+        accepted_ids = {id(sent) for sent in result.accepted_items}
+        accepted_detail = [
+            {
+                "station_id": original["station_id"],
+                "station_name": original.get("station_name", ""),
+                "transmitter_uuid": original["transmitter_uuid"],
+                "start": original["start"],
+                "end": original["end"],
+            }
+            for original, sent in zip(items, schedule_items)
+            if id(sent) in accepted_ids
+        ]
+
         return {
             "status": "ok" if not result.errors else "ok_with_warnings",
             "trigger": trigger,
@@ -269,6 +289,7 @@ class CampaignService:
             "submitted": result.submitted,
             "accepted": result.accepted,
             "errors": result.errors,
+            "accepted_items": accepted_detail,
         }
 
     def _mock_commit(self, items: list[dict] | None, trigger: str) -> dict:
@@ -277,10 +298,115 @@ class CampaignService:
             "status": "ok", "trigger": trigger,
             "generated_utc": datetime.now(timezone.utc).isoformat(),
             "submitted": count, "accepted": count, "errors": [],
+            "accepted_items": list(items or []),
         }
 
     def get_last_run(self) -> dict:
         return self._read_json(self.result_path, {"status": "never_run"})
+
+    # --- cross-check ----------------------------------------------------------
+    async def verify_last_run(self) -> dict:
+        """Ask SatNOGS what is actually on each station's calendar now, and
+        match the last run's accepted bookings against it.
+
+        The commit result records what the API *said* it took. This is the
+        independent read-back: an accepted POST and an observation that is
+        really on the calendar are not the same claim, and only the second one
+        means the station will actually record anything.
+        """
+        if self._effective_mock():
+            return self._mock_verify()
+        return await asyncio.to_thread(self._verify_sync)
+
+    def _verify_sync(self) -> dict:
+        run = self.get_last_run()
+        items = run.get("accepted_items") or []
+        now = datetime.now(timezone.utc)
+        checked: list[dict] = []
+
+        if not items:
+            return {
+                "status": "nothing_to_check",
+                "generated_utc": now.isoformat(),
+                "run_generated_utc": run.get("generated_utc"),
+                "items": [],
+            }
+
+        auto_settings = self._build_autoscheduler_settings()
+        cache = Cache(self.schedule_service.cache_dir, offline=self.s.offline)
+        network = NetworkClient(auto_settings, cache)
+        mission_norad = self.s.default_norad
+
+        # One live read per station, not per booking - a station with two
+        # accepted passes is one calendar.
+        by_station: dict[int, list[dict]] = {}
+        for item in items:
+            by_station.setdefault(item["station_id"], []).append(item)
+
+        for station_id, station_items in by_station.items():
+            try:
+                bookings = network.future_bookings(station_id, now=now)
+            except Exception as exc:
+                log.warning("could not read back station %d: %s", station_id, exc)
+                for item in station_items:
+                    checked.append({**item, "state": "unknown",
+                                    "detail": f"could not read this station's calendar: {exc}"})
+                continue
+
+            for item in station_items:
+                start = datetime.fromisoformat(item["start"])
+                end = datetime.fromisoformat(item["end"])
+                # future_bookings only returns observations that have not
+                # started yet, so anything already underway or finished is
+                # simply not in that feed - reporting it "missing" would be
+                # wrong, and this is reachable whenever a booking is verified
+                # more than ~11 minutes after it was made.
+                if start <= now:
+                    checked.append({**item, "state": "started",
+                                    "detail": "already under way or past; "
+                                              "the scheduling feed only lists future observations"})
+                    continue
+                # Overlap rather than an exact start match: SatNOGS splits long
+                # passes into segments of its own choosing, so what comes back
+                # need not share our boundaries.
+                hit = next(
+                    (b for b in bookings
+                     if b.norad_cat_id == mission_norad and b.start < end and b.end > start),
+                    None,
+                )
+                if hit is None:
+                    checked.append({**item, "state": "missing",
+                                    "detail": "no matching observation on this station's calendar"})
+                else:
+                    checked.append({**item, "state": "on_schedule",
+                                    "observation_id": hit.id,
+                                    "observation_start": hit.start.isoformat(),
+                                    "observation_end": hit.end.isoformat(),
+                                    "detail": f"observation {hit.id}"})
+
+        return {
+            "status": "ok",
+            "generated_utc": now.isoformat(),
+            "run_generated_utc": run.get("generated_utc"),
+            "stations_checked": len(by_station),
+            "items": checked,
+        }
+
+    def _mock_verify(self) -> dict:
+        now = datetime.now(timezone.utc)
+        run = self.get_last_run()
+        items = run.get("accepted_items") or []
+        return {
+            "status": "ok",
+            "generated_utc": now.isoformat(),
+            "run_generated_utc": run.get("generated_utc"),
+            "stations_checked": len({i["station_id"] for i in items}),
+            "items": [
+                {**item, "state": "on_schedule", "observation_id": 900000 + n,
+                 "detail": f"observation {900000 + n}"}
+                for n, item in enumerate(items)
+            ],
+        }
 
     def get_history(self) -> list[dict]:
         return self._read_json(self.history_path, [])

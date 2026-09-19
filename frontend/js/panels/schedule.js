@@ -5,7 +5,7 @@
    opened from a chip in the header. */
 
 import { api } from '../core/api.js';
-import { shortTime } from '../core/format.js';
+import { shortTime, shortDateTime } from '../core/format.js';
 
 const POLL_MS = 3000;
 const POLL_TIMEOUT_MS = 120_000;
@@ -933,6 +933,7 @@ function mountCampaign() {
   document.getElementById('campaign-preview-btn').addEventListener('click', runCampaignPreview);
   document.getElementById('campaign-commit-btn').addEventListener('click', confirmCampaign);
   document.getElementById('campaign-cfg-save').addEventListener('click', saveCampaignConfig);
+  document.getElementById('campaign-verify-btn').addEventListener('click', verifyCampaign);
   document.getElementById('campaign-max-total').addEventListener('input', (e) => {
     document.getElementById('campaign-max-total-value').textContent = e.target.value;
     campaignConfigDirty = true;
@@ -1054,7 +1055,11 @@ function renderCampaignPreview(preview) {
     const table = document.createElement('table');
     table.className = 'sched-table';
     const thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>Station</th><th>Start UTC</th><th>End UTC</th><th>Max El</th></tr>';
+    // The station ID is its own column, not a fallback for a missing name:
+    // it is the identifier network.satnogs.org itself uses, so it is what an
+    // operator reconciles this table against.
+    thead.innerHTML = '<tr><th>ID</th><th>Station</th><th>Start UTC</th>'
+      + '<th>End UTC</th><th>Max El</th></tr>';
     table.appendChild(thead);
     const tbody = document.createElement('tbody');
     // Every candidate is shown, not just the first N - CONFIRM & SUBMIT
@@ -1063,9 +1068,10 @@ function renderCampaignPreview(preview) {
     for (const item of items) {
       const tr = document.createElement('tr');
       for (const text of [
-        item.station_name || `Station ${item.station_id}`,
-        shortTime(item.start, 'UTC'),
-        shortTime(item.end, 'UTC'),
+        String(item.station_id),
+        item.station_name || '—',
+        shortDateTime(item.start, 'UTC'),
+        shortDateTime(item.end, 'UTC'),
         `${item.max_elevation_deg.toFixed(0)}°`,
       ]) {
         const td = document.createElement('td');
@@ -1092,6 +1098,106 @@ function renderCampaignPreview(preview) {
   campaignPreviewItems = items;
   campaignConfigDirty = false;
   document.getElementById('campaign-commit-btn').hidden = items.length === 0;
+}
+
+/* The read-back. One live call per station in the last run's accepted set,
+   so this answers in seconds where a full campaign computation takes
+   minutes — but it is still real network I/O, hence the disabled button. */
+async function verifyCampaign() {
+  const btn = document.getElementById('campaign-verify-btn');
+  const box = document.getElementById('campaign-verify-result');
+  btn.disabled = true;
+  btn.textContent = 'CHECKING…';
+  box.replaceChildren(note('reading each station\'s calendar back from SatNOGS…'));
+  try {
+    renderCampaignVerify(await api.verifyCampaign());
+  } catch (err) {
+    console.error('[schedule] campaign verify', err);
+    box.replaceChildren(note(`could not cross-check: ${err}`));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'CROSS-CHECK';
+  }
+}
+
+const VERIFY_STATES = {
+  on_schedule: { label: 'ON SCHEDULE', cls: 'ok' },
+  missing:     { label: 'NOT FOUND',   cls: 'bad' },
+  started:     { label: 'UNDER WAY',   cls: '' },
+  unknown:     { label: 'UNKNOWN',     cls: 'warn' },
+};
+
+function renderCampaignVerify(result) {
+  const box = document.getElementById('campaign-verify-result');
+  box.replaceChildren();
+
+  if (result.status === 'nothing_to_check') {
+    box.appendChild(note('the last run booked nothing, so there is nothing to cross-check.'));
+    return;
+  }
+
+  const items = result.items || [];
+  const counts = items.reduce((acc, it) => {
+    acc[it.state] = (acc[it.state] || 0) + 1;
+    return acc;
+  }, {});
+
+  const meta = document.createElement('p');
+  meta.className = 'muted sched-meta';
+  meta.textContent = `Checked ${items.length} booking(s) across `
+    + `${result.stations_checked} station(s) · `
+    + `${counts.on_schedule || 0} confirmed on schedule`
+    + (counts.missing ? `, ${counts.missing} not found` : '');
+  box.appendChild(meta);
+
+  // "Not found" is the one an operator has to act on, so it is called out
+  // rather than left to be spotted among the confirmed rows.
+  if (counts.missing) {
+    const warn = document.createElement('p');
+    warn.className = 'sched-notice error';
+    warn.textContent = `${counts.missing} booking(s) the API accepted are not on the `
+      + 'station calendar now. They may have been cancelled by the station owner, '
+      + 'or superseded by another observation.';
+    box.appendChild(warn);
+  }
+
+  if (!items.length) return;
+
+  const table = document.createElement('table');
+  table.className = 'sched-table';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>ID</th><th>Station</th><th>Start UTC</th><th>End UTC</th>'
+    + '<th>On schedule</th></tr>';
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const item of items) {
+    const tr = document.createElement('tr');
+    for (const text of [
+      String(item.station_id),
+      item.station_name || '—',
+      shortDateTime(item.start, 'UTC'),
+      shortDateTime(item.end, 'UTC'),
+    ]) {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    const state = VERIFY_STATES[item.state] || VERIFY_STATES.unknown;
+    const tdState = document.createElement('td');
+    const tag = document.createElement('span');
+    tag.className = `sched-verify-state ${state.cls}`.trim();
+    tag.textContent = state.label;
+    if (item.detail) tag.title = item.detail;
+    tdState.appendChild(tag);
+    tr.appendChild(tdState);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(scrollableTable(
+    table, `Cross-check of the last run, ${items.length} row(s)`));
+
+  announceCampaign(`Cross-check complete: ${counts.on_schedule || 0} of ${items.length} `
+    + 'booking(s) confirmed on the stations\' schedules.');
 }
 
 /* Short status text for screen readers only. Deliberately not wrapped around

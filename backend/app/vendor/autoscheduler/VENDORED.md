@@ -86,12 +86,32 @@ one, and a local editable install would break the Docker build context
    docstring for the deliberate simplification (no pass-splitting) this
    entails.
 
+8. **`network_client.py`: `Station.schedulable` also requires
+   `status == "Online"`.** Upstream checked only `is_connected` and that the
+   station has coordinates. That is right for the single-station CLI, which
+   only ever asks about the operator's *own* station, but wrong the moment
+   you book on someone else's: a `Testing` station accepts scheduling from
+   its owner alone and rejects everyone else with `HTTP 400 "No permission
+   to schedule observations on station: N"`, and an `Offline` one will never
+   record what it accepts. Found by hitting exactly that error against the
+   real API across 24 such stations. Note two pre-existing `cli.py` messages
+   still phrase a false `schedulable` as "not connected", which is now only
+   one of the reasons it can be false.
+
+9. **`network_client.py`: `ScheduleResult` carries `accepted_items`.**
+   Upstream returns counts only, which cannot answer "which of my bookings
+   landed?" — and on a partial batch rejection the accepted set is not
+   recoverable from `errors` without parsing its prose back apart. The
+   dashboard needs the per-item answer to cross-check a run against the
+   stations' real calendars afterwards.
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this
   vendored copy with a normal dependency (submodule or pinned pip package).
-- Upstream patches 1-6 above to that repo (7 is dashboard-specific, not
-  upstream material).
+- Upstream patches 1-6, 8 and 9 above to that repo (7 is dashboard-specific,
+  not upstream material). 8 in particular is a plain bug for any consumer
+  that books on a station it does not own.
 - `satnogs-autoscheduler` currently has no LICENSE file. This dashboard is
   MIT. Confirm licensing intent before this vendored copy is redistributed
   beyond this repo (same author/org, so likely fine, but not yet explicit).

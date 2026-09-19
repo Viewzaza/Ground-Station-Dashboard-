@@ -50,3 +50,20 @@ export function shortTime(iso, timeZone) {
     return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
   }
 }
+
+/* Time WITH its date. A clock time alone is ambiguous anywhere a list spans
+   more than one day — the network campaign window runs ~48h, so half its rows
+   are "tomorrow" and nothing on screen said so. Anything an operator has to
+   reconcile against network.satnogs.org's own listing needs the date on it. */
+export function shortDateTime(iso, timeZone) {
+  const d = new Date(iso);
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+      hour12: false, timeZone: timeZone || 'UTC',
+    }).format(d).replace(',', '');
+  } catch {
+    return `${pad2(d.getUTCDate())}/${pad2(d.getUTCMonth() + 1)} `
+      + `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+  }
+}

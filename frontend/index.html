@@ -326,6 +326,20 @@
           <button class="btn btn-danger" id="campaign-commit-btn" type="button" hidden>CONFIRM &amp; SUBMIT</button>
         </section>
 
+        <!-- An accepted POST and an observation actually on a station's
+             calendar are two different claims. This reads the calendar back
+             from SatNOGS and matches the last run against it. -->
+        <section class="schedule-section">
+          <div class="schedule-section-head">
+            <h3>On the stations' schedules</h3>
+            <button class="btn btn-quiet" id="campaign-verify-btn" type="button">CROSS-CHECK</button>
+          </div>
+          <div id="campaign-verify-result"><p class="muted">
+            not checked yet — CROSS-CHECK reads each station's calendar back from
+            SatNOGS and confirms the last run's bookings are really on it.
+          </p></div>
+        </section>
+
         <section class="schedule-section">
           <div class="schedule-section-head">
             <h3>Run history</h3>

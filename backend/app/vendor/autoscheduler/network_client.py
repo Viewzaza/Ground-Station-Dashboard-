@@ -143,6 +143,12 @@ class ScheduleResult:
     submitted: int = 0
     accepted: int = 0
     errors: list[str] = field(default_factory=list)
+    # The very dicts that were passed in, for the ones the API took. Counts
+    # alone cannot answer "which of my bookings actually landed?", which is
+    # what the caller needs to cross-check a run against the real calendar
+    # afterwards - and on a partial batch rejection the accepted set is not
+    # derivable from `errors` without parsing its prose back apart.
+    accepted_items: list[dict] = field(default_factory=list)
 
 
 class NetworkClient:
@@ -305,8 +311,10 @@ class NetworkClient:
                     )
                 else:
                     result.accepted += 1
+                    result.accepted_items.append(item)
         else:
             result.accepted = len(items)
+            result.accepted_items = list(items)
         return result
 
 

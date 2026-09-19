@@ -552,6 +552,29 @@
   border: 1px solid color-mix(in srgb, var(--ok) 55%, var(--panel));
   color: var(--ok);
 }
+
+/* The cross-check's per-booking verdict. Same pill language as
+   .sched-status-ok above rather than a second one; the neutral (no modifier)
+   case is deliberate — "already under way" is neither a pass nor a failure,
+   it just means the scheduling feed cannot answer for it any more. */
+.sched-verify-state {
+  font-size: 9px; letter-spacing: .1em; padding: 1px 5px; border-radius: 2px;
+  border: 1px solid var(--line);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.sched-verify-state.ok {
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--panel));
+  color: var(--ok);
+}
+.sched-verify-state.bad {
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--panel));
+  color: var(--bad);
+}
+.sched-verify-state.warn {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--panel));
+  color: var(--warn);
+}
 .sched-notices-toggle {
   font-size: 9px; letter-spacing: .1em; padding: 1px 5px; border-radius: 2px;
   border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--panel));
