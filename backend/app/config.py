@@ -121,6 +121,22 @@ class Settings(BaseSettings):
     satnogs_station_poll_s: int = 60
     satnogs_db_token: str = ""
 
+    # --- space weather ------------------------------------------------------
+    # NOAA SWPC, which is the upstream that spaceweatherlive.com and
+    # spaceweather.com both present. Neither of those publishes an API, and
+    # scraping a page meant for people would break on their next redesign.
+    spaceweather_enabled: bool = True
+    spaceweather_base: str = "https://services.swpc.noaa.gov"
+    # GOES XRS is 1-minute cadence and SWPC caches it for 60 s, so this is as
+    # often as there is anything new. Two minutes keeps a flare visible within
+    # one bucket of the graph while halving the traffic.
+    spaceweather_xray_poll_s: int = 120
+    # Kp lands every three hours and the daily scales once a day; five minutes
+    # is already far finer than either moves.
+    spaceweather_scales_poll_s: int = 300
+    # F10.7 is one observation a day from Penticton.
+    spaceweather_f107_poll_s: int = 3600
+
     # --- derived ------------------------------------------------------------
     @property
     def pinned_norad_ids(self) -> list[int]:

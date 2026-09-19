@@ -51,6 +51,7 @@ Light paper chrome, dark instrument windows  see
 | SatNOGS 5024 activity feed | done |
 | Grafana telemetry strip | done, cut back to one stat's height |
 | Decoded frames  the most recent frames SatNOGS demodulated | done, **no token needed** |
+| Space weather  GOES X-ray graph, flare class, NOAA R/S/G scales | done, live against NOAA SWPC |
 
 The rotator control path has been exercised against the station's own rotctld
 and correctly **refused** every command, because satnogs-client was connected.
@@ -244,7 +245,7 @@ browser ──HTTPS──▶ Caddy ──┬── /            frontend (static
                                   │
                     rotctld 10.90.36.140 ── ONE socket, 1 Hz
                     camera  10.90.36.130 ── RTSP over TCP
-                    SatNOGS · Celestrak · Grafana (iframes only)
+                    SatNOGS · Celestrak · NOAA SWPC · Grafana (iframes only)
 ```
 
 **Skyfield owns pass prediction, not the browser.** The schedule has to keep
@@ -370,6 +371,59 @@ selector had collapsed to its own heading with no list under it. What is left
 up there  the next pass and the rotator  is what is watched *during* a pass,
 and what came down is what is consulted between them.
 
+## Space weather
+
+`GET /api/spaceweather` is the third panel on the radio row: GOES X-ray flux
+over the last six hours on a log axis, the current flare class, and NOAA's
+R/S/G storm scales beside Kp and the 10.7 cm solar flux.
+
+It is there to answer a question the rest of the wall cannot. When a pass
+produces nothing, Radio, Last signal and Decoded frames all report the same
+nothing, and all three report it *afterwards*. This panel can be read before
+the pass, and it is the only one that offers an explanation that is not a fault
+in our own equipment.
+
+**Where the numbers come from, and why it is not where you might expect.**
+[spaceweatherlive.com](https://www.spaceweatherlive.com/en/solar-activity.html)
+and [spaceweather.com](https://spaceweather.com/) are the two sites an operator
+is likely to already have open, and both are *presentations* of NOAA SWPC's
+GOES and Kp feeds — SpaceWeatherLive credits "NOAA SWPC" for its solar
+activity, sunspot and geophysical reports. Neither publishes an API. Scraping
+a page built to be read by people breaks on their next redesign, and breaks by
+quietly reporting the wrong number rather than by failing, so the panel reads
+[NOAA SWPC](https://services.swpc.noaa.gov/) directly: the same data, one hop
+earlier, public domain, no key, JSON, behind a CDN that expects to be polled.
+The panel links out to SpaceWeatherLive, because a human following up on an
+M-class flare wants the interpretation those sites add, not another JSON blob.
+
+Five endpoints, each on its own cadence and each caught on its own — the Kp
+feed returning a 500 must not also cost the X-ray graph, which is the reason
+the panel exists:
+
+| what | feed | polled |
+| --- | --- | --- |
+| X-ray flux, both channels | `/json/goes/primary/xrays-6-hour.json` | 120 s |
+| the current flare event | `/json/goes/primary/xray-flares-latest.json` | 120 s |
+| R / S / G scales | `/products/noaa-scales.json` | 300 s |
+| planetary K index | `/products/noaa-planetary-k-index.json` | 300 s |
+| 10.7 cm solar flux | `/products/summary/10cm-flux.json` | 3600 s |
+
+Served from the poller's cache, never proxied per request, for the same reason
+the SatNOGS route is: several wall displays open for months must not become
+several displays' worth of traffic aimed at a public service.
+
+**What it actually means for this station.** Station 5024 works a 400 MHz
+downlink from 13.8°N, and the honest answer for two of the three NOAA scales is
+"not much" — which is in each scale's tooltip, because three ominous letters
+with no context get either over-read or learned-and-ignored. R is a *radio
+blackout* scale, and it is an HF scale; UHF is largely unaffected except during
+a strong solar radio burst, which raises the receiver noise floor for minutes.
+S is mostly a spacecraft problem at this latitude. **G is the one that reaches
+this dashboard**: a geomagnetic storm heats the thermosphere, drag rises, and
+LEO element sets go stale faster than the two-hour TLE refresh can follow — so
+a high Kp and a drifting AOS are the same event, and the TLE chip in the header
+and this panel are worth reading together.
+
 ## Things that are the way they are for a reason
 
 Each of these cost time to find. Please read before changing them.
@@ -396,6 +450,45 @@ Each of these cost time to find. Please read before changing them.
   symptom there is worse, because a strip of someone else's signal still looks
   like a signal. Network pagination is also cursor-based, through the
   `Link: rel="next"` *header*; there is no `?page=`.
+
+- **SWPC truncates a flare magnitude; it does not round it.** A GOES
+  long-channel flux of 3.0689e-7 is published by SWPC as **B3.0**, not B3.1.
+  `flare_class()` truncates to match, to the digit. This looks like pedantry
+  and is not: an operator with SpaceWeatherLive open in another tab, reading
+  B3.0 there and B3.1 here, has no way to tell which panel to trust and will
+  reasonably stop trusting ours.
+
+- **`xrays-6-hour.json` interleaves both energy channels in one flat array**,
+  one row per (timestamp, channel) — not two series. Read as a single series it
+  sawtooths between the 0.05–0.4 nm and 0.1–0.8 nm fluxes and looks like a
+  flare every other minute. Splitting on `energy` is the whole job.
+
+- **Downsample the X-ray series by peak, never by mean.** A flare is a spike a
+  few minutes wide; averaged into a two-minute bucket it comes out a decade
+  low, and the graph then contradicts the flare class printed beside it.
+  `downsample_peak()` takes the maximum, so the drawn curve is an upper
+  envelope — which for "did anything happen" is the reading that cannot
+  mislead.
+
+- **GOES XRS drops out, and a polyline drawn through the gap is invented
+  data.** A six-hour window with a 67-minute hole in it is an ordinary day. The
+  backend publishes the nominal bucket width and the panel breaks its stroke on
+  any step wider than three of them, so a gap reads as a gap.
+
+- **SWPC has two JSON trees with different shapes.** `/json/...` is an array of
+  objects; `/products/...` is sometimes that, sometimes an array-of-arrays with
+  a header row, and `/products/noaa-scales.json` is an object keyed by day
+  offset as a *string* — `"0"` is today observed, `"-1"` yesterday, `"1".."3"`
+  forecasts that carry probabilities instead of scales. Several `/products/`
+  feeds also omit the UTC offset from their timestamps and mean UTC by it;
+  read as local time, Kp shifts by up to a day.
+
+- **`/primary/` is not a spacecraft.** It follows whichever GOES bird SWPC has
+  currently designated primary, so the `satellite` field changes without
+  notice. It is carried through to the panel as provenance and never pinned.
+
+- **`electron_contaminaton` is SWPC's own spelling.** The `i` is missing in the
+  payload. Correcting it while reading gives `None` on every row.
 
 - **An unfiltered observation query answers entirely `future` passes.** Network
   returns scheduled observations alongside flown ones, newest `start` first,
@@ -582,7 +675,7 @@ eyes on the mast and the station should be out of the SatNOGS schedule.
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 204 tests
+.venv/Scripts/python -m pytest              # offline: 277 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
 

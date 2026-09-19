@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 ServerFrameType = Literal[
     "hello", "snapshot", "rotator", "satpos", "pass_next", "passes",
     "tle", "satnogs", "pointing", "control", "status", "log", "error",
-    "rig",
+    "rig", "spaceweather",
 ]
 
 ClientFrameType = Literal[

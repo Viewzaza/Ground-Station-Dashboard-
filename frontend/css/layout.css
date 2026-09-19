@@ -20,15 +20,21 @@
      spans both rows and the map and globe get a full row each rather than
      sharing one.
 
-     Radio and the waterfall share a row because they are two halves of one
-     question: radio is what to tune to on the next pass, the waterfall is what
-     was actually heard on the last one. The waterfall is a wide short strip —
-     time runs across it — so it takes the two wider columns. */
+     Radio, the waterfall and space weather share a row because they are one
+     question at three removes: radio is what to tune to on the next pass, the
+     waterfall is what was actually heard on the last one, and space weather is
+     what the path between them was like.
+
+     The waterfall used to take two columns here. It is rendered at 760x150 by
+     waterfall.py, and two columns of this grid is about 1270px at 1080p — so
+     the extra width bought nothing but a 1.7x upscale of a strip that is
+     already mostly furniture. The middle column is about 790px, which shows it
+     very nearly 1:1. Space weather takes the third column that frees up. */
   grid-template-areas:
     "hdr   hdr   hdr"
     "map   cam   track"
     "globe cam   track"
-    "radio wf    wf"
+    "radio wf    sw"
     "graf  graf  graf";
 }
 
@@ -67,13 +73,14 @@
     grid-template-columns: 1fr 1fr;
     grid-template-rows:
       var(--hdr-h) minmax(240px, 1.2fr) 1fr 1fr minmax(110px, 150px)
-      minmax(200px, var(--graf-h));
+      minmax(150px, 170px) minmax(200px, var(--graf-h));
     grid-template-areas:
       "hdr   hdr"
       "cam   cam"
       "map   track"
       "globe track"
       "radio wf"
+      "sw    sw"
       "graf  graf";
   }
 }
@@ -107,8 +114,28 @@
   }
 }
 
-/* Two-column laptop layout: six rows, the camera in its own. */
-@media (min-width: 1000px) and (max-width: 1400px) and (max-height: 900px) {
+/* ---------- the two-column layout runs out of height sooner ----------
+
+   It carries seven rows where the wall carries five: the camera takes one to
+   itself at this width, and so does space weather, which has no third column
+   to sit in. That is about 160px more than the wall needs, and the rule above
+   only starts scrolling at 900px — so between 900 and 1060 every row with a
+   fixed floor kept its space and the two with none, the map and the globe,
+   were squeezed to about 100px each. Present, and useless, which is the exact
+   failure the 900px rule was written to prevent.
+
+   1080 rather than 1060, because 1080 is a laptop height that exists and
+   landing a breakpoint one pixel inside it is how a display ends up scrolling
+   on one machine and not the next. */
+@media (min-width: 1000px) and (max-width: 1400px) and (max-height: 1080px) {
+  html, body { overflow: auto; height: auto; }
+  .wall { height: auto; min-height: 100vh; }
+  .track-col { overflow: visible; }
+}
+
+/* Two-column laptop layout: seven rows, each with a floor, now that the page
+   above is allowed to scroll rather than divide a budget it does not have. */
+@media (min-width: 1000px) and (max-width: 1400px) and (max-height: 1080px) {
   .wall {
     grid-template-rows:
       var(--hdr-h)
@@ -116,6 +143,7 @@
       minmax(260px, 1fr)
       minmax(260px, 1fr)
       minmax(130px, 150px)
+      minmax(150px, 170px)
       minmax(200px, var(--graf-h));
   }
 }
@@ -133,6 +161,7 @@
       "track"
       "radio"
       "wf"
+      "sw"
       "map"
       "globe"
       "graf";

@@ -132,6 +132,10 @@ function handle(frame) {
       set('satnogs', frame.data);
       break;
 
+    case 'spaceweather':
+      set('spaceweather', frame.data);
+      break;
+
     case 'rig':
       // satnogs-client's own Doppler-corrected frequency, read back from the
       // station's rigctld. An independent answer to the one we compute.
@@ -161,7 +165,8 @@ function handle(frame) {
 
 /** Map a backend component name onto the header chip that shows it. */
 function chipFor(component) {
-  return { rotctld: 'rot', tle: 'tle', satnogs: 'satnogs', camera: 'cam' }[component]
+  return { rotctld: 'rot', tle: 'tle', satnogs: 'satnogs', camera: 'cam',
+           spaceweather: 'sw' }[component]
       || component;
 }
 

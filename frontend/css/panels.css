@@ -528,3 +528,120 @@ a.tlm-row:focus-visible { outline: 2px solid var(--track); outline-offset: -2px;
   .tlm-head { margin-left: 0; flex-basis: 100%; }
   .tlm-rows { max-height: 50vh; }
 }
+
+/* ── space weather ────────────────────────────────────────────────────────
+   Third on the radio row, in a cell about 470x150 on a 1080p wall. That is a
+   wide short box, so the panel splits across rather than down: the readouts
+   take a fixed left column and the graph takes what is left. Stacked, the
+   graph would have been about 50px tall, which is not enough to tell a flare
+   from noise — and telling those apart is the only reason the graph is here.
+
+   The links are part of the panel, not decoration. The numbers come from NOAA
+   SWPC, and the operator who wants to know what an M-class flare means for
+   tonight's pass wants spaceweatherlive.com, which is written for people. Both
+   are credited because they are two different things: one is where the bytes
+   came from, the other is where to go next. */
+.sw #sw-panel {
+  display: grid;
+  grid-template-columns: minmax(132px, 158px) minmax(0, 1fr);
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.sw-readouts {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  border-right: 1px solid var(--rule-soft); padding-right: 10px;
+}
+
+/* The flare class, and the biggest thing in the panel. It is the one value
+   here that is read from across the room, and it is a magnitude on a
+   logarithmic scale — the step from C9 to M1 is a tenth of a decade and the
+   step from M1 to X1 is a whole one, so the letter has to carry more weight
+   than the digits. Hence the colour lives on the letter's band, not on the
+   number. */
+.sw-class {
+  font-size: 23px; line-height: 1.05; font-weight: 600;
+  font-variant-numeric: tabular-nums; color: var(--ink-2);
+}
+/* A and B are the Sun's floor — there is essentially always a B-class
+   background — so they are ink, not a state colour. A panel that is amber
+   every day is a panel nobody looks at. */
+.sw-class.c-A, .sw-class.c-B { color: var(--ink-2); }
+.sw-class.c-C { color: var(--ink); }
+.sw-class.c-M { color: var(--warn); }
+.sw-class.c-X { color: var(--bad); }
+.sw-class.unknown { color: var(--ink-4); font-size: 17px; }
+
+.sw-sub { font-size: 10px; color: var(--ink-3); white-space: nowrap;
+          overflow: hidden; text-overflow: ellipsis; }
+/* A flare that has begun and not ended is the one thing on this panel worth
+   interrupting someone for. */
+.sw-sub.live { color: var(--contact); font-weight: 600; }
+
+/* R / S / G, NOAA's three storm scales. Shown together and always, including
+   at zero: "R0 S0 G0" is a reading, and a row that appears only during a storm
+   teaches the eye to skip that corner of the panel on every quiet day and then
+   miss it on the one day it matters. */
+.sw-scales { display: flex; gap: 4px; margin-top: 2px; }
+.sw-scale {
+  font-size: 10px; letter-spacing: .06em; padding: 1px 5px; border-radius: 3px;
+  border: 1px solid var(--rule); color: var(--ink-3); background: var(--sunk);
+  cursor: help; white-space: nowrap;
+}
+.sw-scale.lvl-0 { color: var(--ink-4); }
+.sw-scale.lvl-1, .sw-scale.lvl-2 {
+  color: var(--warn);
+  border-color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--panel));
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+}
+.sw-scale.lvl-3, .sw-scale.lvl-4, .sw-scale.lvl-5 {
+  color: var(--bad);
+  border-color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--panel));
+  background: color-mix(in srgb, var(--bad) 10%, var(--panel));
+}
+/* Unknown is not quiet. A scale SWPC has not published yet must not read as a
+   confident zero. */
+.sw-scale.lvl-none { color: var(--ink-4); border-style: dashed; }
+
+.sw-indices {
+  display: flex; gap: 8px; font-size: 10px; color: var(--ink-3);
+  margin-top: auto; flex-wrap: wrap;
+}
+.sw-indices b { color: var(--ink-2); font-weight: 600; }
+/* Kp 5 is where NOAA starts calling it a storm, and it is also roughly where
+   thermospheric drag starts moving a LEO element set faster than a two-hour
+   TLE refresh can follow. */
+.sw-indices .storm b { color: var(--bad); }
+
+.sw-plot { position: relative; min-width: 0; min-height: 0; }
+.sw-plot canvas { width: 100%; height: 100%; display: block; }
+
+/* Same weight and place as `.graf-open` in the footer: a quiet link at the
+   right end of a heading, not a button. */
+.sw-cite {
+  color: var(--ink-4); text-decoration: none;
+  font-size: 10px; letter-spacing: 0; font-weight: 400; white-space: nowrap;
+}
+.sw-cite:hover {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  text-decoration: underline;
+}
+.sw-cite:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
+/* `.hint` takes the margin-left:auto that pushes this group right; the link
+   then sits immediately after it rather than at the far edge. */
+.sw h2 .hint { margin-left: auto; }
+
+/* Stacked, there is width to spare and the fixed left column would leave the
+   graph a thin strip beside a lot of nothing. */
+@media (max-width: 1000px) {
+  .sw #sw-panel { grid-template-columns: 1fr; }
+  .sw-readouts {
+    border-right: 0; padding-right: 0; padding-bottom: 8px;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .sw-indices { margin-top: 4px; }
+  .sw-plot { min-height: 120px; }
+}

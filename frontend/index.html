@@ -39,6 +39,7 @@
       <span class="chip" data-chip="rot">ROT</span>
       <span class="chip" data-chip="tle">TLE</span>
       <span class="chip" data-chip="satnogs">SATNOGS</span>
+      <span class="chip" data-chip="sw">SUN</span>
     </div>
   </header>
 
@@ -111,6 +112,24 @@
   <section class="panel" style="grid-area:wf">
     <h2>Last signal <span class="hint" id="waterfall-hint">—</span></h2>
     <div id="waterfall-panel"><p class="muted">awaiting waterfall</p></div>
+  </section>
+
+  <!-- ─────────────────────────── space weather ──────────────────────────── -->
+  <!-- Third on the radio row, and on that row rather than anywhere else
+       because it is the same question at one further remove: radio is what to
+       tune to, the waterfall is what was heard, and this is what the Sun was
+       doing to the path in between. When a pass produces nothing, the other
+       three panels on this wall all report the same nothing; this is the only
+       one that can be read BEFORE the pass instead of after it.
+
+       The graph is GOES X-ray flux over six hours on a log axis — the same
+       plot spaceweatherlive.com leads with, because it is the one that shows a
+       flare as a flare rather than as a number that changed. -->
+  <section class="panel sw" style="grid-area:sw">
+    <h2>Space weather
+      <span class="hint" id="sw-hint">—</span>
+    </h2>
+    <div id="sw-panel"><p class="muted">awaiting SWPC</p></div>
   </section>
 
   <!-- ──────────────────── decoded frames · grafana ──────────────────────── -->

@@ -16,6 +16,7 @@ export const store = {
   rotator: null,
   pointing: null,
   satnogs: null,
+  spaceweather: null,  // NOAA SWPC: X-ray flux, flare class, storm scales
   radio: null,         // transmitters + live Doppler for the tracked satellite
   waterfall: null,     // most recent observation's cropped signal image
   telemetry: null,     // most recent frames SatNOGS has for the tracked satellite

@@ -53,6 +53,7 @@ export const api = {
   passTrack:    (passId)      => get(`/api/passes/${encodeURIComponent(passId)}/track`),
   cameras:      ()            => get('/api/cameras'),
   satnogs:      ()            => get('/api/satnogs'),
+  spaceweather: ()            => get('/api/spaceweather'),
   radio:        (norad)       => get('/api/radio', { norad }),
   waterfall:    (norad)       => get('/api/radio/waterfall', { norad }),
   telemetry:    (norad)       => get('/api/telemetry', { norad }),

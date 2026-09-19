@@ -19,6 +19,7 @@ from .services.predictor import Predictor
 from .services.rig_service import RigService
 from .services.rotator_service import RotatorService
 from .services.satnogs import SatnogsService
+from .services.spaceweather import SpaceWeatherService
 from .services.tle_store import TleStore
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ class Scheduler:
         self.components: dict[str, str] = {}
         self.rotator = RotatorService(settings, predictor, on_state=self.set_state)
         self.satnogs = SatnogsService(settings, on_state=self.set_state)
+        self.spaceweather = SpaceWeatherService(settings, on_state=self.set_state)
         self.rig = RigService(
             settings, predictor,
             getattr(predictor, "transmitters", None),
@@ -55,6 +57,7 @@ class Scheduler:
         self._spawn("satnogs", self.satnogs.run)
         self._spawn("control", self._control_loop)
         self._spawn("rig", self.rig.run)
+        self._spawn("spaceweather", self.spaceweather.run)
 
     async def stop(self) -> None:
         await self.rotator.stop()

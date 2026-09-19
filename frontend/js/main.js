@@ -22,6 +22,7 @@ import { mountSatnogs } from './panels/satnogs.js';
 import { mountControl, tickControl } from './panels/control.js';
 import { mountRadio } from './panels/radio.js';
 import { mountTelemetry } from './panels/telemetry.js';
+import { mountSpaceWeather, resizeSpaceWeather } from './panels/spaceweather.js';
 
 let orbit = null;
 let map = null;
@@ -49,6 +50,7 @@ async function boot() {
   mountControl();
   mountRadio();
   mountTelemetry();
+  mountSpaceWeather();
 
   // Cameras first — they are why the operator is looking at this screen.
   mountCameras();
@@ -77,6 +79,10 @@ async function boot() {
     map?.draw();
     polar?.draw();
     globe?.resizeGlobe();
+    // A canvas, like the two above it: the CSS box resizes but the backing
+    // bitmap does not, so without this the graph is a stretched copy of
+    // whatever width the panel had when it last had data.
+    resizeSpaceWeather();
   }, 150));
   tick();
 }
