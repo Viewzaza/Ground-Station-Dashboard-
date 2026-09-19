@@ -136,6 +136,9 @@ class Settings(BaseSettings):
     spaceweather_scales_poll_s: int = 300
     # F10.7 is one observation a day from Penticton.
     spaceweather_f107_poll_s: int = 3600
+    # Bounds one whole fetch, not one socket read. See the note in the
+    # poll loop: httpx's own timeout cannot stop a server that dribbles.
+    spaceweather_timeout_s: float = 20.0
 
     # --- derived ------------------------------------------------------------
     @property

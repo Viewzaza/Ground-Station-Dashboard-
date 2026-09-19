@@ -8,8 +8,16 @@ with what SWPC itself publishes, to the digit, rather than internal consistency.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
+# Captured before run_ticks patches the module's asyncio.sleep. A fake client
+# that wants to really block must use this, or it gets the patched one and
+# never blocks at all.
+_real_sleep = asyncio.sleep
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 from app.config import Settings
@@ -178,9 +186,14 @@ def test_a_bucket_keeps_its_peak_not_its_mean():
     and the graph would then contradict the flare class printed beside it.
     """
     rows = [raw(m, 1e-7) for m in range(60)]
-    rows[30]["long"] = 1e-5            # an M1 flare, one minute wide
+    # Minute 33, not 30. With six buckets over sixty rows, minute 30 is exactly
+    # a bucket boundary, so a naive "keep the first row of each bucket" would
+    # also return the spike and the test would exclude the mean without
+    # excluding anything else.
+    rows[33]["long"] = 1e-5            # an M1 flare, one minute wide
     out = downsample_peak(rows, buckets=6)
     assert max(p["long"] for p in out) == 1e-5
+    assert out[3]["long"] == 1e-5      # and in the bucket it actually happened in
 
 
 def test_the_two_channels_are_maximised_independently():
@@ -228,18 +241,46 @@ def test_a_series_that_spans_no_time_does_not_divide_by_it():
     assert len(out) == 1
 
 
-def test_a_gap_in_the_feed_leaves_a_gap_in_the_points():
-    """GOES XRS drops out. Those minutes must not come back as data.
+BUCKETS = 12  # both calls below must agree, or the threshold is meaningless
 
-    The panel breaks its stroke on a step much wider than `bucket_seconds`, so
-    what matters here is that the missing hour produces no points at all rather
-    than being interpolated across.
+
+def gap_test_fires(rows) -> bool:
+    """Whether the panel would break its stroke somewhere in this series.
+
+    Mirrors what spaceweather.js does: break when a step exceeds three nominal
+    buckets. Both bucket counts must be the same one — computing the series
+    with 12 and the threshold with the default 180 makes the threshold fifteen
+    times too small, which is a test that passes on contiguous data and would
+    have missed the bug where every ordinary step read as a dropout.
     """
-    rows = [raw(m, 1e-7) for m in range(30)] + [raw(m, 1e-7) for m in range(90, 120)]
-    out = downsample_peak(rows, buckets=12)
+    out = downsample_peak(rows, buckets=BUCKETS)
     stamps = [parse_ts(p["t"]) for p in out]
     steps = [(b - a).total_seconds() for a, b in zip(stamps, stamps[1:])]
-    assert max(steps) > 3 * bucket_seconds(rows)
+    return bool(steps) and max(steps) > 3 * bucket_seconds(rows, buckets=BUCKETS)
+
+
+def test_a_gap_in_the_feed_leaves_a_gap_in_the_points():
+    """GOES XRS drops out. Those minutes must not come back as data."""
+    rows = [raw(m, 1e-7) for m in range(30)] + [raw(m, 1e-7) for m in range(90, 120)]
+    assert gap_test_fires(rows)
+
+
+def test_contiguous_data_does_not_read_as_a_gap():
+    """The other half of the previous test, and the half that was missing.
+
+    Without this, a threshold far too small passes the gap test on every
+    series, including one with no gap in it — which is the failure that draws
+    the graph as disconnected points and then as nothing at all.
+    """
+    assert not gap_test_fires([raw(m, 1e-7) for m in range(120)])
+
+
+def test_a_short_series_is_not_read_as_one_long_dropout():
+    """A series too short to thin is passed through whole, so the bucket width
+    must describe the rows actually emitted rather than a 180-way split of
+    them. 45 minutes of 1-minute data is 45 ordinary steps, not 45 dropouts."""
+    assert not gap_test_fires([raw(m, 1e-7) for m in range(45)])
+    assert bucket_seconds([raw(m, 1e-7) for m in range(45)]) == pytest.approx(60, abs=1)
 
 
 def test_the_bucket_width_follows_the_span():
@@ -282,6 +323,20 @@ def test_an_unparsable_timestamp_is_none_not_an_exception():
 # --------------------------------------------------------------------------
 # Kp and the storm scales
 # --------------------------------------------------------------------------
+
+def test_the_one_minute_estimate_is_read_in_preference_to_the_synoptic_index():
+    """The 3-hourly feed publishes at the END of its period and can be three
+    hours behind; the estimate is what SWPC and SpaceWeatherLive show as now."""
+    value, _ = latest_kp([{"time_tag": "2026-09-19T15:02:00", "estimated_kp": 4.33,
+                           "kp_index": 4, "kp": "4Z"}])
+    assert value == 4.33
+
+
+def test_the_synoptic_field_still_parses():
+    """Either feed can be pointed at this."""
+    value, _ = latest_kp([{"time_tag": "2026-09-19T12:00:00", "Kp": 1.67, "a_running": 6}])
+    assert value == 1.67
+
 
 def test_the_newest_kp_wins_whatever_order_the_feed_is_in():
     value, when = latest_kp([
@@ -372,29 +427,54 @@ def test_a_side_feed_failing_forever_is_only_degraded():
 # the published snapshot
 # --------------------------------------------------------------------------
 
-def test_a_storm_in_progress_beats_the_daily_scale():
-    """SWPC publishes G once a day; Kp is three-hourly.
+def test_the_scales_are_passed_through_untouched():
+    """SWPC's R/S/G is a 24-hour observed MAXIMUM and is reported as one.
 
-    A storm that began this afternoon is in Kp and not yet in the daily summary,
-    and for a "should I expect trouble" readout the failure that matters is
-    under-reporting it.
+    An earlier version took max() of this and a G derived from the current Kp,
+    on the premise that the scales were a stale once-a-day summary. They are
+    not — they re-timestamp every few minutes — so that rule only ever latched
+    the day's peak and presented it as the weather now.
     """
+    svc = service()
+    svc.scales = {"R": 1, "S": 0, "G": 4, "observed_at": "2026-09-19T00:30:00Z"}
+    svc.kp = 2.0                       # the storm is over; the maximum stands
+    snap = svc.snapshot()
+    assert (snap["scales"]["R"], snap["scales"]["S"], snap["scales"]["G"]) == (1, 0, 4)
+    assert snap["scales"]["window"] == "24h-max"
+
+
+def test_a_quiet_scale_is_not_inflated_by_a_high_kp():
+    """The mirror of the above: no synthesised G either."""
     svc = service()
     svc.scales = {"R": 0, "S": 0, "G": 0, "observed_at": "2026-09-19T00:30:00Z"}
     svc.kp = 7.0
     snap = svc.snapshot()
-    assert snap["scales"]["G"] == 3
-    assert snap["scales"]["g_from_kp"] is True
+    assert snap["scales"]["G"] == 0
+    # It is reported beside the live Kp instead, in the same units, so the two
+    # can be read together without either pretending to be the other.
+    assert snap["kp_g"] == 3
 
 
-def test_the_daily_scale_wins_when_it_is_the_worse_of_the_two():
-    """Kp has since settled; the storm still happened today."""
+def test_swpcs_own_class_is_preferred_over_our_arithmetic():
+    """We already poll the feed that carries it, so agreement is structural."""
     svc = service()
-    svc.scales = {"R": 1, "S": 0, "G": 4, "observed_at": "2026-09-19T00:30:00Z"}
-    svc.kp = 2.0
-    snap = svc.snapshot()
-    assert snap["scales"]["G"] == 4
-    assert snap["scales"]["g_from_kp"] is False
+    svc.current_flux = 2.4e-6          # computes to C2.4
+    svc.current_class = "C2.3"         # what SWPC actually published
+    assert svc.snapshot()["xray"]["class"] == "C2.3"
+
+
+def test_our_arithmetic_is_the_fallback_when_swpc_has_no_flare_on_record():
+    svc = service()
+    svc.current_flux = 2.4e-6
+    svc.current_class = None
+    assert svc.snapshot()["xray"]["class"] == "C2.4"
+
+
+@pytest.mark.parametrize("kp, expected", [(4.67, 0), (5.0, 1), (5.67, 1), (8.67, 4), (9.0, 5)])
+def test_the_kp_readout_carries_its_g_level(kp, expected):
+    svc = service()
+    svc.kp = kp
+    assert svc.snapshot()["kp_g"] == expected
 
 
 def test_the_snapshot_carries_no_unread_kp_history():
@@ -420,6 +500,7 @@ def test_the_class_is_read_off_the_live_flux_not_the_graph():
     """
     svc = service()
     svc.current_flux = 2.4e-6
+    svc.current_class = None           # force the computed path
     svc.xray = [{"t": at(0).isoformat(), "long": 9.9e-6, "short": 1e-9}]
     assert svc.snapshot()["xray"]["class"] == "C2.4"
 
@@ -429,3 +510,244 @@ def test_the_goes_spacecraft_is_carried_through_as_provenance():
     svc = service()
     svc.satellite = 19
     assert svc.snapshot()["satellite"] == 19
+
+
+# --------------------------------------------------------------------------
+# the poll loop and the refresh methods
+#
+# These had no coverage at all, which is how two bugs survived a green suite:
+# a shared failure counter that sent the first X-ray blip straight to "down",
+# and a `current_flux` that came back None whenever the newest row carried only
+# the short channel. Both are asserted below.
+# --------------------------------------------------------------------------
+
+class FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class FakeClient:
+    """Answers by URL fragment. A value that is an Exception is raised."""
+
+    def __init__(self, answers: dict):
+        self.answers = answers
+
+    async def get(self, url, params=None):
+        for fragment, answer in self.answers.items():
+            if fragment in url:
+                if isinstance(answer, Exception):
+                    raise answer
+                return FakeResponse(answer)
+        return FakeResponse([])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def xray_payload(minutes: int = 200, last_long: bool = True) -> list:
+    out = []
+    for m in range(minutes):
+        out.append(xray_row(m, "0.05-0.4nm", 2e-8))
+        if last_long or m < minutes - 1:
+            out.append(xray_row(m, "0.1-0.8nm", 4e-7))
+    return out
+
+
+async def test_refresh_xray_fills_the_series_and_the_headline():
+    svc = service()
+    await svc.refresh_xray(FakeClient({"xrays": xray_payload()}))
+    assert len(svc.xray) == 180
+    assert svc.current_flux == 4e-7
+    assert svc.satellite == 18
+    assert svc.bucket_s == pytest.approx(66.4, abs=1)
+
+
+async def test_current_flux_survives_a_payload_cut_after_the_short_row():
+    """SWPC writes the short row before the long one for a given minute, so a
+    truncated payload leaves a newest row with no long-channel value. Taking
+    rows[-1]["long"] blindly returned None and blanked the whole readout."""
+    svc = service()
+    await svc.refresh_xray(FakeClient({"xrays": xray_payload(last_long=False)}))
+    assert svc.current_flux == 4e-7
+    assert flare_class(svc.current_flux) == "B4.0"
+
+
+async def test_an_empty_xray_payload_is_an_error_not_a_quiet_success():
+    """Returning instead of raising counted the tick as a success, so the chip
+    went green while the panel republished an hour-old series."""
+    svc = service()
+    with pytest.raises(ValueError):
+        await svc.refresh_xray(FakeClient({"xrays": []}))
+
+
+async def test_the_short_channel_floor_is_not_drawn_as_a_reading():
+    """298 of 358 short-channel rows in a real window are the float32 spelling
+    of exactly 1e-9 — the clamp, not a measurement."""
+    svc = service()
+    payload = [xray_row(0, "0.1-0.8nm", 4e-7),
+               xray_row(0, "0.05-0.4nm", 9.999999717180685e-10)]
+    await svc.refresh_xray(FakeClient({"xrays": payload}))
+    assert svc.xray[0]["long"] == 4e-7
+    assert svc.xray[0]["short"] is None
+
+
+async def test_the_reported_age_is_the_readings_age_not_the_polls():
+    """A fresh poll of a file whose last half hour is zeroed is stale data.
+    The poll stamp alone reported that as "0s" under a 30-minute-old class."""
+    svc = service()
+    stale = [
+        {"time_tag": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
+         "satellite": 18, "energy": "0.1-0.8nm", "flux": 4e-7},
+        {"time_tag": (datetime.now(timezone.utc) - timedelta(minutes=29)).isoformat(),
+         "satellite": 18, "energy": "0.1-0.8nm", "flux": 0.0},   # contaminated
+    ]
+    await svc.refresh_xray(FakeClient({"xrays": stale}))
+    snap = svc.snapshot()
+    assert snap["age_s"] == pytest.approx(1800, abs=30)
+    assert snap["polled_s"] == pytest.approx(0, abs=5)
+
+
+async def test_a_wrong_shaped_scales_field_does_not_kill_the_poller():
+    """`"R": "0"` used to raise AttributeError, which the loop does not catch,
+    taking the other four feeds down with it on every restart."""
+    svc = service()
+    await svc.refresh_scales(FakeClient({"scales": {"0": {"R": "0", "S": {}, "G": {"Scale": "2"}}}}))
+    assert svc.scales["R"] is None
+    assert svc.scales["G"] == 2
+
+
+class FakeClock:
+    """The loop is driven by monotonic time, not by tick count: an endpoint
+    that has just failed is skipped until its interval elapses. A fake sleep
+    that does not also advance the clock therefore runs the loop body once and
+    then idles, which looks like a pass and tests nothing."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.t = start
+
+    def monotonic(self) -> float:
+        return self.t
+
+
+async def run_ticks(svc, client, ticks: int) -> list[tuple[str, str]]:
+    """Drive `run()` for a fixed number of ticks; collect the health states."""
+    seen: list[tuple[str, str]] = []
+    svc.on_state = lambda component, state, detail="": seen.append((state, detail))
+
+    import app.services.spaceweather as mod
+    clock = FakeClock()
+    real_sleep = asyncio.sleep
+    count = {"n": 0}
+
+    async def fake_sleep(seconds):
+        clock.t += seconds
+        count["n"] += 1
+        if count["n"] >= ticks:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+
+    saved = (mod.httpx.AsyncClient, mod.asyncio.sleep, mod.time)
+    mod.httpx.AsyncClient = lambda **kw: client
+    mod.asyncio.sleep = fake_sleep
+    mod.time = clock
+    try:
+        with contextlib.suppress(asyncio.CancelledError):
+            await svc.run()
+    finally:
+        mod.httpx.AsyncClient, mod.asyncio.sleep, mod.time = saved
+    return seen
+
+
+def healthy_answers(**overrides) -> dict:
+    answers = {
+        "xrays": xray_payload(),
+        "flares": [{"time_tag": "2026-09-19T15:00:00Z", "current_class": "B4.0",
+                    "max_class": "B5.5", "max_time": "2026-09-19T05:36:00Z",
+                    "begin_time": "2026-09-19T05:08:00Z", "end_time": "2026-09-19T06:06:00Z"}],
+        "scales": {"0": {"DateStamp": "2026-09-19", "TimeStamp": "15:07:00",
+                         "R": {"Scale": "0"}, "S": {"Scale": "0"}, "G": {"Scale": "0"}}},
+        "k_index": [{"time_tag": "2026-09-19T15:02:00", "estimated_kp": 1.0}],
+        "10cm": [{"flux": 96, "time_tag": "2026-09-18T20:00:00"}],
+    }
+    answers.update(overrides)
+    return answers
+
+
+async def test_a_healthy_poll_reports_ok():
+    svc = service()
+    seen = await run_ticks(svc, FakeClient(healthy_answers()), ticks=3)
+    assert seen and seen[0] == ("ok", "")
+    assert svc.snapshot()["xray"]["class"] == "B4.0"   # SWPC's own word for it
+
+
+async def test_a_broken_side_feed_never_takes_the_chip_red():
+    """The counter is per endpoint. A permanently failing flare feed shares the
+    X-ray interval, so a shared counter was past the threshold before the X-ray
+    feed had ever failed — and then its first blip went straight to "down"."""
+    svc = service()
+    answers = healthy_answers(flares=httpx.HTTPError("boom"))
+    seen = await run_ticks(svc, FakeClient(answers), ticks=8)
+    assert seen, "no state was ever reported"
+    assert all(state == "degraded" for state, _ in seen), seen
+    assert "flare" in seen[-1][1]
+
+
+async def test_the_xray_feed_must_fail_three_times_running_to_go_down():
+    svc = service()
+    answers = healthy_answers(xrays=httpx.HTTPError("boom"))
+    seen = await run_ticks(svc, FakeClient(answers), ticks=6)
+    states = [state for state, _ in seen]
+    assert states[:3] == ["degraded", "degraded", "down"], states
+
+
+async def test_one_xray_blip_amongst_healthy_ticks_stays_degraded():
+    """The counter resets on that endpoint's own success."""
+    good = xray_payload()
+    calls = {"n": 0}
+
+    class Flaky(FakeClient):
+        async def get(self, url, params=None):
+            if "xrays" in url:
+                calls["n"] += 1
+                if calls["n"] == 3:
+                    raise httpx.HTTPError("one blip")
+                return FakeResponse(good)
+            return await super().get(url, params)
+
+    svc = service()
+    seen = await run_ticks(svc, Flaky(healthy_answers()), ticks=8)
+    assert "down" not in [state for state, _ in seen], seen
+
+
+async def test_a_hung_endpoint_cannot_stall_the_loop():
+    """httpx's timeout is per socket read, so a server that dribbles bytes
+    holds the request open forever. These five run in series, so one such
+    server stops the X-ray refresh and freezes every open browser under a chip
+    that is still green."""
+    class Hangs(FakeClient):
+        async def get(self, url, params=None):
+            if "xrays" in url:
+                await _real_sleep(3600)
+            return await super().get(url, params)
+
+    svc = service(spaceweather_timeout_s=0.05)
+    seen = await run_ticks(svc, Hangs(healthy_answers()), ticks=3)
+    # The timeout fires against the fake clock's sleep, so the tick completes
+    # and the failure is reported rather than the loop hanging.
+    assert seen, "the loop never reported anything — it stalled"
+    assert any("xray" in detail for _, detail in seen), seen
+
+
+async def test_the_loop_does_not_run_at_all_when_disabled():
+    svc = service(spaceweather_enabled=False)
+    seen = await run_ticks(svc, FakeClient({}), ticks=3)
+    assert seen == [("degraded", "disabled")]

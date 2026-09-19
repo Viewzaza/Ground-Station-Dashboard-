@@ -383,6 +383,27 @@ nothing, and all three report it *afterwards*. This panel can be read before
 the pass, and it is the only one that offers an explanation that is not a fault
 in our own equipment.
 
+**What it does not cover, which matters here more than most of what it does.**
+This is a *solar* activity panel. The dominant ionospheric threat to a 400 MHz
+LEO downlink from 13.8&nbsp;N is not on it: equatorial plasma bubbles, the
+post-sunset spread-F that forms near the crest of the equatorial ionization
+anomaly. Bangkok sits a few degrees off the magnetic dip equator, in one of the
+worst regions on Earth for it; the risk window is roughly 19:00-24:00 local,
+worst at the equinoxes; and scintillation strengthens as about f^-1.5 going
+down in frequency, so 400&nbsp;MHz fares far worse than GNSS L-band, where
+saturated S4 and 10-20&nbsp;dB fades are routine over South-East Asia. A pass
+that starts cleanly and breaks up mid-way is its signature.
+
+The trap is that this is **quiet-time** behaviour. Geomagnetic storms modulate
+it in both directions — prompt penetration fields near sunset can trigger
+bubbles, while the disturbance dynamo in a storm's recovery phase can suppress
+them almost entirely. So an operator who reads "G0, Kp 1, all quiet" here and
+then loses the 20:30 pass has been pointed *away* from the likeliest cause.
+SWPC publishes no global scintillation product, so this cannot be fixed by
+adding a feed; the dashboard does already know the station coordinates, the
+pass times and the season, so a local-time-and-season risk flag is the obvious
+next thing to build.
+
 **Where the numbers come from, and why it is not where you might expect.**
 [spaceweatherlive.com](https://www.spaceweatherlive.com/en/solar-activity.html)
 and [spaceweather.com](https://spaceweather.com/) are the two sites an operator
@@ -405,24 +426,72 @@ the panel exists:
 | X-ray flux, both channels | `/json/goes/primary/xrays-6-hour.json` | 120 s |
 | the current flare event | `/json/goes/primary/xray-flares-latest.json` | 120 s |
 | R / S / G scales | `/products/noaa-scales.json` | 300 s |
-| planetary K index | `/products/noaa-planetary-k-index.json` | 300 s |
+| planetary K index | `/json/planetary_k_index_1m.json` | 300 s |
 | 10.7 cm solar flux | `/products/summary/10cm-flux.json` | 3600 s |
 
 Served from the poller's cache, never proxied per request, for the same reason
 the SatNOGS route is: several wall displays open for months must not become
 several displays' worth of traffic aimed at a public service.
 
+**Two time bases, labelled as two.** The R/S/G row is SWPC's *24-hour observed
+maximum* — their own label for it — so a G3 at 02:00 UTC still reads G3 at
+midnight. The Kp beside it is SWPC's 1-minute running estimate, which is
+*now*, and which is what their dashboard and SpaceWeatherLive display. Earlier
+this panel took the worse of the two and presented the result as current
+conditions; that was built on a premise that turned out to be backwards, and
+the details are in the list below.
+
 **What it actually means for this station.** Station 5024 works a 400 MHz
-downlink from 13.8°N, and the honest answer for two of the three NOAA scales is
-"not much" — which is in each scale's tooltip, because three ominous letters
-with no context get either over-read or learned-and-ignored. R is a *radio
-blackout* scale, and it is an HF scale; UHF is largely unaffected except during
-a strong solar radio burst, which raises the receiver noise floor for minutes.
-S is mostly a spacecraft problem at this latitude. **G is the one that reaches
-this dashboard**: a geomagnetic storm heats the thermosphere, drag rises, and
-LEO element sets go stale faster than the two-hour TLE refresh can follow — so
-a high Kp and a drifting AOS are the same event, and the TLE chip in the header
-and this panel are worth reading together.
+downlink from 13.8&nbsp;N, and the honest answer for two of the three NOAA
+scales is "not much" — which is in each scale's tooltip, because three ominous
+letters with no context get either over-read or learned-and-ignored.
+
+**R** is graded on solar X-ray peak flux alone. Non-deviative D-region
+absorption goes as roughly 1/f², so relative to 10&nbsp;MHz the absorption at
+400&nbsp;MHz is down by a factor of order a thousand: even an X-class flare
+costs this link a fraction of a dB. The UHF hazard a flare can bring is a
+metric-wavelength **radio burst**, and R does not measure that — reading R0 as
+"no solar radio problem" is reading it wrong. A burst matters because a
+tracking yagi is pointed at the sky the Sun is in: at 400&nbsp;MHz a 15&nbsp;dBi
+antenna has an effective area of about 1.4&nbsp;m², so a few thousand SFU is
+thousands of kelvin of antenna temperature and tens of dB of desense for
+minutes — and 410&nbsp;MHz is one of the more burst-prone frequencies in the
+RSTN record. What decides it is Sun–satellite angular separation, which this
+dashboard already has the geometry to compute and does not yet show.
+
+**S** is mostly a spacecraft problem, and barely even that here: at 51.6°
+inclination and 361&nbsp;km neither end of the link sees the polar caps, where
+the absorption would be.
+
+**G** is the one that reaches this dashboard, but more slowly and more weakly
+than the first version of this section claimed. KNACKSAT-2 is an ISS deployment
+(`98067XZ`) at **361&nbsp;km**, with `MEAN_MOTION_DOT` 6.13e-4 rev/day² — about
+350&nbsp;m of altitude a day. Working from that, an unmodelled density excess
+of fraction *f* puts roughly `f x 3.4 s` of along-track timing error into a
+one-day propagation and `f x 13.5 s` into two:
+
+| storm | density excess at 361 km | AOS error after 1 day | after 2 days |
+| --- | --- | --- | --- |
+| G1 (Kp 5) | ~30% | ~1 s | ~4 s |
+| G3–G4 | ~100% | ~3 s | ~14 s |
+| G4–G5 (May 2024 class) | ~300% | ~10 s | ~40 s |
+
+A second of AOS shift is invisible against a ten-minute pass and a beamwidth of
+tens of degrees. This is worth watching from about **G3**, not G1.
+
+Two things the earlier text got wrong and that are worth not repeating. A high
+Kp and a drifting AOS are **not** the same event: the thermosphere responds in
+hours, but element-set error grows with the square of propagation time, and a
+TLE fitted *during* a storm carries a B\* tuned to a perturbed arc that then
+over-predicts decay through the recovery. A red G mostly warns about tomorrow.
+And `GS_TLE_TTL_S` is **not** the binding constraint — it is a download cache
+TTL, and polling faster cannot make Celestrak publish sooner. What bounds the
+propagation span is the *epoch age* of the newest published element set, which
+is what the TLE chip in the header shows. Reading that chip alongside this
+panel is still the right instinct; the reason given before was not.
+
+Incidentally F10.7, already on the panel, is the index most satellite drag
+models actually consume.
 
 ## Things that are the way they are for a reason
 
@@ -470,10 +539,45 @@ Each of these cost time to find. Please read before changing them.
   envelope — which for "did anything happen" is the reading that cannot
   mislead.
 
-- **GOES XRS drops out, and a polyline drawn through the gap is invented
-  data.** A six-hour window with a 67-minute hole in it is an ordinary day. The
+- **The X-ray series has holes, and a polyline drawn through one is invented
+  data.** A six-hour window with a 34-minute hole in it is an ordinary day. The
   backend publishes the nominal bucket width and the panel breaks its stroke on
-  any step wider than three of them, so a gap reads as a gap.
+  any step wider than three of them, so a gap reads as a gap. Two traps here.
+  The holes are mostly **not** telemetry loss: every row in today's is
+  `flux: 0.0` with `electron_contaminaton: true`, SWPC publishing a zero
+  because the electron-correction algorithm could not produce a number. And the
+  bucket width must be derived from the points actually emitted —
+  `downsample_peak` passes a short series through un-thinned, so dividing the
+  span by 180 regardless once made 45 minutes of ordinary 1-minute data look
+  like 45 consecutive dropouts and drew nothing at all.
+
+- **SWPC's R/S/G is a 24-hour observed maximum, and their Kp feeds are not
+  equally current.** Their own front page calls that row "24-Hour Observed
+  Maximums". It re-timestamps every few minutes, so it never misses a storm in
+  progress — and it keeps reporting one for the rest of the day. Meanwhile
+  `/products/noaa-planetary-k-index.json` is the official 3-hourly index,
+  published at the *end* of each synoptic period: measured at 15:09 UTC one
+  day, its newest row was 12:00 while `/json/planetary_k_index_1m.json` had
+  15:02. This panel briefly took `max()` of the reported G and a G derived from
+  the 3-hourly Kp, on the belief that the scales were a stale daily summary and
+  Kp was the live number. Both halves were backwards, and the result latched
+  the day's peak and displayed it as the weather now. The scales are now passed
+  through and labelled, and Kp comes from the 1-minute estimate — which is also
+  what SWPC's own dashboard and SpaceWeatherLive show.
+
+- **GOES-16 and later read about 30-43% high against GOES-15.** SWPC chose not
+  to apply the historical scaling to the new XRS, so a physically identical
+  flare is labelled ~1.4x larger than it would have been before December 2019,
+  and the R-scale thresholds trip earlier. This panel matches SWPC and
+  SpaceWeatherLive exactly *because* all three read the same unscaled numbers —
+  but a class from here is not comparable with a pre-2020 catalogue.
+
+- **The short channel's floor is a clamp, not a reading.** GOES pins
+  0.05-0.4 nm at 1e-9 W/m² and publishes the clamp: 298 of 358 rows in one real
+  window were the float32 spelling of exactly 1e-9, while not one long-channel
+  row was. Drawn, that is a flat line along the bottom of the graph most of
+  every day — a "less than" rendered as an "equals" — so those readings are
+  dropped and the short trace appears only when there is something to see.
 
 - **SWPC has two JSON trees with different shapes.** `/json/...` is an array of
   objects; `/products/...` is sometimes that, sometimes an array-of-arrays with
@@ -675,7 +779,7 @@ eyes on the mast and the station should be out of the SatNOGS schedule.
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 277 tests
+.venv/Scripts/python -m pytest              # offline: 300 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
 

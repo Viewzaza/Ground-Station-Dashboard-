@@ -645,3 +645,12 @@ a.tlm-row:focus-visible { outline: 2px solid var(--track); outline-offset: -2px;
   .sw-indices { margin-top: 4px; }
   .sw-plot { min-height: 120px; }
 }
+
+/* The scales row's time base. Quiet, because it qualifies the three cells
+   beside it rather than competing with them — but present, because R/S/G is a
+   24-hour maximum and the Kp beside it is not, and a wall display read from
+   across the room will otherwise take both for "now". */
+.sw-window {
+  font-size: 9px; letter-spacing: .06em; color: var(--ink-4);
+  align-self: center; margin-left: 1px; white-space: nowrap;
+}

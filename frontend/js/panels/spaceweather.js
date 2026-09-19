@@ -29,7 +29,14 @@ const $ = (id) => document.getElementById(id);
    comparison this panel exists to support. It costs the ability to see fine
    structure in a quiet background, which is not information anyone here needs. */
 const FLUX_MIN = 1e-9;
-const FLUX_MAX = 1e-3;
+/* 1e-2 and not 1e-3, which is X10 — the R4 threshold, and a level real flares
+   reach. Clamped there, the largest flare anyone will ever see on this display
+   would flat-line along the top of the plot while the headline beside it read
+   X15: the graph contradicting the number next to it, which is the exact
+   failure the peak-not-mean downsampling exists to prevent, arriving on the
+   one event that matters most. SWPC's own X-ray plot runs to 1e-2. The extra
+   decade costs about 14% of vertical resolution. */
+const FLUX_MAX = 1e-2;
 
 /* The class boundaries, as decade lines with a letter each. A1 is 1e-8. */
 const BANDS = [
@@ -47,6 +54,9 @@ const BANDS = [
    buckets is loose enough to survive one or two missing minutes, which are
    noise, and tight enough to catch a real outage. */
 const GAP_BUCKETS = 3;
+
+/* The window the backend's feed covers, and the domain of the time axis. */
+const WINDOW_MS = 6 * 3600 * 1000;
 
 const LINKS = {
   // Where the bytes come from. Credited first because it is the answer to
@@ -114,7 +124,14 @@ function render() {
   if (hint) {
     const bird = sw.satellite ? `GOES-${sw.satellite}` : 'GOES';
     hint.textContent = `NOAA SWPC · ${bird}${sw.age_s == null ? '' : ` · ${age(sw.age_s)}`}`;
-    hint.title = 'GOES XRS long channel (0.1–0.8 nm), 6 h. Source: NOAA SWPC.';
+    // The age is the newest READING's, not the newest poll's — a successful
+    // fetch of a file whose last half hour is electron-contaminated zeros is a
+    // fresh poll of stale data. The poll age is here too, because the two
+    // together are what distinguish "SWPC is behind" from "we stopped asking".
+    hint.title = 'GOES XRS long channel (0.1–0.8 nm), last 6 h, log scale.\n\n'
+      + 'The age is of the newest usable reading.'
+      + (sw.polled_s == null ? '' : ` SWPC last answered ${age(sw.polled_s)} ago.`)
+      + '\n\nSource: NOAA SWPC.';
   }
   citeLink();
 
@@ -167,8 +184,12 @@ function flareLine(sw) {
   if (flare.in_progress) {
     return `<div class="sw-sub live">${escape(flare.max_class)} flare in progress</div>`;
   }
+  /* With the date, once it is not today's. SWPC keeps serving the last flare
+     event indefinitely — today's ended at 06:06 UTC and was still the "latest"
+     nine hours later — so through a quiet stretch this line can be days old,
+     and a bare "05:36Z" reads as this morning. */
   return `<div class="sw-sub" title="Peaked ${escape(flare.max || '')}">
-            last flare ${escape(flare.max_class)} · ${shortTime(flare.max)}
+            last flare ${escape(flare.max_class)} · ${stamp(flare.max)}
           </div>`;
 }
 
@@ -176,17 +197,40 @@ function flareLine(sw) {
    tooltip. Station 5024 works a 400 MHz UHF downlink from 13.8°N, and the
    honest answer for two of the three is "not much" — saying so is worth more
    than three ominous acronyms that an operator either over-reads or learns to
-   ignore. */
+   ignore.
+
+   Every one of these is a 24-HOUR OBSERVED MAXIMUM, which is SWPC's own label
+   for this row, so each tooltip says so. A G3 at 02:00 UTC still reads G3 at
+   midnight. */
+const MAX_NOTE = '\n\nThis is SWPC\'s 24-hour observed maximum, not the level '
+               + 'right now — it stays up for the rest of the day after an event.';
+
 const SCALE_HELP = {
-  R: 'R — radio blackout, from solar X-ray flares. Hits HF hardest; a 400 MHz '
-   + 'downlink is largely unaffected except during a strong solar radio burst, '
-   + 'which raises the receiver noise floor for minutes.',
+  // R is X-ray peak flux and nothing else. It is worth being exact about that,
+  // because the thing that can actually hurt a UHF link — a metric-wavelength
+  // radio burst — is not what R measures, and an operator who reads R0 as "no
+  // solar radio problem" has read it wrong.
+  R: 'R — radio blackout, graded on solar X-ray peak flux alone. It is an HF '
+   + 'scale: D-region absorption falls off as roughly 1/f², so at 400 MHz even '
+   + 'an X-class flare costs this link a fraction of a dB.\n\nThe UHF hazard a '
+   + 'flare can bring is a 10 cm radio burst, which R does NOT measure. A burst '
+   + 'of a few thousand SFU with the Sun near the antenna boresight is tens of '
+   + 'dB of receiver desense for minutes; the same burst with the Sun well off '
+   + 'boresight is nothing. Sun–satellite separation decides it.' + MAX_NOTE,
   S: 'S — solar radiation storm, from energetic protons. Mostly a spacecraft '
    + 'problem (single-event upsets, degraded solar cells) rather than a link '
-   + 'one at this latitude.',
-  G: 'G — geomagnetic storm, derived from Kp. The one that reaches this '
-   + 'dashboard: thermospheric heating raises drag, so LEO element sets go '
-   + 'stale faster than usual and AOS drifts from the prediction.',
+   + 'one: at 13.8°N and 51.6° inclination neither end sees the polar caps, '
+   + 'where the absorption would be.' + MAX_NOTE,
+  // The drag story is real but slower and smaller than it first looks — see
+  // the README for the arithmetic. What it is NOT is an explanation for a pass
+  // that failed tonight.
+  G: 'G — geomagnetic storm, from Kp. The one that reaches this dashboard, but '
+   + 'on a delay: thermospheric heating raises drag, element sets then age '
+   + 'faster than usual, and AOS drifts. At G1 that is about a second a day — '
+   + 'invisible. It is worth watching from about G3, and mostly for TOMORROW\'s '
+   + 'passes rather than tonight\'s.\n\nIt does not cover equatorial '
+   + 'scintillation, which at this latitude is the likelier ionospheric reason '
+   + 'a pass breaks up — and which happens on quiet days.' + MAX_NOTE,
 };
 
 function scalesRow(sw) {
@@ -203,7 +247,10 @@ function scalesRow(sw) {
     if (key === 'G' && scales.g_from_kp) help += '\n\nDerived from the current Kp, which is more recent than SWPC\'s daily G.';
     return `<span class="sw-scale ${cls}" title="${escape(help)}">${key}${known ? level : '?'}</span>`;
   }).join('');
-  return `<div class="sw-scales">${cells}</div>`;
+  // "24 h" in the row itself, not only in the tooltips. Three scale cells with
+  // no time base beside a Kp that means "now" is the kind of thing a wall
+  // display gets read wrong from across the room.
+  return `<div class="sw-scales">${cells}<span class="sw-window">24 h max</span></div>`;
 }
 
 function indicesRow(sw) {
@@ -211,9 +258,16 @@ function indicesRow(sw) {
   // Kp 5 is NOAA's storm threshold and also roughly where drag starts moving a
   // LEO element set faster than the two-hour TLE refresh can follow.
   const storm = kp !== null && kp !== undefined && kp >= 5;
+  // The G level this Kp is, so the live number and the cell above it are in
+  // the same units and can be compared without doing the mapping in your head.
+  const level = sw.kp_g ? ` G${sw.kp_g}` : '';
+  const kpHelp = 'Planetary K index — SWPC\'s 1-minute running estimate, which '
+               + 'is what their dashboard and spaceweatherlive.com show as the '
+               + 'current Kp. Unlike the scales beside it, this one is NOW.'
+               + (sw.kp_at ? `\n\nFor ${shortTime(sw.kp_at)}.` : '');
   const kpCell = kp === null || kp === undefined
     ? '<span>Kp <b>—</b></span>'
-    : `<span class="${storm ? 'storm' : ''}" title="Planetary K index, 3-hourly${sw.kp_at ? ` · ${shortTime(sw.kp_at)}` : ''}">Kp <b>${kp.toFixed(1)}</b></span>`;
+    : `<span class="${storm ? 'storm' : ''}" title="${escape(kpHelp)}">Kp <b>${kp.toFixed(1)}${level}</b></span>`;
   const f107 = sw.f107 === null || sw.f107 === undefined
     ? '<span>F10.7 <b>—</b></span>'
     : `<span title="10.7 cm solar radio flux, daily, from Penticton">F10.7 <b>${Math.round(sw.f107)}</b></span>`;
@@ -274,10 +328,18 @@ function drawGraph() {
   if (!series.length) return;
 
   // --- the two channels --------------------------------------------------
+  /* The time axis is pinned to the last six hours, not stretched to fit
+     whatever the feed happened to return — the same argument the y decades are
+     pinned for, which was not applied here first time round. After a dropout
+     at the start of the window the series begins late, and scaling it to the
+     full width drew five hours as though they were six, with no axis labels to
+     give it away. The right edge takes whichever is later of now and the last
+     sample, so a browser clock a little behind SWPC cannot push the newest
+     point off the end. */
   const stamps = series.map((p) => Date.parse(p.t));
-  const t0 = stamps[0];
-  const span = Math.max(1, stamps[stamps.length - 1] - t0);
-  const x = (ms) => (ms - t0) / span * plotW;
+  const tEnd = Math.max(Date.now(), stamps[stamps.length - 1]);
+  const tStart = tEnd - WINDOW_MS;
+  const x = (ms) => (ms - tStart) / WINDOW_MS * plotW;
 
   // The backend sends the nominal bucket width so the two cannot disagree
   // about what counts as a gap. Without it, fall back to the median step,
@@ -336,6 +398,23 @@ function age(seconds) {
 
 function flux(value) {
   return (value === null || value === undefined) ? '—' : value.toExponential(1);
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** `14:20Z` if it happened today UTC, `18 Sep 05:36Z` if it did not. */
+function stamp(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const sameDay = d.getUTCFullYear() === now.getUTCFullYear()
+               && d.getUTCMonth() === now.getUTCMonth()
+               && d.getUTCDate() === now.getUTCDate();
+  return sameDay
+    ? shortTime(iso)
+    : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${shortTime(iso)}`;
 }
 
 function shortTime(iso) {
