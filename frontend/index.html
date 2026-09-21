@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KNACKSAT-2 Ground Station</title>
+<link rel="icon" href="assets/favicon.svg">
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/panels.css">
+<link rel="stylesheet" href="css/layout.css">
+<link rel="stylesheet" href="css/cameras.css">
+</head>
+<body>
+
+<div class="wall">
+
+  <!-- ─────────────────────────────── header ─────────────────────────────── -->
+  <header class="hdr" style="grid-area:hdr">
+    <div class="hdr-id">
+      <h1 id="sat-name">KNACKSAT-2</h1>
+      <span class="norad" id="sat-norad">NORAD 67683</span>
+      <span class="station" id="station-name">SatNOGS 5024 · OK03gt</span>
+    </div>
+
+    <div class="hdr-clocks">
+      <div class="clock"><span>UTC</span><b id="clock-utc">--:--:--</b></div>
+      <div class="clock"><span id="clock-local-label">LOCAL</span><b id="clock-local">--:--:--</b></div>
+    </div>
+
+    <div class="hdr-aos">
+      <span id="aos-label">NEXT AOS</span>
+      <b id="aos-countdown">--:--:--</b>
+      <span class="aos-sub" id="aos-detail">awaiting elements</span>
+    </div>
+
+    <div class="hdr-chips" id="chips">
+      <span class="chip" data-chip="api">API</span>
+      <span class="chip" data-chip="cam">CAM</span>
+      <span class="chip" data-chip="rot">ROT</span>
+      <span class="chip" data-chip="tle">TLE</span>
+      <span class="chip" data-chip="satnogs">SATNOGS</span>
+    </div>
+  </header>
+
+  <!-- ─────────────────────────────── 2D map ─────────────────────────────── -->
+  <section class="panel" style="grid-area:map">
+    <h2>Ground track <span class="hint" id="map-hint"></span></h2>
+    <canvas id="map2d" class="fill"></canvas>
+  </section>
+
+  <!-- ─────────────────────────────── cameras ────────────────────────────── -->
+  <!-- One tile, because there is one camera. Station 5024 has a single
+       Hikvision DS-2CD1023G2-LIUF/SL; channels 101 and 102 are its main and sub
+       streams, so showing both filled half the wall with the same picture at
+       two resolutions. The sub stream stays configured and is what the tile
+       falls back to if the main one will not carry. -->
+  <section class="panel cam" style="grid-area:cam">
+    <h2>Camera <span class="hint" id="cam1-state">—</span></h2>
+    <div class="cam-slot" id="cam-slot-0"></div>
+  </section>
+
+  <!-- ─────────────────────────────── 3D globe ───────────────────────────── -->
+  <section class="panel" style="grid-area:globe">
+    <!-- Empty, like #map-hint: globe3d fills this with which surface is on
+         screen within a second, and a hardcoded "3D" is a word the reader has
+         to watch be replaced on every slow first paint. -->
+    <h2>Orbit <span class="hint" id="globe-hint"></span></h2>
+    <div id="globe3d" class="fill globe-host"></div>
+  </section>
+
+  <!-- ─────────────────────────── right-hand column ──────────────────────── -->
+  <!-- Two panels used to sit above these and have moved to the footer: the
+       satellite selector and the 5024 activity feed. Both are about choosing
+       and checking rather than watching, and up here they were squeezing the
+       two that are watched during a pass — the selector had collapsed to its
+       own heading. What is left is the pass and the antenna, which is what
+       this column is for. -->
+  <aside class="track-col" style="grid-area:track">
+
+    <section class="panel">
+      <h2>Next pass</h2>
+      <div id="pass-card" class="pass-card">
+        <p class="muted">no prediction yet</p>
+      </div>
+    </section>
+
+    <section class="panel grow">
+      <h2>Rotator <span class="hint" id="rot-source">—</span></h2>
+      <canvas id="polar" class="polar"></canvas>
+      <div class="rot-readout">
+        <span>AZ <b id="rot-az">—</b></span>
+        <span>EL <b id="rot-el">—</b></span>
+        <span>ERR <b id="rot-err">—</b></span>
+      </div>
+      <div class="rot-control" id="rot-control">
+        <span class="muted">control state unknown</span>
+      </div>
+    </section>
+
+  </aside>
+
+  <!-- ─────────────────────────────── radio ──────────────────────────────── -->
+  <section class="panel" style="grid-area:radio">
+    <h2>Radio <span class="hint" id="radio-hint">—</span></h2>
+    <div id="radio-panel"><p class="muted">awaiting transmitters</p></div>
+  </section>
+
+  <!-- The last pass's signal, cropped out of the SatNOGS waterfall. Kept
+       beside the tuned frequency because they answer the same question from
+       opposite ends: what to listen on, and what was actually heard. -->
+  <section class="panel" style="grid-area:wf">
+    <h2>Last signal <span class="hint" id="waterfall-hint">—</span></h2>
+    <div id="waterfall-panel"><p class="muted">awaiting waterfall</p></div>
+  </section>
+
+  <!-- ──────────────────── decoded frames · grafana ──────────────────────── -->
+  <!-- Two accounts of the same spacecraft, side by side, and they are not
+       equally direct. Grafana shows whatever last reached the team's InfluxDB,
+       which is downstream of everything; the frames are what SatNOGS actually
+       demodulated out of the air. They belong on one line because the leftmost
+       Grafana panel — time since last beacon — is the same question the frame
+       list answers, and the two disagreeing is worth seeing at a glance rather
+       than one above the other. The frames read first, and are first here, so
+       the reading order is the same one the eye takes. -->
+  <footer class="graf" style="grid-area:graf">
+
+    <!-- The age is in the header rather than on a row because it is the one
+         thing here worth reading from across the room: an orbit propagating
+         perfectly and a spacecraft that has been silent for two days look
+         identical everywhere else on this display. -->
+    <section class="tlm" id="tlm-panel">
+      <h2>Decoded frames
+        <b class="tlm-age" id="tlm-age">—</b>
+        <span class="hint" id="tlm-hint">—</span>
+      </h2>
+      <div class="tlm-body" id="tlm-body"><p class="tlm-note">awaiting SatNOGS</p></div>
+    </section>
+
+    <!-- These three are one question asked at three removes, which is why they
+         are now one band rather than scattered up the right-hand column: which
+         spacecraft are we on, what has our station been doing about it, and
+         what came out of the air. They are `fpanel` and not `panel` because a
+         card inside a card draws two borders and means nothing extra — the
+         rule between them is enough. -->
+    <section class="fpanel satpanel">
+      <h2>Satellite</h2>
+      <div class="satselect">
+        <input id="sat-search" type="search" placeholder="search the catalogue…"
+               autocomplete="off" spellcheck="false">
+        <ul id="sat-list" class="sat-list"></ul>
+      </div>
+    </section>
+
+    <section class="fpanel">
+      <h2>SatNOGS 5024</h2>
+      <div id="satnogs-activity"><p class="muted">awaiting SatNOGS</p></div>
+    </section>
+
+    <!-- Wears the same heading as the three beside it, which also buys the
+         embeds the whole column: the "open full" link used to sit next to them
+         and take 72px off the width, which at a quarter of the band was the
+         difference between a readable panel title and a single letter. -->
+    <section class="fpanel graf-top">
+      <h2>Grafana
+        <a class="graf-open" id="graf-open" target="_blank" rel="noopener noreferrer">open full ↗</a>
+      </h2>
+      <div class="graf-strip" id="graf-strip"></div>
+    </section>
+  </footer>
+
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

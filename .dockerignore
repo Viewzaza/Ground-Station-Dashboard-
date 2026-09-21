@@ -1,0 +1,8 @@
+.git
+.env
+.env.*
+deploy/secrets
+backend/data
+**/__pycache__
+.venv
+.pytest_cache
