@@ -105,13 +105,63 @@ one, and a local editable install would break the Docker build context
    dashboard needs the per-item answer to cross-check a run against the
    stations' real calendars afterwards.
 
+10. **`network_client.py`: new `RateLimitedSession` and `RateLimitedError`,
+    wrapped around the session `NetworkClient` builds.** Upstream sends reads
+    at whatever rate the caller asks for, and `http.py` classifies a 429 as an
+    ordinary 4xx — raised at once, `Retry-After` never read. That is survivable
+    for the single-station CLI, which makes a handful of reads per run, and not
+    survivable for the campaign, which reads one calendar per station across
+    the whole catalogue. The Network API publishes its budgets
+    (`DEFAULT_THROTTLE_RATES` in satnogs-network's `network/settings.py`, wired
+    to views in `network/api/throttling.py`): **60 observation-list reads an
+    hour anonymously, 240 with a token, 256 station-list reads an hour**, on
+    the `list` action only, with POST and PUT explicitly exempt. The wrapper
+    counts against those budgets over the same sliding hour the server uses,
+    obeys a 429's `Retry-After` (DRF sends whole seconds) with a small bounded
+    number of retries, and refuses locally — `RateLimitedError`, no request
+    sent — once a budget is spent, rather than earning the 429 to find out.
+
+    It wraps the *session* rather than `http.request()` on purpose:
+    `http.paginate()` fetches later pages by calling `session.request()`
+    itself, so a gate installed any higher would pace the first page of a
+    crawl and none of the rest. This leaves `http.py` untouched.
+
+11. **`campaign.py`: a rate limit stops the run; every other read failure
+    still does not.** `build_campaign` treats a station whose calendar it
+    cannot read as having an empty one — a fair trade for a single flaky
+    station, and the wrong one for a throttle, because the budget is spent for
+    every station still to come. Unchanged, the run would read the entire rest
+    of the catalogue as free and book on top of other people's observations.
+    It now catches `RateLimitedError` separately, records why it stopped in
+    `skipped`, and returns the partial preview. The pre-existing broad
+    `except Exception` fallback is deliberately left as it was.
+
+12. **`campaign.py`: recordings are trimmed to the server's real booking
+    edge.** The edge is on `end`, not on `start`, and it is 2900 minutes, not
+    2890: `check_end_datetime()` in satnogs-network's `network/base/validators.py`
+    refuses anything ending more than `OBSERVATION_DATE_MIN_START +
+    OBSERVATION_DATE_MAX_RANGE` (10 + 2890) minutes from now. A pass rising
+    just inside this module's own 2880-minute horizon may set up to
+    `WINDOW_OVERRUN` (30 minutes) later — at 2910, past the edge — so those
+    bookings were guaranteed rejections. New `WINDOW_HARD_END_MIN = 2899`
+    trims the window instead of dropping the pass, and the existing duration
+    gate then judges what is left. The comments claiming 2890 was the enforced
+    edge, and that the server's duration floor is 180 seconds (upstream
+    `OBSERVATION_DURATION_MIN` defaults to 120), were corrected in place; the
+    conservative 180-second value itself is unchanged.
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this
   vendored copy with a normal dependency (submodule or pinned pip package).
-- Upstream patches 1-6, 8 and 9 above to that repo (7 is dashboard-specific,
-  not upstream material). 8 in particular is a plain bug for any consumer
-  that books on a station it does not own.
+- Upstream patches 1-6, 8, 9, 10 and 12 above to that repo (7 and 11 are
+  campaign-specific, not upstream material). 8 in particular is a plain bug
+  for any consumer that books on a station it does not own, and 10 matters to
+  any consumer that reads more than a few dozen times an hour.
+- `cache.py`'s module docstring still says the SatNOGS APIs are "public and
+  slow rather than rate-limited". That was never quite true and is now
+  actively misleading — see patch 10 for the published rates. Left alone here
+  only because nothing else in that file is being touched.
 - `satnogs-autoscheduler` currently has no LICENSE file. This dashboard is
   MIT. Confirm licensing intent before this vendored copy is redistributed
   beyond this repo (same author/org, so likely fine, but not yet explicit).
