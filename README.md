@@ -1,7 +1,7 @@
 # KNACKSAT-2 Ground Station Dashboard
 
 An operator display for the KNACKSAT-2 ground control station run by **SatNOGS
-station 5024  INSTED-Ground Station (UHF)**, grid OK03gt, 60 m ASL.
+station 5024 — INSTED-Ground Station (UHF)**, grid OK03gt, 60 m ASL.
 
 The camera sits in the centre of the screen, with live satellite tracking to its
 left, the next pass and the antenna to its right, radio and the last pass's
@@ -30,7 +30,7 @@ left running, and reflows down to a phone.
 └───────────────────┴───────────────────┴───────────────────┴──────────────────┘
 ```
 
-Light paper chrome, dark instrument windows  see
+Light paper chrome, dark instrument windows — see
 [Light panel, dark instruments](#light-panel-dark-instruments).
 
 ## Status
@@ -42,15 +42,15 @@ Light paper chrome, dark instrument windows  see
 | Camera tile (go2rtc, WebRTC with MSE/HLS/MJPEG/snapshot fallback) | done, **verified against the real camera** |
 | 2D ground track, footprint, terminator | done |
 | 3D orbit globe (three.js, NASA Blue Marble or drawn coastlines, offline) | done |
-| Radio panel  transmitters and live Doppler from SatNOGS DB | done |
-| "Last signal"  the previous pass's waterfall, cropped and lifted | done |
+| Radio panel — transmitters and live Doppler from SatNOGS DB | done |
+| "Last signal" — the previous pass's waterfall, cropped and lifted | done |
 | Satellite selector, pass prediction, next-pass card | done |
 | Rotator read-out (polar plot, predicted arc, cable wrap) | done, **verified against the real rotctld** |
 | Live WebSocket (rotator, pointing error, status, reconnect) | done |
 | Rotator **control** behind the SatNOGS interlock | done, refusal path verified on site |
 | SatNOGS 5024 activity feed | done |
 | Grafana telemetry strip | done, cut back to one stat's height |
-| Decoded frames  the most recent frames SatNOGS demodulated | done, **no token needed** |
+| Decoded frames — the most recent frames SatNOGS demodulated | done, **no token needed** |
 
 The rotator control path has been exercised against the station's own rotctld
 and correctly **refused** every command, because satnogs-client was connected.
@@ -70,7 +70,7 @@ backend/.venv/Scripts/python tools/dev_server.py
 
 Then open <http://localhost:8000>. The API and the frontend are served from one
 origin, so there is no CORS anywhere. The camera tiles will report the bridge as
-unreachable unless go2rtc is also running  that is a real state the UI is built
+unreachable unless go2rtc is also running — that is a real state the UI is built
 to show, not a failure.
 
 ### With Docker
@@ -90,7 +90,7 @@ docker compose up -d
 ```
 
 Four services: `caddy` (single origin, `tls internal`), `backend`, `video`
-(go2rtc) and `groundstation`  the separate `sgoudelis/ground-station` suite,
+(go2rtc) and `groundstation` — the separate `sgoudelis/ground-station` suite,
 started only with `--profile sdr`.
 
 ### What size VM this wants
@@ -105,7 +105,7 @@ Smaller than it looks, because **this is timer- and I/O-bound, not
 compute-bound**. Measured, not estimated: the backend sits at **81 MB RSS**
 with all six scheduler loops running and 96 satellites loaded, CPU at idle is
 below measurement resolution, and each browser costs **0.6 kB/s** on the
-WebSocket. There is no JPL ephemeris  propagation is SGP4 plus geodesy, so
+WebSocket. There is no JPL ephemeris — propagation is SGP4 plus geodesy, so
 nothing mmaps a 120 MB kernel; `load.timescale()` uses builtin IERS data.
 
 The two real costs, both small:
@@ -118,7 +118,7 @@ The two real costs, both small:
 - **The waterfall.** One **286 ms** single-threaded burst per finished pass
   and ~15 MB transient, of which 84 ms is `find_plot_box()` doing per-pixel
   reads in Python. That is why it runs in `asyncio.to_thread`, and the main
-  reason to prefer 2 vCPU over 1  on one core that burst competes with
+  reason to prefer 2 vCPU over 1 — on one core that burst competes with
   go2rtc.
 
 **Video is passthrough, not transcode.** The camera is H.264 on both channels
@@ -129,7 +129,7 @@ repacketisation of ~8 Mbit/s: a few percent of a core, no ffmpeg.
 gets unexpectedly busy.** When `<video-stream>` produces no frame for 15 s the
 tile polls `/api/cameras/{id}/snapshot.jpg` at 1 Hz, and that path makes go2rtc
 decode H.264 and encode JPEG once a second, indefinitely. A display left stuck
-in fallback  usually a firewall blocking the WebRTC candidate  costs an order
+in fallback — usually a firewall blocking the WebRTC candidate — costs an order
 of magnitude more CPU than a working one. So a networking mistake here shows up
 as a *CPU* problem, and the tile now names the reason it fell back (see
 ["CAMERA DOWN" is usually not the camera](#things-that-are-the-way-they-are-for-a-reason)).
@@ -144,7 +144,7 @@ load-bearing:
   errors in two hours gets the station firewalled. `Scheduler.start()` fetches
   eagerly on every process start, so the on-disk cache is what makes a restart
   cost *zero* requests. `./backend/data:/data` is therefore **the rate
-  limiter, not an optimisation**  never reset it as part of a deploy. N
+  limiter, not an optimisation** — never reset it as part of a deploy. N
   replicas mean N empty caches, N startup fetches and N× the steady rate from
   one source IP.
 - **One writer to rotctld.** rotctld shares a single rotator handle across
@@ -159,16 +159,16 @@ fan-out hub, computing the schedule once regardless of viewer count.
 
 ### Proxmox specifics
 
-- **CPU type `host`**, not `kvm64`  numpy's OpenBLAS dispatches on CPUID, and
+- **CPU type `host`**, not `kvm64` — numpy's OpenBLAS dispatches on CPUID, and
   `kvm64` masks AVX silently. Costs nothing; there is no live-migration
   requirement for a single wall display. 2 vCPU, one socket, NUMA off.
 - **Turn ballooning off** (`balloon: 0`). The footprint is flat and small, so
   ballooning buys nothing, but the balloon driver reclaims page cache under
-  host pressure  and a reclaim stall during a pass is a rotctld read timing
+  host pressure — and a reclaim stall during a pass is a rotctld read timing
   out, which flips the chip to `ROT down` and triggers the poll backoff.
 - **Install qemu-guest-agent.** Without it there is no clean shutdown, so a
   host reboot SIGKILLs the containers and can interrupt the TLE cache write
-  mid-`write_text`. The code survives that  and the cost of surviving it is
+  mid-`write_text`. The code survives that — and the cost of surviving it is
   one unnecessary Celestrak fetch, which is the thing being avoided.
 - **VirtIO SCSI single** with `discard=on`, **VirtIO** network, `onboot=1`.
   Disk speed is irrelevant here: the largest write is a 21 KB JSON every half
@@ -178,7 +178,7 @@ fan-out hub, computing the schedule once regardless of viewer count.
   there is no ARM upside to buy with that risk.
 - Run a real NTP client **in the guest**. Doppler, pass times and the
   `GS_GATE_MAX_STALE_S` staleness gate all read the guest clock, and that gate
-  fails *closed*  a drifting clock presents as rotator control being refused
+  fails *closed* — a drifting clock presents as rotator control being refused
   for no visible reason.
 
 ### Networking is the part that bites
@@ -189,7 +189,7 @@ discovery: rotctld `10.90.36.140:4533`, rigctld `:4534`, camera
 `10.90.36.x` address itself. Docker's bridge handles container→LAN egress
 fine; it cannot invent a route the guest does not have.
 
-Everything outbound still works behind NAT  but **WebRTC does not**, and the
+Everything outbound still works behind NAT — but **WebRTC does not**, and the
 fix is one line. `go2rtc.yaml` ships `candidates: - stun:8555` with a comment
 telling you to replace it, and on this LAN you must:
 
@@ -200,15 +200,15 @@ webrtc:
 ```
 
 `stun:` asks a public server for your external address, which is useless to a
-display on the same subnet and **times out entirely on an isolated LAN**  the
+display on the same subnet and **times out entirely on an isolated LAN** — the
 same failure class as the Google Fonts `<link>` this project refuses for the
 same reason. Open **TCP and UDP 8555** inbound, plus 80/443 for Caddy. If both
 8555 paths are blocked the tile silently degrades to MSE and then to the 1 Hz
 JPEG transcode above.
 
 Caddy's `tls internal` mints its own CA, so install its root on every display
-machine once  `docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt .`
- and **do not delete the `caddy_data` volume**, because recreating it
+machine once — `docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt .`
+— and **do not delete the `caddy_data` volume**, because recreating it
 regenerates the CA and every display starts failing its certificate check.
 
 ### Before you call it deployed
@@ -223,7 +223,7 @@ regenerates the CA and every display starts failing its certificate check.
 - Compose **v2** is required (`profiles:`, the long-form `depends_on`), so
   install from Docker's own apt repo, not distro `docker-compose`.
 - `chmod 600` the `.env` too. The camera password is in it in cleartext, and
-  that is the copy that actually reaches go2rtc  `deploy/secrets/camera_password.txt`
+  that is the copy that actually reaches go2rtc — `deploy/secrets/camera_password.txt`
   must exist for compose to start, but no backend code reads it.
 - `/video/*` is reverse-proxied with no authentication, and go2rtc's config
   holds the camera credentials after env expansion. Fine on a closed LAN;
@@ -252,13 +252,13 @@ running with no browser open, and it is the same schedule the antenna will be
 driven from. The browser runs its own SGP4 (satellite.js) purely for the smooth
 1 Hz render of where the satellite is now.
 
-**Everything the frontend knows comes from `/api/config`**  station
+**Everything the frontend knows comes from `/api/config`** — station
 coordinates, Grafana panel ids, camera stream names, feature flags. Deploying to
 a different station is an `.env` edit.
 
 ## Light panel, dark instruments
 
-This was a dark console  near-black page, cyan accent. It is now a light
+This was a dark console — near-black page, cyan accent. It is now a light
 instrument panel, following the operator's other tool,
 [sattrackslop](https://github.com/colabear101/sattrackslop), so the two read as
 one set of instruments rather than two unrelated pages. `--surface` #f2f4f5 is
@@ -271,9 +271,9 @@ the 3D globe and the waterfall, and it is deliberately not derived from the rest
 of the palette. Space has no light mode: a night rooftop camera, a black globe
 or a spectrogram rendered on a white card reads as a broken image rather than a
 view. So the chrome is paper and the windows into the sky are not. The Grafana
-iframes are the same case  see below.
+iframes are the same case — see below.
 
-**Three data hues, and the same three everywhere**  2D map, 3D globe, polar
+**Three data hues, and the same three everywhere** — 2D map, 3D globe, polar
 plot. `--track` #0086ad is the orbit and the ground track, `--contact` #b4670f
 is happening-now (live values, the in-view arc, the satellite itself), and
 `--observer` #c42a6e is us. Three is the number that survives: they stay far
@@ -282,7 +282,7 @@ fourth is needed. A wall display is read from across a room, by whoever is in
 it.
 
 **The fonts are system stacks, not Google Fonts, on purpose.** The station may
-sit on an isolated LAN, and a webfont `<link>` fails silently  the wall display
+sit on an isolated LAN, and a webfont `<link>` fails silently — the wall display
 would simply be in fallback with nothing to say so. Numbers are monospaced and
 tabular so a changing digit does not shift the ones beside it.
 
@@ -306,9 +306,9 @@ panel answers the question the radio panel cannot: not what to tune to next
 time, but what was actually heard last time.
 
 This is the one thing in the backend that needs an image library, so **Pillow**
-is now in `backend/requirements.txt`. The crop runs in a worker thread  it is
+is now in `backend/requirements.txt`. The crop runs in a worker thread — it is
 CPU-bound on a megapixel image, and on the event loop it would stall every other
-poller  and the PNG is proxied rather than linked, because the source is a
+poller — and the PNG is proxied rather than linked, because the source is a
 1.6 MB S3 object and every wall display would otherwise fetch all of it to show
 a strip.
 
@@ -322,20 +322,20 @@ satellite that has been silent for two days look identical on the map, the
 globe and the polar plot, and "heard 2 h ago" is the only line on this display
 that tells them apart.
 
-It sits on the same line as Grafana because Grafana's leftmost panel  *time
-since last beacon*  is asking exactly the question the frame list answers, and
+It sits on the same line as Grafana because Grafana's leftmost panel — *time
+since last beacon* — is asking exactly the question the frame list answers, and
 the two disagreeing is worth seeing at a glance rather than one above the other.
 
 There are two sources, and the panel says which one it is showing.
 
-**SatNOGS DB `/telemetry/` carries decoded fields**  named scalars a decoder
-produced, `battery_v: 3.92`  and refuses anonymous requests. It is used when
+**SatNOGS DB `/telemetry/` carries decoded fields** — named scalars a decoder
+produced, `battery_v: 3.92` — and refuses anonymous requests. It is used when
 `GS_SATNOGS_DB_TOKEN` is set, because named values beat bytes.
 
 **SatNOGS Network carries the frames themselves, and they are public.** Every
 observation publishes a `demoddata` list of URLs, and those objects come back
 HTTP 200 with no token from the same bucket the waterfalls do. So on a station
-with no token  which is this station  the panel is full rather than empty.
+with no token — which is this station — the panel is full rather than empty.
 What is lost is the decode: these are bytes off the air. What is recovered from
 them is the AX.25 header, which is a published standard rather than a
 per-spacecraft guess, so the row can say *who sent it*: KNACKSAT-2's beacons
@@ -360,14 +360,14 @@ not use better.
 Grafana and the frames are not equally direct: Grafana shows whatever last
 reached the team's InfluxDB, which is downstream of everything, while the frames
 are what SatNOGS demodulated out of the air. The gap is visible on the wall
-right now  Grafana's "time since last beacon" reads 8 hours against the frame
+right now — Grafana's "time since last beacon" reads 8 hours against the frame
 panel's 48 minutes, because they are measuring different things at different
 points in the same pipeline. On one line, that is one glance.
 
 **The satellite selector and the 5024 activity feed moved down here too**, out
 of the right-hand column. That column was carrying four panels and losing: the
 selector had collapsed to its own heading with no list under it. What is left
-up there  the next pass and the rotator  is what is watched *during* a pass,
+up there — the next pass and the rotator — is what is watched *during* a pass,
 and what came down is what is consulted between them.
 
 ## Things that are the way they are for a reason
@@ -391,7 +391,7 @@ Each of these cost time to find. Please read before changing them.
   an ignored filter returns *every* satellite rather than an error, so it looks
   like success until you notice the frequencies belong to other spacecraft. DB,
   which is where transmitters come from, wants `satellite__norad_cat_id`;
-  Network  jobs, observations, and the waterfall's "latest pass" lookup  wants
+  Network — jobs, observations, and the waterfall's "latest pass" lookup — wants
   `norad_cat_id`. The waterfall paid for this lesson a second time, and the
   symptom there is worse, because a strip of someone else's signal still looks
   like a signal. Network pagination is also cursor-based, through the
@@ -401,12 +401,12 @@ Each of these cost time to find. Please read before changing them.
   returns scheduled observations alongside flown ones, newest `start` first,
   and a LEO satellite has far more scheduled than flown. So
   `?norad_cat_id=<n>` comes back as 25 rows of things that have not happened,
-  every one with an empty `demoddata`  which is indistinguishable from a
+  every one with an empty `demoddata` — which is indistinguishable from a
   satellite nobody has ever heard. `status=good` is what makes the page dense:
   21 of 25 rows carried frames against 0 of 25 unfiltered.
 
 - **`demoddata` is not in time order.** One observation's list came back
-  10:28:06, 10:27:36, 10:27:06, 10:31:06  the newest frame was *fourth*.
+  10:28:06, 10:27:36, 10:27:06, 10:31:06 — the newest frame was *fourth*.
   Taking the head of the list as the latest frame therefore usually works and
   occasionally, silently, does not, on the one panel whose whole job is to say
   when the spacecraft was last heard. Every URL is stamped and sorted. The
@@ -418,7 +418,7 @@ Each of these cost time to find. Please read before changing them.
   answers 401 anonymously, and for as long as it was the only source this panel
   had never once had anything on it. The frames were reachable the whole time,
   one API over. A missing token is now a sentence on the panel, not an empty
-  panel  see [Decoded frames](#decoded-frames).
+  panel — see [Decoded frames](#decoded-frames).
 
 - **The AX.25 parser is deliberately strict.** A loose one finds a plausible
   callsign in any sixteen bytes of binary and prints it with exactly the same
@@ -434,22 +434,22 @@ Each of these cost time to find. Please read before changing them.
 
 - **The globe draws its own surface when there is no imagery, and says which
   one it is using.** It was CesiumJS, which is 23 MB fetched by a setup script
-   and because it was fetched rather than committed, a clone that skipped that
+  — and because it was fetched rather than committed, a clone that skipped that
   step showed a black rectangle with no hint why. That is exactly how it was
   found, and it is the rule the globe has been held to since: **it must render
   correctly with nothing downloaded.**
 
   It now does both. `tools/fetch_vendor.sh` fetches NASA Blue Marble
   (public domain, 4096×2048 by default) to `assets/earth-surface.jpg`, which is
-  gitignored and optional; when that file is absent  or wider than the GPU's
-  `MAX_TEXTURE_SIZE`  the sphere's texture is drawn at load time into a canvas
+  gitignored and optional; when that file is absent — or wider than the GPU's
+  `MAX_TEXTURE_SIZE` — the sphere's texture is drawn at load time into a canvas
   from `assets/ne_110m_land.json`, the same public-domain Natural Earth outline
   the 2D map uses, so the 3D and 2D coastlines cannot disagree. The panel's
   heading says `Blue Marble 4096` or `drawn coastlines`, with a tooltip naming
   the missing file and the script that fetches it. That readout is the actual
   fix for the Cesium bug: not "never download anything", but *never be silently
   wrong about what you are looking at*. Nothing is fetched at runtime either
-  way  a station on an isolated LAN skips the script and the panel is still
+  way — a station on an isolated LAN skips the script and the panel is still
   right.
 
 - **A dark palette plus a directional light is a black disc**, and the two
@@ -474,13 +474,13 @@ Each of these cost time to find. Please read before changing them.
   orbit ring looks better in isolation, but this panel sits beside a 2D ground
   track and a polar plot, and all three should answer the same question: where
   is the satellite relative to *our* ground. Earth-fixed makes the 3D and 2D
-  tracks literally the same line. Rendering is on demand  a
+  tracks literally the same line. Rendering is on demand — a
   `requestAnimationFrame` loop spinning a GPU at 60 Hz to move a marker that
   updates at 1 Hz is just heat in a rack that runs for months.
 
 - **`satellite__norad_cat_id` filters the DB API but not the Network API.** The
   two SatNOGS services do not share a convention, and both fail silently in the
-  same direction  an ignored filter returns every satellite rather than an
+  same direction — an ignored filter returns every satellite rather than an
   error. Network wants `norad_cat_id`; DB, which is where transmitters come
   from, wants `satellite__norad_cat_id`.
 
@@ -489,7 +489,7 @@ Each of these cost time to find. Please read before changing them.
   station 5024 is a UHF station: its three Yagis span 380–490 MHz. Taking "the
   first transmitter" would tune the panel to a band the antenna cannot hear, so
   `primary_downlink()` prefers a live transmitter inside the station's band.
-  Both are still shown  the operator is told which one is primary, not denied
+  Both are still shown — the operator is told which one is primary, not denied
   the other.
 
 - **Grafana's "Powered by Grafana" badge can only be covered, not removed.**
@@ -500,18 +500,18 @@ Each of these cost time to find. Please read before changing them.
 
 - **Grafana sends no CORS headers**, so their telemetry cannot be fetched, only
   embedded. Their panels also need `var-DS_INFLUXDB` or they render empty. The
-  embeds work because that instance has anonymous access enabled  if the
+  embeds work because that instance has anonymous access enabled — if the
   KNACKSAT team turns it off, the panels go blank and `GS_GRAFANA_TOKEN` plus a
   backend proxy become necessary.
 
 - **"CAMERA DOWN" is usually not the camera.** The tile had one word for every
-  way of having no picture, and the reason was logged on the server  which is
+  way of having no picture, and the reason was logged on the server — which is
   not where the person looking at the wall is standing. It was asked three
   times in one afternoon what was wrong with the camera; the answer each time
   was that go2rtc was not running. `/api/cameras` now returns a `bridge`
   object and the tile prints it under the badge, because a stopped bridge, a
   `GS_GO2RTC_URL` still pointing at the compose service name `video`, a
-  timeout and an unplugged Hikvision are four different jobs  start a
+  timeout and an unplugged Hikvision are four different jobs — start a
   container, edit an env file, look at the network, walk to the mast. The
   commonest by a distance is the second: running the backend outside Docker
   leaves that default pointing at a hostname with no DNS behind it, so the
@@ -524,7 +524,7 @@ Each of these cost time to find. Please read before changing them.
 
 - **Hamlib prints `Min Azimuth`, not `Minimum Azimuth`.** The caps parser
   originally looked for the long spelling, found nothing, and fell back to its
-  defaults  which are exactly the SPID 901's range, so against the only
+  defaults — which are exactly the SPID 901's range, so against the only
   rotator we had it looked perfect. On any other model the clamp in
   `set_position` would have permitted a position the controller refuses. The
   parser now accepts both spellings and a test asserts a 903's range is read
@@ -534,7 +534,7 @@ Each of these cost time to find. Please read before changing them.
 - **One rotctld socket, process-wide.** rotctld spawns a thread per connection
   with no mutex around the shared rotator handle, so concurrent clients can
   interleave writes mid-frame and corrupt an in-progress track. N browser tabs
-  must produce exactly one connection. Poll at 1 Hz  a 600-baud ROT2PROG
+  must produce exactly one connection. Poll at 1 Hz — a 600-baud ROT2PROG
   cannot sustain 2 Hz.
 
 ## Rotator control
@@ -552,12 +552,12 @@ enabled, is refused unless all four gates pass:
 The station's own `is_connected` flag is used as the signal that satnogs-client
 is running, rather than mounting the Docker socket, so the backend keeps minimal
 privilege. If the reference `ground-station` suite is also deployed, its rotator
-integration must stay disabled  this backend is the single writer.
+integration must stay disabled — this backend is the single writer.
 
 `POST /api/control/{arm,release,goto,park,track,stop}`, and the same commands
 over the WebSocket, all pass through one `ControlService`, so a gate shut to one
 is shut to both. A refusal is a 409 naming the gates, which is what the panel
-renders  an operator who presses GO and nothing happens can see *which* gate
+renders — an operator who presses GO and nothing happens can see *which* gate
 is closed without reading a log.
 
 Three details that are easy to get wrong, and are covered by tests:
@@ -591,7 +591,7 @@ than that it works: each test names the unsafe thing it prevents. That is the
 file to read first if you are changing anything that can move the antenna.
 
 To exercise the real rotctld parser without a rotator, run the fake and point
-the backend at it  this is the code path that will meet the hardware, which
+the backend at it — this is the code path that will meet the hardware, which
 `GS_MOCK=1` does not touch:
 
 ```bash
@@ -605,7 +605,7 @@ python tools/fake_rotctld.py --split-frames      # replies one byte at a time
 `GS_MOCK=1` is the only flag. It selects implementations at construction time,
 so there are no `if mock:` branches in the business logic.
 
-- **Cameras**  `deploy/go2rtc/go2rtc.mock.yaml` declares the *same stream
+- **Cameras** — `deploy/go2rtc/go2rtc.mock.yaml` declares the *same stream
   names* as production, backed by generated video. No frontend or backend code
   differs between the two. Running `tools/dev_server.py` on its own does **not**
   start it, so the tile will say the bridge is unreachable and name the reason:
@@ -617,7 +617,7 @@ so there are no `if mock:` branches in the business logic.
   go2rtc -config deploy/go2rtc/go2rtc.mock.yaml
   GS_GO2RTC_URL=http://127.0.0.1:1984 python tools/dev_server.py
   ```
-- **Rotator**  a simulator driven by the real predictor, so it tracks an actual
+- **Rotator** — a simulator driven by the real predictor, so it tracks an actual
   KNACKSAT-2 pass, crosses 360° into the cable-wrap range and injects link
   faults. `tools/fake_rotctld.py` additionally speaks the real wire protocol, so
   the actual parser can be exercised without hardware.
@@ -632,19 +632,19 @@ re-running them is the way to check whether any of it has changed.
 
 | Question | Answer |
 |---|---|
-| Rotator on 4532 or 4533? | **4533.** 4532 is closed  there is no rigctld at all. |
-| Rotator type | `Rot type: Az-El`  a rotator, not a radio. |
+| Rotator on 4532 or 4533? | **4533.** 4532 is closed — there is no rigctld at all. |
+| Rotator type | `Rot type: Az-El` — a rotator, not a radio. |
 | SPID model 901 or 903? | **901**, `Model name: Rot2Prog`, Mfg `SPID`. |
 | Azimuth / elevation range | −180…540 and −20…210, matching the defaults. |
 | Serial | 600 baud 8N1, 300 ms post-write delay, 400 ms timeout, 3 retries. |
-| Camera H.264 or H.265? | **H.264** on both channels  `profile-level-id=420029`, Baseline 4.1, `packetization-mode=1`. WebRTC carries it with no transcode. |
+| Camera H.264 or H.265? | **H.264** on both channels — `profile-level-id=420029`, Baseline 4.1, `packetization-mode=1`. WebRTC carries it with no transcode. |
 | One camera or two? | **One.** Hikvision DS-2CD1023G2-LIUF/SL, `INSTED-GS_1`, firmware V5.8.4. Channel 101 is 1920×1080, 102 is 640×360. |
 
 Two of those answers changed the code:
 
 - **`Can Park: N`.** The 901 has no park command. Asking for one returns an
   error and the antenna does not move, so park is an ordinary `set_pos` to the
-  configured park coordinates. `Can Move: N` and `Can Reset: N` likewise  only
+  configured park coordinates. `Can Move: N` and `Can Reset: N` likewise — only
   `set_pos` and `stop` are actually available.
 - **There is one camera, not two.** The tiles were labelled "Camera 1" and
   "Camera 2", which implies a redundancy that does not exist: both are views of
@@ -653,7 +653,7 @@ Two of those answers changed the code:
 
 One more thing worth knowing before the rotator is switched on again: with the
 SPID controller powered down, rotctld still answers `dump_caps` from its
-compiled-in capabilities  model, ranges and all  while every `get_pos`
+compiled-in capabilities — model, ranges and all — while every `get_pos`
 returns `RPRT -5` after 2.8–4.6 s of serial retries. So **capabilities being
 readable is not evidence that the rotator is alive.** The dashboard reports
 this state as `ROT down` with the polar plot's antenna marker absent, which is
@@ -662,7 +662,7 @@ off rather than retrying at 1 Hz.
 
 ## Licence
 
-MIT  see `LICENSE`. The `sgoudelis/ground-station` suite referenced in
+MIT — see `LICENSE`. The `sgoudelis/ground-station` suite referenced in
 `docker-compose.yml` is GPL-3.0 and runs as a **separate container**; no code
 from it is present in this repository.
 
@@ -675,6 +675,6 @@ Transmitter data comes from SatNOGS DB at runtime and is cached, not vendored.
 The globe's day/night shading, its atmosphere rim, the GPU texture-ceiling and
 anisotropy checks and the WMS request that gets the imagery are adapted from
 [SattrackSlop](https://github.com/ColaBear101/SattrackSlop) (MIT), the
-operator's other tool  the same one this console's light palette follows. Its
+operator's other tool — the same one this console's light palette follows. Its
 runtime fetching is deliberately *not* adapted: see
 [the globe bullet](#things-that-are-the-way-they-are-for-a-reason).
