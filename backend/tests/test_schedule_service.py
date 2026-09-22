@@ -768,7 +768,14 @@ async def test_next_auto_run_is_none_while_the_timer_is_off(tmp_path):
 
 async def test_next_auto_run_is_a_real_instant_once_enabled(tmp_path):
     svc = make_service(tmp_path, timezone="UTC")
-    await svc.save_config(auto_run_enabled=True, auto_run_times=["06:00"])
+    # The save is dated too, not just the query. auto_run_changed_utc floors
+    # next_auto_run, so a save stamped with the real clock puts the floor above
+    # a fixture-dated answer and the assertion below fails for reasons that
+    # have nothing to do with what it is testing.
+    await svc.save_config(
+        auto_run_enabled=True, auto_run_times=["06:00"],
+        now=datetime(2026, 9, 21, 11, 0, tzinfo=timezone.utc),
+    )
 
     now = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
     nxt = svc.next_auto_run(now=now)
@@ -783,7 +790,10 @@ async def test_next_auto_run_is_a_real_instant_once_enabled(tmp_path):
 async def test_a_fired_slot_is_remembered_across_a_restart(tmp_path):
     """Otherwise a container restart re-runs the slot that just ran."""
     svc = make_service(tmp_path, timezone="UTC")
-    await svc.save_config(auto_run_enabled=True, auto_run_times=["06:00"])
+    await svc.save_config(
+        auto_run_enabled=True, auto_run_times=["06:00"],
+        now=datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc),
+    )
     fired = datetime(2026, 9, 21, 6, 0, tzinfo=timezone.utc)
     await svc.mark_auto_run(fired)
 
