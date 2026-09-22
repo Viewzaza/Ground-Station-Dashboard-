@@ -47,6 +47,7 @@ let settingsOpen = false;
 let networkTokenSet = false;
 let campaignPreviewItems = null;   // the exact items last previewed, so CONFIRM submits what was shown
 let campaignConfigDirty = false;   // invalidates a stale preview if config changes after it
+let lastPreviewCapableStations = null;  // stations the last preview found usable, for the reach hint
 
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
@@ -1134,6 +1135,13 @@ async function loadConfig() {
     const maxTotalInput = document.getElementById('campaign-max-total');
     maxTotalInput.value = cfg.campaign_max_total || 150;
     document.getElementById('campaign-max-total-value').textContent = maxTotalInput.value;
+    const maxPerInput = document.getElementById('campaign-max-per-station');
+    maxPerInput.value = cfg.campaign_max_per_station || 2;
+    document.getElementById('campaign-max-per-station-value').textContent = maxPerInput.value;
+    const autoBox = document.getElementById('campaign-auto-commit');
+    autoBox.checked = !!cfg.campaign_auto_commit_enabled;
+    document.getElementById('campaign-auto-warn').hidden = !autoBox.checked;
+    paintCampaignReach();
     networkTokenSet = !!cfg.network_token_set;
     dbTokenSet = !!cfg.db_token_set;
     updateCampaignGate();
@@ -1640,10 +1648,18 @@ function setMode(mode) {
 function mountCampaign() {
   document.getElementById('campaign-preview-btn').addEventListener('click', runCampaignPreview);
   document.getElementById('campaign-commit-btn').addEventListener('click', confirmCampaign);
+  document.getElementById('campaign-oneclick-btn').addEventListener('click', runCampaignOneClick);
+  document.getElementById('campaign-auto-commit').addEventListener('change', saveCampaignAutoCommit);
   document.getElementById('campaign-cfg-save').addEventListener('click', saveCampaignConfig);
   document.getElementById('campaign-verify-btn').addEventListener('click', verifyCampaign);
+  document.getElementById('campaign-max-per-station').addEventListener('input', (e) => {
+    document.getElementById('campaign-max-per-station-value').textContent = e.target.value;
+    campaignConfigDirty = true;
+    paintCampaignReach();
+  });
   document.getElementById('campaign-max-total').addEventListener('input', (e) => {
     document.getElementById('campaign-max-total-value').textContent = e.target.value;
+    paintCampaignReach();
     campaignConfigDirty = true;
     updateCampaignGate();
   });
@@ -1666,11 +1682,16 @@ async function saveCampaignConfig() {
   const btn = document.getElementById('campaign-cfg-save');
   const status = document.getElementById('campaign-cfg-status');
   const input = document.getElementById('campaign-max-total');
+  const perInput = document.getElementById('campaign-max-per-station');
   const val = input.value.trim();
+  const perVal = perInput.value.trim();
   btn.disabled = true;
   status.textContent = 'saving…';
   try {
-    await api.saveScheduleConfig({ campaign_max_total: val ? parseInt(val, 10) : 0 });
+    await api.saveScheduleConfig({
+      campaign_max_total: val ? parseInt(val, 10) : 0,
+      campaign_max_per_station: perVal ? parseInt(perVal, 10) : 2,
+    });
     campaignConfigDirty = false;
     status.textContent = 'saved';
   } catch (err) {
@@ -1804,6 +1825,14 @@ function renderCampaignPreview(preview) {
   // What CONFIRM actually submits — exactly what was just shown, not a
   // recompute at click time, so what's confirmed is what was reviewed.
   campaignPreviewItems = items;
+  // Stations the run could actually use: those it booked, plus those it looked
+  // at and rejected only because the budget ran out. Stations skipped for
+  // antenna range or no pass are NOT usable and must not inflate the ceiling.
+  const budgetSkipped = (preview.skipped || []).filter(
+    (sk) => typeof sk.reason === 'string' && sk.reason.startsWith('had a free pass'),
+  ).length;
+  lastPreviewCapableStations = new Set(items.map((it) => it.station_id)).size + budgetSkipped;
+  paintCampaignReach();
   campaignConfigDirty = false;
   document.getElementById('campaign-commit-btn').hidden = items.length === 0;
 }
@@ -1933,6 +1962,19 @@ async function confirmCampaign() {
     + 'undone from this dashboard.',
   );
   if (!ok) return;
+  await submitPreviewedItems();
+}
+
+/* The submit half of CONFIRM & SUBMIT, with no prompt of its own.
+
+   Split out so the one-click path can reuse it verbatim instead of growing a
+   second copy of the poll-and-report logic. The prompt lives in the caller,
+   because the two callers ask at different moments: the two-step flow asks
+   after the operator has read the plan, one-click asks before it exists. */
+async function submitPreviewedItems() {
+  if (!campaignPreviewItems || !campaignPreviewItems.length) return;
+  const btn = document.getElementById('campaign-commit-btn');
+  const box = document.getElementById('campaign-preview-result');
 
   btn.disabled = true;
   btn.textContent = 'SUBMITTING…';
@@ -1980,6 +2022,125 @@ async function confirmCampaign() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'CONFIRM & SUBMIT';
+  }
+}
+
+/* The arithmetic the two sliders imply, shown next to them.
+
+   Raising "max bookings / run" on its own does nothing once it exceeds
+   (stations that can hear the transmitter) x (passes / station) - the plan
+   just stops at the lower number. That ceiling is invisible in the UI, and
+   without it an operator who wants 600 reasonably assumes the total slider is
+   the control for that. It is not; passes/station is. */
+function paintCampaignReach() {
+  const hint = document.getElementById('campaign-reach-hint');
+  if (!hint) return;
+  const total = parseInt(document.getElementById('campaign-max-total').value, 10) || 0;
+  const per = parseInt(document.getElementById('campaign-max-per-station').value, 10) || 1;
+  const stationsNeeded = Math.ceil(total / per);
+  // considered_stations from the last preview is the only real measurement of
+  // the network we have here; before one exists we can only state the demand.
+  const reach = lastPreviewCapableStations;
+  let text = `${total} bookings at ${per} per station needs ${stationsNeeded} station(s).`;
+  if (reach != null) {
+    const ceiling = reach * per;
+    text += ceiling < total
+      ? ` Last preview found ${reach} usable — so this run tops out at ${ceiling}.`
+      : ` Last preview found ${reach} usable, enough for this.`;
+  }
+  hint.textContent = text;
+}
+
+/* One press: compute the plan, then submit it.
+
+   The two-step PREVIEW / CONFIRM flow is still there and is still the right
+   one when the plan needs reading. This exists because the preview takes
+   minutes - it walks every candidate station's calendar - and requiring
+   someone to come back afterwards to press a second button is the actual
+   friction, not the clicking.
+
+   It still asks once, and it asks BEFORE the wait rather than after, naming
+   the two numbers that bound what can happen. That ordering is deliberate: a
+   prompt at the end, minutes later, is one an operator has stopped paying
+   attention to. What it cannot name is the exact count, because that does not
+   exist until the preview has run - so it names the ceiling instead and the
+   result is reported when it lands. */
+async function runCampaignOneClick() {
+  const btn = document.getElementById('campaign-oneclick-btn');
+  const box = document.getElementById('campaign-preview-result');
+  const total = parseInt(document.getElementById('campaign-max-total').value, 10) || 0;
+  const per = parseInt(document.getElementById('campaign-max-per-station').value, 10) || 1;
+
+  const ok = window.confirm(
+    `Book up to ${total} observation(s), at most ${per} per station, on community `
+    + 'stations via SatNOGS Network?\n\n'
+    + 'This computes the plan and then SUBMITS IT AUTOMATICALLY — you will not be '
+    + 'asked again. These are other operators\' ground stations, and accepted '
+    + 'bookings cannot be undone from this dashboard.\n\n'
+    + 'Use PREVIEW instead if you want to read the plan first.',
+  );
+  if (!ok) return;
+
+  btn.disabled = true;
+  btn.textContent = 'PLANNING…';
+  try {
+    await runCampaignPreview();
+    if (!campaignPreviewItems || !campaignPreviewItems.length) {
+      // A preview that found nothing is a normal outcome, not a failure, and
+      // submitting it would be a no-op that still writes a run record.
+      box.prepend(note('Nothing to book — the preview found no free passes. Nothing was submitted.'));
+      announceCampaign('One-click finished: nothing to book.');
+      return;
+    }
+    const stations = new Set(campaignPreviewItems.map((it) => it.station_id)).size;
+    btn.textContent = `SUBMITTING ${campaignPreviewItems.length}…`;
+    announceCampaign(
+      `Plan ready: ${campaignPreviewItems.length} booking(s) on ${stations} station(s). Submitting.`);
+    await submitPreviewedItems();
+  } catch (err) {
+    console.error('[schedule] one-click campaign', err);
+    box.prepend(alertNote(`One-click run failed: ${err}`, 'error'));
+    announceCampaign(`One-click run failed: ${err}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'BOOK WORLDWIDE — ONE CLICK';
+  }
+}
+
+/* The unattended switch. Saved immediately rather than behind the SAVE button
+   next to the sliders, because a checkbox that looks set but is not saved is
+   exactly the wrong failure mode for "book without asking" - and because the
+   two belong to different decisions. */
+async function saveCampaignAutoCommit() {
+  const box = document.getElementById('campaign-auto-commit');
+  const status = document.getElementById('campaign-auto-status');
+  const warn = document.getElementById('campaign-auto-warn');
+  const want = box.checked;
+
+  if (want) {
+    const ok = window.confirm(
+      'Let the campaign book automatically, with nobody watching?\n\n'
+      + 'Every cycle will submit real bookings to other operators\' stations. No '
+      + 'plan is shown to anyone first, and nothing asks for confirmation.',
+    );
+    if (!ok) { box.checked = false; return; }
+  }
+
+  box.disabled = true;
+  status.textContent = 'saving…';
+  try {
+    await api.saveScheduleConfig({ campaign_auto_commit_enabled: want });
+    status.textContent = want ? 'automatic booking ON' : 'automatic booking off';
+    warn.hidden = !want;
+  } catch (err) {
+    // Put the control back to what the backend still believes, so the UI never
+    // claims a setting that did not land.
+    box.checked = !want;
+    warn.hidden = !box.checked;
+    status.textContent = `failed: ${err}`;
+  } finally {
+    box.disabled = false;
+    setTimeout(() => { status.textContent = ''; }, 4000);
   }
 }
 
