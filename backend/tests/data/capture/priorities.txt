@@ -1,0 +1,41 @@
+# Priority file used ONLY to capture ../schedule_dry_run.log.
+# It is not station 5024's real priority list.
+#
+# Format is upstream's (auto_scheduler/io.py:read_priorities_transmitters):
+#   NORAD priority transmitter_uuid
+# single-space separated, '#' starts a comment.
+#
+# Note: the NORAD here must NOT be zero-padded. Upstream matches it as a string
+# against str(tle["norad_cat_id"]), so "07530" would silently never match even
+# though the summary table prints that same satellite as "07530".
+#
+# Every (NORAD, uuid) pair below is taken verbatim from upstream's own fixtures
+# (tests/fixtures/transmitters_receivable.json + transmitters_stats.json) and
+# was confirmed by ./probe_select.py to yield passes in the capture window.
+# They are chosen to exercise the summary table's edge cases:
+
+# 4-digit NORAD -> printed zero-padded as "07530"; name has parentheses
+7530 1.0 epmfL93RZ2Vf5WKK4X2auf
+# name has parentheses
+27848 0.95 2uGo77ULzByLLyshanpctH
+# name has a hyphen and parentheses
+36122 0.9 AEzrojCTbvAeZRDtPmqitc
+# name has an ampersand and several spaces
+44909 0.85 6khJGrSmppmokPfTMaq6Ms
+# name has an ampersand
+37855 0.8 RHwhZR7PW4heGkuudpbLxa
+# name has parentheses
+54361 0.75 hTEh8efZL9LzC6ZaREXBqP
+# name has parentheses
+22826 0.7 QGvTCQfY3a4iLd7vrKxxjf
+# SatNOGS temporary NORAD id (99xxx range)
+99482 0.65 BR4gexbnbBzSuzY4bzr4Q9
+# name has parentheses
+20439 0.6 6hZFcJypsM4H7zY6rExLXd
+# name contains a slash and a dot: "NLS 7.2/CANX 5"
+40056 0.55 E6m7ov6W37ttWcVhQwidfJ
+# Taken from upstream's tests/prios1.txt. Deliberately left unmatched: this
+# transmitter is not in this station's candidate set, so no pass is ever
+# selected for it and upstream says nothing about that. It is what
+# autoscheduler_cli.missing_priority_notices() exists to catch.
+43017 1.0 KgazZMKEa74VnquqXLwAvD

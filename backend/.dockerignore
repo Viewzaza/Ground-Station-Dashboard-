@@ -1,0 +1,10 @@
+# docker-compose.yml builds ./backend as its own context, so Docker reads THIS
+# file for the backend image — the repo-root .dockerignore is never consulted
+# for it. Without this file the whole directory is uploaded on every build,
+# including the 136 MB .venv and, worse, data-dev/schedule_config.json, which
+# holds the operator's SatNOGS tokens in plaintext.
+.venv
+data
+data-dev
+**/__pycache__
+.pytest_cache

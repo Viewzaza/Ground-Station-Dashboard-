@@ -370,9 +370,128 @@ selector had collapsed to its own heading with no list under it. What is left
 up there  the next pass and the rotator  is what is watched *during* a pass,
 and what came down is what is consulted between them.
 
+## Station Schedule
+
+The Station Schedule tab plans **and books** station 5024's own observations.
+It does that by running the Libre Space Foundation's official
+[`satnogs-auto-scheduler`](https://gitlab.com/librespacefoundation/satnogs/satnogs-auto-scheduler)
+as a **separate process** — the same `schedule_single_station` that had been
+booking this station's passes from a PowerShell script — and reporting what
+that tool actually did.
+
+There are two schedulers in this repository and they do different jobs:
+
+| | what runs it | what it does |
+|---|---|---|
+| `satnogs-auto-scheduler` (pip, AGPL) | `services/autoscheduler_cli.py`, as a child process | plans and **books** this station |
+| the vendored `autoscheduler` package | imported directly | Network Campaign, priority enrichment, the transmitter picker |
+
+**Why a subprocess and not an import.** Three reasons, all load-bearing. It is
+AGPL-3.0 and this repo is MIT, so invoking it as its own process keeps the two
+an aggregation rather than a derived work — the same posture taken toward the
+GPL-3.0 ground-station container. It is a CLI, not a library: `main()` calls
+`sys.exit()` on every error path and reconfigures the root logger, neither of
+which belongs inside a web server. And its summary table is written to
+**stderr** via `logging.info`, so the wrapper merges stderr into stdout and
+reads the transcript back — there is no return value to import.
+
+**Both SatNOGS tokens are required, even for a dry run.** The tool's
+`settings.validate_config()` runs unconditionally before it ever looks at
+`--dryrun`, and it demands `SATNOGS_API_TOKEN` (Network) *and*
+`SATNOGS_DB_API_TOKEN` (DB), each exactly 40 lowercase hex characters. The DB
+token alone used to be enough for this tab. Both run buttons are disabled until
+both are set, and the hint says why — a disabled DRY RUN reads as a bug
+otherwise. Both are entered in the panel's ⚙ popover and are stored, in
+plaintext, in `schedule_config.json` under `GS_DATA_DIR`; treat that file as a
+secret.
+
+**DRY RUN vs RUN NOW.** DRY RUN passes `-n` and books nothing. RUN NOW books,
+so it arms on the first click and fires on the second. The confirmation says
+plainly that the run **recomputes from scratch** and may select a different set
+than the preview showed: there is no "book exactly this list" path through the
+CLI, so preview and commit are two independent runs. What actually landed is
+established afterwards by reading the station's calendar back from SatNOGS
+Network and matching on NORAD and start time to within 90 s — `booked_state` is
+one of `dry_run`, `confirmed`, `partial`, `unconfirmed` or `failed`.
+
+**Auto run** fires the same thing on a timer, either at fixed times of day in
+`GS_TIMEZONE` or on an interval. It ships **disabled** *and* **dry-run-only** —
+two deliberate switches before anything books unattended, mirroring
+`campaign_auto_commit_enabled`. Editing it takes effect immediately: the loop
+waits on a config-change event rather than a bare sleep, so there is no restart
+API to call. The loop no longer runs eagerly at boot, because with booking
+enabled a crash loop would book repeatedly; a slot missed while the backend was
+down is covered by a 30-minute catch-up grace window instead, and a slot missed
+by more than that is skipped rather than booked late.
+
+**The priority file is a strict three-column format** and that is the whole
+contract, because the official tool parses it with `csv.reader(delimiter=" ")`
+and throws away any line that is not exactly three fields:
+
+```
+67683 1.000 UatCXtfDnoBPeVBGHgj4Bc
+```
+
+Single spaces, never aligned columns, never a tab, never a fourth column, and
+NORAD ids written bare — the reader matches them as *strings*, so a padded
+`067683` silently matches nothing. This dashboard used to write a fourth
+`manual` column and a `-` placeholder; fed to the official tool, a file of
+those parses to **nothing at all**, and under `-f` that is a run which books
+nothing and exits 0 looking healthy. `_migrate_priority_files()` rewrites any
+such file once on startup, keeping a `.bak`. A row's Auto/Manual mode and any
+row with no transmitter pinned live in a `<slug>.meta.json` sidecar, since
+neither fits in three columns; unpinned rows get a transmitter chosen at run
+time. `GET /api/schedule/priorities/export` hands back the exact bytes the
+scheduler reads, droppable straight into an existing `-P` command line.
+
+**Mocking is a separate switch from booking.** `GS_SCHEDULE_MOCK` decides
+whether a run *starts* the tool at all; DRY RUN vs RUN NOW decides whether that
+run *books*. They are independent, and conflating them is how a dashboard ends
+up claiming a booking it never made. Blank follows `GS_MOCK`; set it to `0` to
+run the real scheduler while the rotator and cameras stay simulated — which is
+what you want on this station, because `GS_MOCK=0` would also open a live
+connection to the rotator. A simulated run reports `booked_state: "mock"` and
+says so on the run itself: it returns before anything is spawned, so nothing
+reaches SatNOGS however the buttons were pressed. If `GET /api/schedule/config`
+says `cli_version: "NOT INSTALLED - rebuild the backend image"`, the container
+predates the dependency and no real run can work until it is rebuilt.
+
+**The first run on a cold cache takes minutes,** not seconds — the tool
+refetches every transmitter's statistics and says so itself. The cache lives
+under `GS_DATA_DIR` so it survives restarts. Two timeouts bound a run
+(`GS_SCHEDULE_TIMEOUT_S`, and `GS_SCHEDULE_IDLE_TIMEOUT_S` for no output at
+all); the latter exists because the tool's booking POST carries no timeout of
+its own. If a run is killed after `Scheduling all unscheduled passes listed
+above.`, observations may exist server-side for a run we believe failed — which
+is exactly why the reconciliation step above is not optional.
+
+**The raw transcript** of the last run is at
+`backend/data/schedule_last_run.log` (rotated once to `.log.prev`), and the
+panel's `Raw output ▾` disclosure shows its tail. When a run does something
+surprising, that file is where the answer is.
+
 ## Things that are the way they are for a reason
 
 Each of these cost time to find. Please read before changing them.
+
+- **`-f` on the auto-scheduler reads backwards, and it is correct.** Upstream
+  declares it `action="store_false"` on top of `set_defaults(only_priority=True)`,
+  so passing `-f` sets `only_priority=False` — and the branch that flag gates,
+  in `utils.get_priority_passes`, is `elif only_priority:`, the one that appends
+  **non**-priority passes. The two inversions cancel: `-f` does restrict the run
+  to the priority file, exactly as its help text claims. Anyone reading
+  `store_false` alone will "fix" `build_argv` backwards and either book nothing
+  or book the station's entire receivable catalogue. There is a test pinning it.
+
+- **The scheduler subprocess is launched with a pre-seeded root logger, and the
+  `level=` in it is not decoration.** `logging.basicConfig` is a no-op once the
+  root logger has handlers, which is what lets `autoscheduler_cli._BOOTSTRAP`
+  install a format carrying severity before the tool installs its own bare
+  `"%(message)s"`. But `basicConfig` sets the root *level* inside that same
+  `if not root.handlers` guard — so pre-seeding without a level leaves the root
+  logger at its default WARNING and the tool's entire summary table, every line
+  of which is `logging.info`, is silently dropped. The run then exits 0 having
+  printed almost nothing. Do not remove `level=logging.INFO` from that string.
 
 - **Celestrak enforces its fetch etiquette.** Repeating a download before the
   data has changed returns HTTP 403, and 50 errors in two hours puts your IP in
@@ -582,9 +701,34 @@ eyes on the mast and the station should be out of the SatNOGS schedule.
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 204 tests
+.venv/Scripts/python -m pytest              # offline: 399 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
+
+(Paths are the operator's Windows box; on the Linux server it is
+`.venv/bin/python`.)
+
+`tests/test_schedule_cli_network.py` is the only test that proves the backend
+image actually built: it spawns the real `satnogs-auto-scheduler` and checks
+the pinned version. It needs the package installed, so run it inside the image
+rather than on a dev box:
+
+```bash
+docker compose build backend
+docker run --rm -v "$PWD/backend/tests:/app/tests:ro" \
+  -v "$PWD/backend/pytest.ini:/app/pytest.ini:ro" \
+  --entrypoint sh ground-station-dashboard-backend:latest \
+  -c 'pip install -q pytest pytest-asyncio && python -m pytest -m network'
+```
+
+Its live-API test skips unless both SatNOGS tokens are in the environment; the
+two that verify the install do not.
+
+`tests/data/schedule_dry_run.log` is a real transcript from the real scheduler
+binary run against a stubbed SatNOGS on loopback with `--network=none` — real
+tool and real formatting, invented data. It is what the parser tests are
+written against, deliberately, so they cannot encode a misreading of a format
+nobody checked. `tests/data/README.md` says exactly how it was made.
 
 Most of `tests/test_control.py` exists to prove the interlock refuses rather
 than that it works: each test names the unsafe thing it prevents. That is the
@@ -665,6 +809,14 @@ off rather than retrying at 1 Hz.
 MIT  see `LICENSE`. The `sgoudelis/ground-station` suite referenced in
 `docker-compose.yml` is GPL-3.0 and runs as a **separate container**; no code
 from it is present in this repository.
+
+`satnogs-auto-scheduler` (AGPL-3.0-or-later) is a pip dependency of the backend
+image and is invoked as a **separate process**, never imported  see
+[Station Schedule](#station-schedule) for why that boundary is deliberate. No
+code from it is present in this repository either. Note this is a different
+project from the `autoscheduler` package vendored under
+`backend/app/vendor/`, which is the operator's own and is documented in
+`VENDORED.md`.
 
 Coastlines are Natural Earth (public domain). three.js is MIT and is fetched by
 `tools/fetch_vendor.sh` (with its licence) rather than committed. The globe's

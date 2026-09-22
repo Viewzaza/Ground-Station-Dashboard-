@@ -1,14 +1,26 @@
 """Priority files and the station-local scarcity signal.
 
 The file format matches the official satnogs-auto-scheduler so an existing
-priorities file drops straight in:
+priorities file drops straight in, and so one we write drops straight back out:
 
-    # norad_id  weight  transmitter_uuid
-    67683       1.0     UatCXtfDnoBPeVBGHgj4Bc
-    98332       0.8
+    # norad_id weight transmitter_uuid
+    67683 1.000 UatCXtfDnoBPeVBGHgj4Bc
 
-``weight`` runs 0.0 to 1.0. The transmitter UUID is optional - leave it off and
-we pick the satellite's best available transmitter ourselves.
+``weight`` runs 0.0 to 1.0.
+
+Note the asymmetry between the two halves of this module, which is deliberate
+and is what makes the round trip safe:
+
+  * ``write_priority_file`` is STRICT. Exactly three single-space-separated
+    fields per line, because that is all the official reader accepts.
+  * ``parse_priority_file`` is TOLERANT. It still reads 1, 2, 3 and 4 field
+    lines and runs of whitespace, so every file ever written by an older
+    version of this dashboard - or by hand - keeps loading.
+
+A row with no transmitter UUID cannot be expressed in three fields at all.
+Those rows live in ``ScheduleService``'s ``.meta.json`` sidecar alongside the
+list, together with each row's Auto/Manual ``mode``, and get a transmitter
+resolved for them at run time.
 """
 
 from __future__ import annotations
@@ -36,7 +48,9 @@ class Priority:
     # list order (e.g. on a drag-reorder). "manual": the operator pinned this
     # exact weight and it must survive reorders elsewhere in the list. The
     # scheduler itself only ever reads `weight` - this flag is dashboard-side
-    # bookkeeping, round-tripped through the file so it survives a reload.
+    # bookkeeping. It used to be a 4th column in the file, which silently cost
+    # the official reader the whole line; it now round-trips through
+    # ScheduleService's .meta.json sidecar instead.
     mode: str = "auto"
 
 
@@ -49,13 +63,18 @@ def parse_priority_file(path: Path) -> dict[int, Priority]:
     Splitting on runs of whitespace accepts every file that reader accepts,
     and some it does not.
 
-    A 4th field is a local addition: "manual" marks a weight the dashboard
-    must not overwrite on reorder (see `Priority.mode`). It is optional and
-    backward-compatible - a plain 2-3 field line (everything written before
-    this addition, and everything the official tool writes) still parses
-    exactly as before, defaulting to "auto". A literal "-" in the 3rd column
-    means "no transmitter, but a mode follows in the 4th" - written by
-    write_priority_file() only when needed to keep the columns positional.
+    This tolerance is not laziness, it is the backward-compatibility path: the
+    writer is strict, the reader is not, so every file the dashboard has ever
+    written still loads. In particular it still accepts the two shapes this
+    module no longer writes - a 4th "manual" field, and a literal "-" standing
+    in for an absent transmitter - so a file written before the sidecar existed
+    keeps its Auto/Manual flags on first read. ``_migrate_priority_files()``
+    then harvests them into the sidecar once.
+
+    A 1-field line (a bare NORAD) is also accepted, and defaults its weight to
+    1.0 - the MAXIMUM. That is upstream's behaviour and is kept for
+    compatibility, but it means a stray number on its own line becomes the
+    highest-priority satellite in the list rather than an inert typo.
     """
     priorities: dict[int, Priority] = {}
     if not path.is_file():
@@ -90,39 +109,76 @@ def parse_priority_file(path: Path) -> dict[int, Priority]:
 
 
 def write_priority_file(path: Path, entries: list[Priority]) -> None:
-    """Serialize entries back to the on-disk format, one per line, in order.
+    """Serialize entries to the format the OFFICIAL satnogs-auto-scheduler reads.
 
-    Local addition (not in the upstream CLI, which only ever seeds a fresh
-    file from history via ``generate_priority_file`` and would discard
-    existing weights/UUIDs). This is what lets the dashboard round-trip an
-    edited priority list back to the file the scheduler itself reads.
+    Local addition (not in the upstream CLI, which only ever seeds a fresh file
+    from history via ``generate_priority_file`` and would discard existing
+    weights/UUIDs). This is what lets the dashboard round-trip an edited
+    priority list back to the file the scheduler itself reads.
 
-    A "manual"-mode entry always writes all 4 fields (using "-" as the
-    transmitter placeholder if none is set) so the mode stays positional; an
-    "auto" entry (the common case) writes only 2-3 fields, exactly as before
-    this field existed, keeping the file identical to what the official tool
-    itself would write for the same data.
+    Every data line is exactly three single-space-separated fields::
+
+        67683 1.000 UatCXtfDnoBPeVBGHgj4Bc
+
+    That shape is not a style choice, it is the whole contract. The official
+    reader parses with ``csv.reader(delimiter=" ")`` and discards any line that
+    does not yield exactly three fields, so all of these lose the satellite:
+
+      * a 4th column (this writer used to emit ``manual`` there - four fields),
+      * a 2-field line with no UUID,
+      * any run of two or more spaces, because ``csv`` emits an empty field
+        between repeated delimiters - so no column alignment, ever,
+      * a tab anywhere, which is not the delimiter at all, so the line
+        collapses to one field.
+
+    The drop is not silent - it logs a warning per line - but under ``-f``
+    ("only priority") a dropped line means that satellite is simply never
+    scheduled, and the run still exits 0 looking perfectly healthy.
+
+    NORAD ids are written bare (``str(int(...))``) because the official reader
+    matches them as strings against ``str(tle["norad_cat_id"])``. A zero-padded
+    ``067683`` compares unequal to ``67683`` and never matches anything.
+
+    An entry with no transmitter UUID is NOT written: there is no three-field
+    way to say "no UUID". Those rows are not lost - ``ScheduleService`` keeps
+    the full list, unpinned rows included, in a ``.meta.json`` sidecar and
+    resolves a transmitter for them at run time. This file is the projection of
+    that list which the scheduler can actually read.
+
+    ``mode`` is deliberately NOT written any more (it used to be a 4th column).
+    It lives in the sidecar now, for the reason above.
 
     Atomic write, matching the tmp-write + ``Path.replace()`` pattern
     ``cache.py`` uses, so a crash mid-write cannot truncate the file the next
     scheduler run depends on.
     """
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(render_priority_file(entries), encoding="utf-8")
+    tmp.replace(path)
+
+
+def render_priority_file(entries: list[Priority]) -> str:
+    """The exact text ``write_priority_file`` would write.
+
+    Split out so the dashboard's export endpoint can hand the operator the same
+    bytes the scheduler reads without going through a file, which keeps one
+    definition of the format rather than two that can drift.
+    """
     lines = [
         "# Edited from the Station Schedule dashboard panel.",
-        "# Format: norad_id  weight(0.0-1.0)  [transmitter_uuid|-]  [manual]",
+        "# Format: norad_id weight(0.0-1.0) transmitter_uuid - exactly 3 fields,",
+        "# single spaces. Comment and blank lines are ignored by the scheduler.",
         "",
     ]
     for entry in entries:
-        fields = [str(entry.norad_cat_id), f"{entry.weight:.3f}"]
-        if entry.mode == "manual":
-            fields.append(entry.transmitter_uuid or "-")
-            fields.append("manual")
-        elif entry.transmitter_uuid:
-            fields.append(entry.transmitter_uuid)
-        lines.append(" ".join(fields))
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    tmp.replace(path)
+        if not entry.transmitter_uuid:
+            # Nothing sensible to write: a 2-field line would be dropped by the
+            # official reader anyway. The sidecar keeps this row.
+            continue
+        lines.append(
+            f"{int(entry.norad_cat_id)} {entry.weight:.3f} {entry.transmitter_uuid}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 # -- validation ------------------------------------------------------------

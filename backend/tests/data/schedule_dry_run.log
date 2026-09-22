@@ -1,0 +1,74 @@
+INFO	root	Update satellites, transmitters and TLEs:
+INFO	auto_scheduler.cache	Download satellite information from SatNOGS DB...
+INFO	root	Download list of active transmitters between 430 and 470 MHz from SatNOGS DB...
+INFO	root	Download TLEs from SatNOGS DB...
+INFO	root	Download transmitter statistics from SatNOGS Network (this will take some minutes)...
+INFO	root	Filter transmitters based on ground station capability.
+INFO	root	Download list of scheduled passes from SatNOGS Network...
+INFO	root	Found 4 scheduled passes between 2023-02-18 09:00:00+00:00 and 2023-02-19 09:00:00+00:00 on ground station 5024.
+INFO	root	Search passes for 566 transmitters across 311 satellites:
+WARNING	root	No TLE found for transmitter 2hYYa7gN4cmDnWMvze5vRH on NORAD 99206, skipping.
+WARNING	root	No TLE found for transmitter 9KeB2ZXuBaUMjcK6TtvUdh on NORAD 40968, skipping.
+WARNING	root	No TLE found for transmitter McBbSKoN6uRrjWTvgG93xV on NORAD 39464, skipping.
+WARNING	root	No TLE found for transmitter RmdkHfeNPpsn6UgUwzKviU on NORAD 99237, skipping.
+WARNING	root	No TLE found for transmitter SS8KEnn5kybpucSo4qhPdA on NORAD 38761, skipping.
+WARNING	root	No TLE found for transmitter V5w2y4795oxP4wjhhHbZHb on NORAD 38760, skipping.
+WARNING	root	No TLE found for transmitter Vjhcn2x7HgsD4FpYa94GAy on NORAD 38763, skipping.
+WARNING	root	No TLE found for transmitter hYZXBJPxFQfA52fEh64JQb on NORAD 99203, skipping.
+WARNING	root	No TLE found for transmitter n2y5vW2xJ6zi6ibfcHAdKG on NORAD 39471, skipping.
+WARNING	root	No TLE found for transmitter uFLHu8MEJU5LJqjkVSHs2G on NORAD 37224, skipping.
+INFO	root	47 passes selected out of 2653, 27983 s out of 86400 s at 32.388% efficiency
+INFO	root	  GS | Sch | NORAD | Start time          | End time            | Duration | AzR El AzS | Priority | Transmitter UUID       | Mode        | Freq   | Satellite name
+INFO	root	                                                                                                                                         | misuse | 
+INFO	root	5024 | N   | 07530 | 2023-02-18T09:00:00 | 2023-02-18T09:03:52 |  0:03:52 | 325 12 301 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | N   | 37855 | 2023-02-18T09:04:57 | 2023-02-18T09:13:03 |  0:08:05 | 157 87 340 | 0.800000 | RHwhZR7PW4heGkuudpbLxa | BPSK        | N      | M-CUBED & EXP-1 PRIME
+INFO	root	5024 | N   | 27848 | 2023-02-18T09:18:08 | 2023-02-18T09:22:12 |  0:04:04 | 342  6 304 | 0.950000 | 2uGo77ULzByLLyshanpctH | AFSK        | N      | CUBESAT XI-IV (CO-57)
+INFO	root	5024 | N   | 22826 | 2023-02-18T09:44:39 | 2023-02-18T09:55:43 |  0:11:03 |   4 27 239 | 0.700000 | QGvTCQfY3a4iLd7vrKxxjf | BPSK        | N      | ITAMSAT (IO-26)
+INFO	root	5024 | N   | 07530 | 2023-02-18T10:41:36 | 2023-02-18T10:52:28 |  0:10:51 |  44 12 334 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | Y   | 25544 | 2023-02-18T11:05:00 | 2023-02-18T11:17:30 |  0:12:30 |   0  0   0 | 1.000000 | eozSf5mKyzNxoascs8V4bV |             | N      | ISS
+INFO	root	5024 | N   | 22826 | 2023-02-18T11:26:24 | 2023-02-18T11:29:36 |  0:03:11 | 338  6 308 | 0.700000 | QGvTCQfY3a4iLd7vrKxxjf | BPSK        | N      | ITAMSAT (IO-26)
+INFO	root	5024 | N   | 99482 | 2023-02-18T12:08:29 | 2023-02-18T12:13:58 |  0:05:29 | 342 10 269 | 0.650000 | BR4gexbnbBzSuzY4bzr4Q9 | SSTV        | N      | HADES
+INFO	root	5024 | N   | 54361 | 2023-02-18T12:14:19 | 2023-02-18T12:26:17 |  0:11:57 |  16 83 194 | 0.750000 | hTEh8efZL9LzC6ZaREXBqP | FM          | N      | EOS-6 (OCEANSAT-3)
+INFO	root	5024 | N   | 07530 | 2023-02-18T12:29:06 | 2023-02-18T12:44:25 |  0:15:18 |  89 22 343 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | N   | 20439 | 2023-02-18T13:05:42 | 2023-02-18T13:12:37 |  0:06:54 |  78 10  10 | 0.600000 | 6hZFcJypsM4H7zY6rExLXd | BPSK        | N      | OSCAR 16 (PACSAT)
+INFO	root	5024 | N   | 54361 | 2023-02-18T13:53:23 | 2023-02-18T14:02:55 |  0:09:32 | 358 19 251 | 0.750000 | hTEh8efZL9LzC6ZaREXBqP | FM          | N      | EOS-6 (OCEANSAT-3)
+INFO	root	5024 | N   | 27848 | 2023-02-18T14:09:18 | 2023-02-18T14:13:31 |  0:04:12 |  57  7  18 | 0.950000 | 2uGo77ULzByLLyshanpctH | AFSK        | N      | CUBESAT XI-IV (CO-57)
+INFO	root	5024 | N   | 07530 | 2023-02-18T14:18:31 | 2023-02-18T14:37:29 |  0:18:57 | 138 61 342 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | N   | 20439 | 2023-02-18T14:41:14 | 2023-02-18T14:53:13 |  0:11:58 | 138 43 351 | 0.600000 | 6hZFcJypsM4H7zY6rExLXd | BPSK        | N      | OSCAR 16 (PACSAT)
+INFO	root	5024 | N   | 40056 | 2023-02-18T15:26:35 | 2023-02-18T15:33:49 |  0:07:13 |  44 12 127 | 0.550000 | E6m7ov6W37ttWcVhQwidfJ | BPSK        | N      | NLS 7.2/CANX 5
+INFO	root	5024 | N   | 27848 | 2023-02-18T15:44:06 | 2023-02-18T15:55:35 |  0:11:28 | 123 29 355 | 0.950000 | 2uGo77ULzByLLyshanpctH | AFSK        | N      | CUBESAT XI-IV (CO-57)
+INFO	root	5024 | N   | 07530 | 2023-02-18T16:11:52 | 2023-02-18T16:30:20 |  0:18:27 | 189 42 335 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | N   | 44909 | 2023-02-18T16:56:27 | 2023-02-18T17:10:34 |  0:14:07 | 133 22  24 | 0.850000 | 6khJGrSmppmokPfTMaq6Ms | FSK         | N      | RS-44 & BREEZE-KM R/B
+INFO	root	5024 | N   | 27848 | 2023-02-18T17:23:18 | 2023-02-18T17:35:58 |  0:12:39 | 178 56 340 | 0.950000 | 2uGo77ULzByLLyshanpctH | AFSK        | N      | CUBESAT XI-IV (CO-57)
+INFO	root	5024 | N   | 22826 | 2023-02-18T17:49:54 | 2023-02-18T18:01:03 |  0:11:09 | 123 29 355 | 0.700000 | QGvTCQfY3a4iLd7vrKxxjf | BPSK        | N      | ITAMSAT (IO-26)
+INFO	root	5024 | N   | 07530 | 2023-02-18T18:12:14 | 2023-02-18T18:20:28 |  0:08:13 | 259  8 311 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | Y   | 43768 | 2023-02-18T18:42:11 | 2023-02-18T18:53:47 |  0:11:36 |   0  0   0 | 1.000000 | XJsHG6GRFqrBrmP3uvF93E |             | Y      | AISTECHSAT-2
+INFO	root	5024 | N   | 27848 | 2023-02-18T19:07:29 | 2023-02-18T19:14:16 |  0:06:46 | 247  9 312 | 0.950000 | 2uGo77ULzByLLyshanpctH | AFSK        | N      | CUBESAT XI-IV (CO-57)
+INFO	root	5024 | N   | 22826 | 2023-02-18T19:28:33 | 2023-02-18T19:40:50 |  0:12:17 | 179 54 339 | 0.700000 | QGvTCQfY3a4iLd7vrKxxjf | BPSK        | N      | ITAMSAT (IO-26)
+INFO	root	5024 | N   | 99482 | 2023-02-18T19:44:29 | 2023-02-18T19:51:08 |  0:06:38 | 105 14  12 | 0.650000 | BR4gexbnbBzSuzY4bzr4Q9 | SSTV        | N      | HADES
+INFO	root	5024 | N   | 54361 | 2023-02-18T20:19:15 | 2023-02-18T20:22:58 |  0:03:42 |  59  6  22 | 0.750000 | hTEh8efZL9LzC6ZaREXBqP | FM          | N      | EOS-6 (OCEANSAT-3)
+INFO	root	5024 | N   | 44909 | 2023-02-18T20:43:17 | 2023-02-18T20:58:01 |  0:14:44 | 245 23   2 | 0.850000 | 6khJGrSmppmokPfTMaq6Ms | FSK         | N      | RS-44 & BREEZE-KM R/B
+INFO	root	5024 | N   | 22826 | 2023-02-18T21:12:15 | 2023-02-18T21:18:23 |  0:06:08 | 249  8 309 | 0.700000 | QGvTCQfY3a4iLd7vrKxxjf | BPSK        | N      | ITAMSAT (IO-26)
+INFO	root	5024 | N   | 54361 | 2023-02-18T21:52:38 | 2023-02-18T22:03:31 |  0:10:53 | 128 31 356 | 0.750000 | hTEh8efZL9LzC6ZaREXBqP | FM          | N      | EOS-6 (OCEANSAT-3)
+INFO	root	5024 | N   | 37855 | 2023-02-18T22:03:31 | 2023-02-18T22:11:15 |  0:07:43 |  42 19 157 | 0.800000 | RHwhZR7PW4heGkuudpbLxa | BPSK        | N      | M-CUBED & EXP-1 PRIME
+INFO	root	5024 | N   | 99482 | 2023-02-18T22:53:17 | 2023-02-18T22:57:36 |  0:04:18 | 248  8 304 | 0.650000 | BR4gexbnbBzSuzY4bzr4Q9 | SSTV        | N      | HADES
+INFO	root	5024 | N   | 37855 | 2023-02-18T23:36:38 | 2023-02-18T23:45:32 |  0:08:54 |  13 47 219 | 0.800000 | RHwhZR7PW4heGkuudpbLxa | BPSK        | N      | M-CUBED & EXP-1 PRIME
+INFO	root	5024 | N   | 37855 | 2023-02-19T01:11:42 | 2023-02-19T01:15:42 |  0:03:59 | 341  7 288 | 0.800000 | RHwhZR7PW4heGkuudpbLxa | BPSK        | N      | M-CUBED & EXP-1 PRIME
+INFO	root	5024 | N   | 36122 | 2023-02-19T01:49:36 | 2023-02-19T02:03:08 |  0:13:31 |  32 20 141 | 0.900000 | AEzrojCTbvAeZRDtPmqitc | FM          | N      | XIWANG-1 (HOPE-1)
+INFO	root	5024 | N   | 07530 | 2023-02-19T02:15:09 | 2023-02-19T02:26:02 |  0:10:52 |  42 11 113 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | Y   | 48274 | 2023-02-19T02:30:00 | 2023-02-19T02:41:00 |  0:11:00 |   0  0   0 | 1.000000 | SYNaLxjDbU2XNih337XsEs |             | N      | CSS (Tianhe)
+INFO	root	5024 | N   | 20439 | 2023-02-19T02:48:33 | 2023-02-19T02:54:25 |  0:05:51 |  52  8 109 | 0.600000 | 6hZFcJypsM4H7zY6rExLXd | BPSK        | N      | OSCAR 16 (PACSAT)
+INFO	root	5024 | N   | 36122 | 2023-02-19T03:36:45 | 2023-02-19T03:53:33 |  0:16:47 |  18 84 198 | 0.900000 | AEzrojCTbvAeZRDtPmqitc | FM          | N      | XIWANG-1 (HOPE-1)
+INFO	root	5024 | N   | 07530 | 2023-02-19T04:06:07 | 2023-02-19T04:24:59 |  0:18:52 |  24 49 178 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | N   | 44909 | 2023-02-19T04:32:46 | 2023-02-19T04:49:24 |  0:16:37 | 353 48 147 | 0.850000 | 6khJGrSmppmokPfTMaq6Ms | FSK         | N      | RS-44 & BREEZE-KM R/B
+INFO	root	5024 | N   | 27848 | 2023-02-19T05:34:21 | 2023-02-19T05:46:32 |  0:12:11 |  24 38 170 | 0.950000 | 2uGo77ULzByLLyshanpctH | AFSK        | N      | CUBESAT XI-IV (CO-57)
+INFO	root	5024 | Y   | 60133 | 2023-02-19T06:15:00 | 2023-02-19T06:24:30 |  0:09:30 |   0  0   0 | 1.000000 | ZZstub0000NotARealUUID |             | N      | 
+INFO	root	5024 | N   | 44909 | 2023-02-19T06:26:28 | 2023-02-19T06:42:32 |  0:16:03 | 343 42 202 | 0.850000 | 6khJGrSmppmokPfTMaq6Ms | FSK         | N      | RS-44 & BREEZE-KM R/B
+INFO	root	5024 | N   | 27848 | 2023-02-19T07:14:29 | 2023-02-19T07:26:34 |  0:12:04 |   8 40 225 | 0.950000 | 2uGo77ULzByLLyshanpctH | AFSK        | N      | CUBESAT XI-IV (CO-57)
+INFO	root	5024 | N   | 22826 | 2023-02-19T07:35:20 | 2023-02-19T07:47:06 |  0:11:46 |  26 34 166 | 0.700000 | QGvTCQfY3a4iLd7vrKxxjf | BPSK        | N      | ITAMSAT (IO-26)
+INFO	root	5024 | N   | 07530 | 2023-02-19T07:52:05 | 2023-02-19T08:06:50 |  0:14:44 |  18 20 276 | 1.000000 | epmfL93RZ2Vf5WKK4X2auf | CW          | N      | OSCAR 7 (AO-7)
+INFO	root	5024 | N   | 44909 | 2023-02-19T08:22:42 | 2023-02-19T08:28:48 |  0:06:06 | 317  7 273 | 0.850000 | 6khJGrSmppmokPfTMaq6Ms | FSK         | N      | RS-44 & BREEZE-KM R/B
+INFO	root	5024 | N   | 99482 | 2023-02-19T08:41:40 | 2023-02-19T08:45:31 |  0:03:50 |  59  7 108 | 0.650000 | BR4gexbnbBzSuzY4bzr4Q9 | SSTV        | N      | HADES
+INFO	root	5024 | N   | 37855 | 2023-02-19T08:47:52 | 2023-02-19T08:55:49 |  0:07:57 | 143 50 346 | 0.800000 | RHwhZR7PW4heGkuudpbLxa | BPSK        | N      | M-CUBED & EXP-1 PRIME
+INFO	root	5024 | N   | 27848 | 2023-02-19T08:55:56 | 2023-02-19T09:00:00 |  0:04:03 | 350  9 310 | 0.950000 | 2uGo77ULzByLLyshanpctH | AFSK        | N      | CUBESAT XI-IV (CO-57)
+INFO	root	Done.

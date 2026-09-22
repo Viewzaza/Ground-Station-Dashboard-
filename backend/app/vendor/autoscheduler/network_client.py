@@ -200,12 +200,22 @@ class NetworkClient:
         return [s for s in stations if s.schedulable]
 
     def future_bookings(self, station_id: int, now: datetime | None = None) -> list[Booking]:
-        """Every observation already booked on this station that has not ended.
+        """Every observation on this station that has not yet STARTED.
+
+        Not "has not ended" - the stop predicate below ends the walk at the
+        first observation whose start is already past, and does not yield it.
+        An observation currently in progress is therefore both excluded and a
+        hard stop, so nothing after it in the feed is seen either. That is
+        fine for the two things that use this - checking for conflicts before
+        booking, and reconciling a run's own just-booked future passes - but
+        it is not a picture of the live calendar, and code that needs one has
+        to ask differently.
 
         The feed is ordered by start descending - the furthest-future
-        observation first - so we can stop walking as soon as we reach one that
-        started in the past. That keeps this to two or three pages instead of
-        the station's entire history.
+        observation first - which is what makes that early stop safe: every
+        future observation has already been yielded by the time we reach a
+        past one. It keeps this to two or three pages instead of the station's
+        entire history.
         """
         now = now or datetime.now(timezone.utc)
         url = f"{self.s.network_base_url}/observations/"

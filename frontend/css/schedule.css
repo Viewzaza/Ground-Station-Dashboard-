@@ -907,3 +907,125 @@ button.sched-prio-tx.is-editing { color: var(--track); }
   .schedule-section-head { flex-wrap: wrap; }
   .sched-list-btn { max-width: 100%; }
 }
+
+/* ── station auto run ─────────────────────────────────────────────────────
+
+   The timer that runs the scheduler with nobody watching, plus the two run
+   buttons. Everything that can create a real booking is styled with --bad,
+   consistently with the Network Campaign tab, so "this one is different" is
+   visible before the label is read rather than after. */
+
+.sched-run-actions { display: flex; align-items: center; gap: 6px; }
+
+/* This section sizes to its content and never shrinks.
+   .schedule-section defaults to `flex: 0 1 auto` with its own overflow-y, which
+   is right for a section whose content is a list: it shrinks and scrolls. It is
+   wrong here. Expanding "Run options" made the section scroll INTERNALLY inside
+   its existing 231px instead of growing, so the four run flags and the SAVE
+   button below them were simply not visible - a disclosure that discloses
+   nothing. Letting it take its natural height pushes the shrink onto the
+   priority list, which is `flex: 1 1 auto` and already scrolls properly. */
+.sched-autorun-section { flex: 0 0 auto; overflow: visible; }
+
+/* RUN NOW books. It is not a neutral button and must not look like one. */
+.sched-btn-danger {
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--panel));
+  color: var(--bad);
+}
+.sched-btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--bad) 10%, var(--panel));
+}
+/* Armed: the second click books. Filled rather than outlined, because at this
+   point the next click is the irreversible one. */
+.sched-btn-danger.is-armed {
+  background: var(--bad); color: var(--panel); border-color: var(--bad);
+}
+
+/* Why the buttons are disabled. Carries real information — that a DRY RUN
+   also needs both tokens — so it is not muted into invisibility. */
+.sched-run-hint { margin: 4px 0 0; max-width: 62ch; }
+.sched-run-hint[hidden] { display: none; }
+
+.sched-auto-next { margin: 4px 0 0; }
+.sched-auto-next[hidden] { display: none; }
+
+.sched-badge-row { margin: 0 0 6px; display: flex; align-items: center; gap: 6px; }
+
+/* The booking states. Neutral is a dry run; anything that touched the real
+   calendar is marked. */
+.sched-run-trigger.danger {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--panel));
+  background: color-mix(in srgb, var(--bad) 8%, var(--panel));
+}
+
+.sched-auto-enable {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--ink-2);
+}
+.sched-auto-modes { display: flex; gap: 2px; margin: 6px 0; }
+
+.sched-auto-add { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.sched-auto-add[hidden] { display: none; }
+.sched-auto-add input[type="time"],
+.sched-auto-add input[type="number"] { width: 8em; }
+
+.sched-auto-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0;
+}
+.sched-auto-label { font-size: 11px; color: var(--ink-3); }
+
+/* Times as removable chips rather than a comma-separated text field: the set
+   is small, and a chip makes "18:00 is in the list" unambiguous. */
+.sched-time-chips {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+}
+.sched-time-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 11px;
+  padding: 2px 4px 2px 7px; border-radius: 10px;
+  border: 1px solid var(--rule); background: var(--sunk); color: var(--ink-2);
+}
+.sched-chip-x {
+  border: 0; background: none; cursor: pointer; padding: 0 2px;
+  color: var(--ink-4); font-size: 13px; line-height: 1;
+}
+.sched-chip-x:hover { color: var(--bad); }
+
+.sched-runopts { margin: 6px 0; display: grid; gap: 6px; }
+.sched-runopts[hidden] { display: none; }
+.sched-runopt { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sched-runopt label { font-size: 11px; color: var(--ink-3); min-width: 11em; }
+.sched-runopt input[type="number"] { width: 6em; }
+
+.sched-status-danger { color: var(--bad); }
+
+/* The scheduler's raw transcript. Monospace and bounded: a cold run is
+   thousands of lines and the interesting part is usually the last screen. */
+.sched-log {
+  margin: 6px 0 0; padding: 8px; max-height: 260px; overflow: auto;
+  background: var(--sunk); border: 1px solid var(--rule-soft); border-radius: 3px;
+  font-family: var(--mono); font-size: 10px; line-height: 1.45;
+  color: var(--ink-2); white-space: pre-wrap; word-break: break-word;
+}
+.sched-log[hidden] { display: none; }
+
+/* Per-row reorder. The drag handle is mouse-only, so these are the only way
+   to reorder from a keyboard or a touch screen. Kept visually quiet - they
+   are always present, and three loud arrows per row would swamp the list. */
+.sched-prio-moves { display: inline-flex; gap: 1px; flex: 0 0 auto; }
+.sched-move-btn {
+  border: 0; background: none; cursor: pointer; padding: 0 2px;
+  color: var(--ink-4); font-size: 10px; line-height: 1;
+}
+.sched-move-btn:hover:not(:disabled) { color: var(--track); }
+.sched-move-btn:disabled { opacity: .3; cursor: default; }
+.sched-prio-row:focus-visible { outline: 2px solid var(--track); outline-offset: -2px; }
+
+/* The armed "DISCARD CHANGES?" / "BOOK FOR REAL?" label.
+   Added as a sibling and the button's real children hidden, never by setting
+   textContent - #schedule-list-current holds a <span id="schedule-list-name">
+   that textContent would delete outright, breaking the list picker for the
+   rest of the session. */
+.sched-armed-label { color: var(--bad); font-weight: 600; }

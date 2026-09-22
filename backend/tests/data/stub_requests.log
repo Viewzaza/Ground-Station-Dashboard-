@@ -1,0 +1,22 @@
+NETWORK GET  200 /api/stations/5024  auth=-
+DB      GET  200 /api/satellites  auth=-
+DB      GET  200 /api/satellites?page=2  auth=-
+DB      GET  200 /api/satellites?page=3  auth=-
+DB      GET  200 /api/satellites?page=4  auth=-
+DB      GET  200 /api/transmitters  auth=-
+DB      GET  200 /api/transmitters?page=2  auth=-
+DB      GET  200 /api/transmitters?page=3  auth=-
+DB      GET  200 /api/transmitters?page=4  auth=-
+DB      GET  200 /api/tle/  auth=Token <40 chars>
+DB      GET  200 /api/tle/?page=2  auth=Token <40 chars>
+DB      GET  200 /api/tle/?page=3  auth=Token <40 chars>
+DB      GET  200 /api/tle/?page=4  auth=Token <40 chars>
+NETWORK GET  200 /api/transmitters/  auth=-
+NETWORK GET  200 /api/transmitters/?page=2  auth=-
+NETWORK GET  200 /api/transmitters/?page=3  auth=-
+NETWORK GET  200 /api/transmitters/?page=4  auth=-
+NETWORK GET  200 /api/transmitters/?page=5  auth=-
+NETWORK GET  200 /api/transmitters/?page=6  auth=-
+NETWORK GET  200 /api/transmitters/?page=7  auth=-
+NETWORK GET  200 /api/transmitters/?page=8  auth=-
+NETWORK GET  200 /api/jobs/?ground_station=5024  auth=-

@@ -250,9 +250,97 @@
         <section class="schedule-section">
           <div class="schedule-section-head">
             <h3>Last auto schedule</h3>
-            <button class="btn" id="schedule-run" type="button">RUN NOW</button>
+            <div class="sched-run-actions">
+              <button class="btn" id="schedule-dry-run" type="button">DRY RUN</button>
+              <button class="btn sched-btn-danger" id="schedule-run" type="button">RUN NOW</button>
+            </div>
           </div>
+          <p id="schedule-run-hint" class="hint sched-run-hint" hidden></p>
+          <p id="schedule-auto-next" class="muted sched-auto-next" hidden></p>
           <div id="schedule-last-run"><p class="muted">loading…</p></div>
+        </section>
+
+        <!-- Auto run. A section rather than a row in the ⚙ popover: that
+             popover is a fixed 260px wide with no scroll region and dismisses
+             on any outside click, which is hostile to a form containing an
+             editable list of times.
+
+             Placed BETWEEN the two existing sections, never after them.
+             `.schedule-section:last-child` carries `flex: 1 1 auto` scoped to
+             this panel, so appending a third section would hand the
+             grow-and-scroll role from the priority list to this one and cut
+             the priority list's bottom rows off inside a card with
+             overflow:hidden. Keeping the priority list last preserves it. -->
+        <section class="schedule-section sched-autorun-section">
+          <div class="schedule-section-head">
+            <h3>Auto run</h3>
+            <label class="sched-auto-enable">
+              <input type="checkbox" id="schedule-auto-enabled">
+              <span>Enabled</span>
+            </label>
+          </div>
+
+          <div class="sched-auto-modes" role="tablist" aria-label="Auto run schedule mode">
+            <button class="sched-mode-tab is-active" id="schedule-auto-mode-times"
+                    type="button" role="tab" aria-selected="true">AT FIXED TIMES</button>
+            <button class="sched-mode-tab" id="schedule-auto-mode-interval"
+                    type="button" role="tab" aria-selected="false">EVERY N MINUTES</button>
+          </div>
+
+          <div id="schedule-auto-times-block">
+            <ul id="schedule-auto-times" class="sched-time-chips"></ul>
+            <div class="sched-auto-add">
+              <label class="sr-only" for="schedule-auto-time-input">Add a time</label>
+              <input type="time" id="schedule-auto-time-input" step="60">
+              <button class="btn" id="schedule-auto-time-add" type="button">ADD</button>
+            </div>
+          </div>
+
+          <div id="schedule-auto-interval-block" class="sched-auto-add" hidden>
+            <label for="schedule-auto-interval">Every</label>
+            <input type="number" id="schedule-auto-interval" min="5" max="1440" step="5">
+            <span class="hint">minutes</span>
+          </div>
+
+          <div class="sched-auto-row">
+            <span class="sched-auto-label">Unattended runs:</span>
+            <button class="sched-mode-tab is-active" id="schedule-auto-dry"
+                    type="button">DRY RUN ONLY</button>
+            <button class="sched-mode-tab sched-mode-tab-danger" id="schedule-auto-book"
+                    type="button">BOOK FOR REAL</button>
+          </div>
+
+          <button class="sched-notices-toggle" id="schedule-runopts-toggle" type="button"
+                  aria-expanded="false" aria-controls="schedule-runopts">Run options ▾</button>
+          <div id="schedule-runopts" class="sched-runopts" hidden>
+            <div class="sched-runopt">
+              <label for="schedule-opt-hours">Plan ahead</label>
+              <input type="number" id="schedule-opt-hours" min="1" max="96" step="1">
+              <span class="hint">hours (-d)</span>
+            </div>
+            <div class="sched-runopt">
+              <label for="schedule-opt-culmination">Min culmination</label>
+              <input type="number" id="schedule-opt-culmination" min="0" max="90" step="1">
+              <span class="hint">degrees (-m)</span>
+            </div>
+            <div class="sched-runopt">
+              <label for="schedule-opt-maxobs">Max observation</label>
+              <input type="number" id="schedule-opt-maxobs" min="1" max="120" step="1">
+              <span class="hint">minutes (-o)</span>
+            </div>
+            <div class="sched-runopt">
+              <label class="sched-auto-enable" for="schedule-opt-onlyprio">
+                <input type="checkbox" id="schedule-opt-onlyprio">
+                <span>Only satellites in the priority list (-f)</span>
+              </label>
+            </div>
+            <p class="hint" id="schedule-runopts-note"></p>
+          </div>
+
+          <div class="schedule-save-row">
+            <span id="schedule-auto-status" class="hint"></span>
+            <button class="btn" id="schedule-auto-save" type="button">SAVE</button>
+          </div>
         </section>
 
         <section class="schedule-section">
@@ -273,6 +361,13 @@
             </div>
             <div class="schedule-save-row">
               <span id="schedule-save-status" class="hint"></span>
+              <!-- The concrete proof of the compatibility claim: this downloads
+                   the exact bytes satnogs-auto-scheduler reads, droppable
+                   straight into an existing -P command line. A plain anchor,
+                   because the backend already sets the filename. -->
+              <a class="btn btn-quiet" id="schedule-export" download="prio.txt"
+                 href="/api/schedule/priorities/export"
+                 title="Download this list in the format the scheduler reads">EXPORT</a>
               <input id="schedule-saveas-input" class="sched-saveas-input" type="text"
                      placeholder="new list name" hidden>
               <button class="btn btn-quiet" id="schedule-saveas" type="button">SAVE AS</button>

@@ -8,7 +8,23 @@ import { api } from '../core/api.js';
 import { shortTime, shortDateTime } from '../core/format.js';
 
 const POLL_MS = 3000;
-const POLL_TIMEOUT_MS = 120_000;
+// 25 minutes, not the 120s this was. A Station Schedule run now shells out to
+// satnogs-auto-scheduler, and on a cold cache that tool refetches every
+// transmitter's statistics - it logs "this will take some minutes" itself.
+// Its booking POST also carries no timeout of its own. A 120s budget would
+// abandon a perfectly healthy run and leave the operator with no idea whether
+// anything was booked, which is the worst possible state on this tab.
+const POLL_TIMEOUT_MS = 25 * 60_000;
+
+// State the two run buttons need. Both are disabled until BOTH SatNOGS tokens
+// are set - including DRY RUN, because satnogs-auto-scheduler validates its
+// whole configuration before it looks at the dry-run flag.
+let dbTokenSet = false;
+let armedRealRun = false;      // RUN NOW's two-step confirm
+let armedRealRunTimer = null;
+let autoRunCfg = null;         // the config as last loaded/saved
+let autoTimes = [];            // HH:MM chips, the editable copy
+let autoDirty = false;
 // Network Campaign walks every candidate station's booking history one at a
 // time to stay polite to SatNOGS's rate limit - against real data (hundreds
 // of stations) that has taken several minutes in testing, not the seconds a
@@ -35,7 +51,17 @@ let campaignConfigDirty = false;   // invalidates a stale preview if config chan
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
   document.getElementById('schedule-close').addEventListener('click', close);
-  document.getElementById('schedule-run').addEventListener('click', runNow);
+  document.getElementById('schedule-dry-run').addEventListener('click', () => startRun(true));
+  document.getElementById('schedule-run').addEventListener('click', onRealRunClick);
+  mountAutoRun();
+
+  // The browser's own guard. It cannot show our copy, but it is the only
+  // thing standing between a reloaded tab and a lost priority list.
+  window.addEventListener('beforeunload', (ev) => {
+    if (!prioritiesDirty && !autoDirty) return;
+    ev.preventDefault();
+    ev.returnValue = '';
+  });
   document.getElementById('schedule-save').addEventListener('click', save);
 
   const search = document.getElementById('schedule-add-search');
@@ -85,16 +111,96 @@ async function open() {
   ]);
 }
 
+/* Unsaved priority edits.
+
+   Note where the discard actually happens: close() only hides the panel and
+   leaves `priorities` in module state, so a reopened panel still shows the
+   edits until open() -> loadPriorities() overwrites them. The guard therefore
+   has to sit on both doors, and close() must not be trusted to reset it. */
+let prioritiesDirty = false;
+
+function markPrioritiesDirty() {
+  prioritiesDirty = true;
+  const status = document.getElementById('schedule-save-status');
+  if (status && !status.textContent) status.textContent = 'unsaved changes';
+}
+
+/* The same two-step idiom the RUN NOW button uses, for the same reason: this
+   codebase has no modal, and silently throwing away typed work is worse than
+   asking twice. */
+let armedDiscard = null;
+let armedDiscardTimer = null;
+
+/* The armed label is swapped by hiding the button's real children and adding
+   a sibling, never by setting textContent.
+
+   #schedule-list-current contains <span id="schedule-list-name">, and
+   `button.textContent = '...'` replaces every child with one text node -
+   deleting that span for good. Every later renderListName() then threw on a
+   null element, so one armed-and-abandoned discard permanently broke the list
+   picker. Restoring by textContent could not bring the span back either. */
+function setArmedLabel(button, text) {
+  let overlay = button.querySelector(':scope > .sched-armed-label');
+  if (text === null) {
+    if (overlay) overlay.remove();
+    for (const child of button.children) {
+      if (child !== overlay) child.hidden = false;
+    }
+    button.dataset.armedHidden = '';
+    return;
+  }
+  if (!overlay) {
+    overlay = document.createElement('span');
+    overlay.className = 'sched-armed-label';
+    button.appendChild(overlay);
+  }
+  overlay.textContent = text;
+  for (const child of button.children) {
+    if (child !== overlay) child.hidden = true;
+  }
+  button.dataset.armedHidden = '1';
+}
+
+function confirmDiscard(button, onConfirm) {
+  if (!prioritiesDirty) { onConfirm(); return; }
+  if (armedDiscard === button) {
+    clearTimeout(armedDiscardTimer);
+    setArmedLabel(button, null);
+    armedDiscard = null;
+    prioritiesDirty = false;
+    onConfirm();
+    return;
+  }
+  if (armedDiscard) disarmDiscard();
+  armedDiscard = button;
+  setArmedLabel(button, 'DISCARD CHANGES?');
+  armedDiscardTimer = setTimeout(disarmDiscard, 5000);
+}
+
+function disarmDiscard() {
+  clearTimeout(armedDiscardTimer);
+  if (armedDiscard) {
+    setArmedLabel(armedDiscard, null);
+    armedDiscard = null;
+  }
+}
+
 function close() {
-  panel().hidden = true;
-  openTxNorad = null;
-  settingsOpen = false;
-  listPickerOpen = false;
+  confirmDiscard(document.getElementById('schedule-close'), () => {
+    panel().hidden = true;
+    openTxNorad = null;
+    settingsOpen = false;
+    listPickerOpen = false;
+    disarmRealRun();
+  });
 }
 
 async function loadLastRun() {
   try {
-    renderLastRun(await api.scheduleLastRun());
+    const run = await api.scheduleLastRun();
+    renderLastRun(run);
+    renderNextAutoRun(run?.auto_run_next_utc);
+    noteRunWarnings(run);
   } catch (err) {
     console.error('[schedule] last run', err);
     document.getElementById('schedule-last-run').replaceChildren(note(`could not load: ${err}`));
@@ -109,20 +215,41 @@ function renderLastRun(run) {
     box.appendChild(note('no auto schedule has run yet'));
     return;
   }
-  if (run.status === 'running') {
-    box.appendChild(note('a run is in progress…'));
+  // `running` is the live flag the route adds; the STORED result never says
+  // "running", so keying off run.status here showed the previous run as
+  // current, with both buttons enabled, while a real booking run was in
+  // flight. run.status is still checked for the benefit of the immediate
+  // POST response, which does use it.
+  if (run.running || run.status === 'running') {
+    box.appendChild(note(
+      run.progress ? `a run is in progress… ${run.progress}` : 'a run is in progress…',
+    ));
     return;
   }
   if (run.status === 'error') {
-    box.appendChild(note(`last run failed: ${run.error}`));
+    box.appendChild(runBadge(run));
+    box.appendChild(alertNote(`Last run failed: ${run.error}`, 'error'));
+    appendNotices(box, run.notices || []);
+    appendLogDisclosure(box);
     return;
   }
+
+  box.appendChild(runBadge(run));
 
   const meta = document.createElement('p');
   meta.className = 'muted sched-meta';
   const text = document.createElement('span');
-  text.textContent = `Generated ${shortTime(run.generated_utc, 'UTC')} UTC · `
-    + `${run.observations.length} of ${run.considered} candidate pass(es) booked`;
+  const parts = [
+    `Generated ${shortTime(run.generated_utc, 'UTC')} UTC`,
+    // "selected", not "booked": on a dry run nothing was booked at all, and
+    // on a real run the badge above is the authority on what actually landed.
+    `${run.observations.length} of ${run.considered || run.observations.length} candidate pass(es) selected`,
+  ];
+  if (run.already_scheduled?.length) {
+    parts.push(`${run.already_scheduled.length} already on the calendar`);
+  }
+  if (run.run_duration_s) parts.push(`took ${Math.round(run.run_duration_s)}s`);
+  text.textContent = `${parts.join(' · ')} · `;
   meta.appendChild(text);
 
   const notices = run.notices || [];
@@ -192,7 +319,106 @@ function renderLastRun(run) {
   }
   table.appendChild(tbody);
   box.appendChild(scrollableTable(
-    table, `Booked observations, ${run.observations.length} row(s)`));
+    table,
+    `${run.dry_run ? 'Planned' : 'Booked'} observations, ${run.observations.length} row(s)`));
+
+  if (run.already_scheduled?.length) {
+    // Kept visually apart rather than merged into the table above: the tool
+    // prints these with zeroed azimuth and elevation, so rendering them as if
+    // they were planned now would show a column of confident-looking 0°.
+    const already = document.createElement('p');
+    already.className = 'muted sched-meta';
+    already.textContent =
+      `${run.already_scheduled.length} pass(es) were already booked on this station `
+      + 'and were left alone.';
+    box.appendChild(already);
+  }
+  appendLogDisclosure(box);
+}
+
+/* What this run was, said before anything else, because "7 observations" means
+   two completely different things depending on it. */
+function runBadge(run) {
+  const badge = document.createElement('span');
+  badge.className = 'sched-run-trigger';
+  if (run.trigger === 'auto') badge.classList.add('manual');
+
+  if (run.status === 'error') {
+    badge.classList.add('danger');
+    badge.textContent = run.dry_run ? 'DRY RUN FAILED' : 'RUN FAILED';
+  } else if (run.booked_state === 'mock') {
+    // Deliberately not styled as a booking: nothing was started and nothing
+    // reached SatNOGS, whichever button was pressed.
+    badge.textContent = `SIMULATED · ${run.planned ?? run.observations.length} PLANNED`;
+  } else if (run.dry_run) {
+    badge.textContent = `DRY RUN · ${run.planned ?? run.observations.length} PLANNED`;
+  } else if (run.booked_state === 'confirmed') {
+    badge.classList.add('danger');
+    badge.textContent = `BOOKED ${run.booked} of ${run.planned}`;
+  } else if (run.booked_state === 'partial') {
+    badge.classList.add('danger');
+    badge.textContent = `PLANNED ${run.planned} · CONFIRMED ${run.booked}`;
+  } else {
+    badge.classList.add('danger');
+    badge.textContent = `PLANNED ${run.planned} · ${String(run.booked_state || 'unknown').toUpperCase()}`;
+  }
+  const wrap = document.createElement('p');
+  wrap.className = 'sched-badge-row';
+  wrap.appendChild(badge);
+  if (run.trigger === 'auto') {
+    const who = document.createElement('span');
+    who.className = 'hint';
+    who.textContent = ' fired by the auto-run timer';
+    wrap.appendChild(who);
+  }
+  return wrap;
+}
+
+/* The parsed result cannot carry everything the tool said, and when a run does
+   something surprising the transcript is where the answer actually is. */
+function appendLogDisclosure(box) {
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'sched-notices-toggle';
+  toggle.textContent = 'Raw output ▾';
+  const pre = document.createElement('pre');
+  pre.className = 'sched-log';
+  pre.id = nextDomId('sched-log');
+  pre.hidden = true;
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-controls', pre.id);
+  let loaded = false;
+  toggle.addEventListener('click', async () => {
+    const showing = pre.hidden;
+    pre.hidden = !showing;
+    toggle.setAttribute('aria-expanded', String(showing));
+    toggle.textContent = `Raw output ${showing ? '▴' : '▾'}`;
+    if (showing && !loaded) {
+      loaded = true;
+      pre.textContent = 'loading…';
+      try {
+        pre.textContent = await api.scheduleLog(400);
+      } catch (err) {
+        pre.textContent = `could not load the run log: ${err}`;
+      }
+    }
+  });
+  box.append(toggle, pre);
+}
+
+/* Extracted so the error path can show warnings too - it used to return before
+   ever rendering them, which is exactly when they matter most. */
+function appendNotices(box, notices) {
+  if (!notices.length) return;
+  const list = document.createElement('ul');
+  list.className = 'sched-notices';
+  for (const n of notices) {
+    const li = document.createElement('li');
+    li.className = `sched-notice ${n.severity === 'error' ? 'error' : ''}`.trim();
+    li.textContent = n.message;
+    list.appendChild(li);
+  }
+  box.appendChild(list);
 }
 
 /* Both tabs' tables get the same treatment now: a bounded, keyboard-reachable
@@ -240,32 +466,128 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function runNow() {
+/* RUN NOW books real observations, so it arms first and fires second.
+
+   A two-step inline confirm rather than a modal: this codebase has no modal,
+   and the Network Campaign tab's preview -> CONFIRM is the nearest existing
+   idiom for "this one actually does something irreversible". */
+function onRealRunClick() {
   const btn = document.getElementById('schedule-run');
+  if (!armedRealRun) {
+    armedRealRun = true;
+    btn.classList.add('is-armed');
+    btn.textContent = 'BOOK FOR REAL?';
+    setRunHint(
+      'This runs the scheduler again from scratch and books what it selects. '
+      + 'It recomputes, so the result can differ from the preview above. '
+      + 'Click again within 5s to confirm.',
+    );
+    clearTimeout(armedRealRunTimer);
+    armedRealRunTimer = setTimeout(disarmRealRun, 5000);
+    return;
+  }
+  disarmRealRun();
+  startRun(false);
+}
+
+function disarmRealRun() {
+  clearTimeout(armedRealRunTimer);
+  armedRealRun = false;
+  const btn = document.getElementById('schedule-run');
+  btn.classList.remove('is-armed');
+  btn.textContent = 'RUN NOW';
+  refreshRunGate();
+}
+
+async function startRun(dryRun) {
+  const btn = document.getElementById(dryRun ? 'schedule-dry-run' : 'schedule-run');
+  const other = document.getElementById(dryRun ? 'schedule-run' : 'schedule-dry-run');
+  const label = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'RUNNING…';
+  other.disabled = true;
+  btn.textContent = dryRun ? 'DRY RUN…' : 'BOOKING…';
   try {
-    const before = (await api.scheduleLastRun())?.generated_utc;
-    await api.runSchedule();
+    const started = await api.runSchedule(dryRun);
+    if (started?.status === 'running') {
+      // Nothing was started - a run was already in flight (the auto-run
+      // timer, or another tab). Polling from here would wait for THAT run and
+      // then render its result as though it were this one, which after
+      // pressing BOOK FOR REAL is the worst possible thing to get wrong.
+      document.getElementById('schedule-last-run').prepend(alertNote(
+        'A run was already in progress, so this one did not start. '
+        + 'Nothing was booked by this click. Wait for the current run to '
+        + 'finish, then try again.',
+      ));
+      return;
+    }
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await sleep(POLL_MS);
       const run = await api.scheduleLastRun();
-      if (run?.status === 'error' || (run?.generated_utc && run.generated_utc !== before)) {
+      // Poll the live `running` flag rather than diffing generated_utc: a run
+      // that fails now writes a result too, so a changed timestamp is no
+      // longer the only signal, and `running` cannot be confused by a run
+      // triggered from somewhere else.
+      if (run && !run.running) {
         renderLastRun(run);
-        break;
+        return;
       }
+      if (run?.progress) btn.textContent = shorten(run.progress);
     }
+    document.getElementById('schedule-last-run').prepend(alertNote(
+      `This run has taken longer than ${Math.round(POLL_TIMEOUT_MS / 60000)} minutes. `
+      + 'It may still be going - reopen this panel to check before running again, '
+      + 'so nothing is booked twice.',
+    ));
   } catch (err) {
     console.error('[schedule] run', err);
+    document.getElementById('schedule-last-run').prepend(
+      alertNote(`Could not start the run: ${err}`, 'error'));
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'RUN NOW';
+    btn.textContent = label;
+    refreshRunGate();
   }
+}
+
+/* The tool's progress lines are long and its module names are noise in a
+   button. */
+function shorten(text) {
+  const clean = String(text).replace(/\s+/g, ' ').trim();
+  return clean.length > 28 ? `${clean.slice(0, 27)}…` : clean;
+}
+
+function setRunHint(text) {
+  const hint = document.getElementById('schedule-run-hint');
+  hint.textContent = text || '';
+  hint.hidden = !text;
+}
+
+/* Both buttons are gated on BOTH tokens, and the hint has to say why DRY RUN
+   is included - otherwise a disabled DRY RUN button reads as a bug. */
+function refreshRunGate() {
+  const dry = document.getElementById('schedule-dry-run');
+  const real = document.getElementById('schedule-run');
+  const ready = dbTokenSet && networkTokenSet;
+  dry.disabled = !ready;
+  real.disabled = !ready;
+  if (ready) {
+    if (!armedRealRun) setRunHint('');
+    return;
+  }
+  const missing = [];
+  if (!dbTokenSet) missing.push('SatNOGS DB');
+  if (!networkTokenSet) missing.push('SatNOGS Network');
+  setRunHint(
+    `Set the ${missing.join(' and ')} token${missing.length > 1 ? 's' : ''} in ⚙ first. `
+    + 'satnogs-auto-scheduler checks its whole configuration before it looks at '
+    + 'the dry-run flag, so DRY RUN needs both of them too.',
+  );
 }
 
 async function loadPriorities() {
   openTxNorad = null;
+  // This is where edits are actually thrown away - see the note on close().
+  prioritiesDirty = false;
   try {
     const resp = await api.getPriorities();
     priorities = resp.entries || [];
@@ -280,8 +602,54 @@ async function loadPriorities() {
   renderPriorities();
 }
 
+/* Keep focus and scroll across a re-render.
+
+   Every edit - delete, mode toggle, transmitter pick, drop, arrow reorder -
+   rebuilds the whole <ul>, which throws away the focused control and scrolls
+   the list back to the top. Patching rows in place instead would avoid the
+   rebuild, but every row closes over its own index and a delete shifts every
+   index after it, so a partial patch has to renumber anyway - the rebuild is
+   the honest implementation and this restores what it costs.
+
+   Identified by NORAD rather than position, because the row the operator was
+   working on is the one that should keep focus even after a reorder moves it. */
 function renderPriorities() {
   const ul = document.getElementById('schedule-priorities');
+
+  // The <ul> is not the scroll container - .schedule-section is, via its own
+  // overflow-y: auto. Saving ul.scrollTop would always read 0.
+  const scroller = ul.closest('.schedule-section') || ul;
+  const active = document.activeElement;
+  const activeRow = active?.closest?.('.sched-prio-row');
+  const keep = activeRow
+    ? {
+        norad: Number(activeRow.dataset.norad),
+        // Which control within the row, so focus lands back on the weight box
+        // rather than the row itself if that is where it was.
+        control: active === activeRow ? null : [...activeRow.querySelectorAll('button,input')].indexOf(active),
+        scrollTop: scroller.scrollTop,
+      }
+    : { scrollTop: scroller.scrollTop };
+
+  renderPriorityRows(ul);
+
+  scroller.scrollTop = keep.scrollTop;
+  if (keep.norad === undefined) return;
+  const row = ul.querySelector(`.sched-prio-row[data-norad="${keep.norad}"]`);
+  if (!row) return;   // the row the operator was on is the one they deleted
+  let target = keep.control === null || keep.control < 0
+    ? row
+    : row.querySelectorAll('button,input')[keep.control] || row;
+  // A move to a list boundary disables the very control that was pressed
+  // (⤒ on the top row, ▲ on the top row, ▼ on the bottom). focus() on a
+  // disabled element does nothing at all, so focus would drop to <body> and
+  // a keyboard operator would lose their place entirely.
+  if (target.disabled) target = row;
+  target.focus({ preventScroll: true });
+  scroller.scrollTop = keep.scrollTop;
+}
+
+function renderPriorityRows(ul) {
   ul.replaceChildren();
   if (!priorities.length) {
     ul.appendChild(note('no priority file yet'));
@@ -291,14 +659,46 @@ function renderPriorities() {
   priorities.forEach((p, i) => {
     const li = document.createElement('li');
     li.className = 'sched-prio-row';
+    li.dataset.norad = String(p.norad_cat_id);
     // Not draggable while its own transmitter picker is open — a dragstart
     // fired from inside the open popover would otherwise drag the row instead
     // of letting the click land on an option.
     li.draggable = openTxNorad !== p.norad_cat_id;
+    // Focusable and announced, so the arrow buttons below have something to
+    // return focus to and a screen reader can say which row is being moved.
+    li.tabIndex = 0;
+    li.setAttribute('aria-label',
+      `${p.satellite || `NORAD ${p.norad_cat_id}`}, priority ${i + 1} of ${priorities.length}`);
+    li.addEventListener('keydown', (ev) => {
+      if (!ev.altKey) return;
+      if (ev.key === 'ArrowUp') { ev.preventDefault(); moveRow(i, i - 1); }
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); moveRow(i, i + 1); }
+      if (ev.key === 'Home') { ev.preventDefault(); moveRow(i, 0); }
+    });
 
     const handle = document.createElement('span');
     handle.className = 'sched-drag';
     handle.textContent = '⠿';
+
+    // Per-row reorder controls. The drag handle stays, but it is mouse-only.
+    const moves = document.createElement('span');
+    moves.className = 'sched-prio-moves';
+    for (const [label, target, title] of [
+      ['▲', i - 1, 'Move up (Alt+Up)'],
+      ['▼', i + 1, 'Move down (Alt+Down)'],
+      ['⤒', 0, 'Move to top (Alt+Home)'],
+    ]) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'sched-move-btn';
+      btn.textContent = label;
+      btn.title = title;
+      btn.setAttribute('aria-label',
+        `${title.split(' (')[0]}: ${p.satellite || `NORAD ${p.norad_cat_id}`}`);
+      btn.disabled = target === i || target < 0 || target >= priorities.length;
+      btn.addEventListener('click', () => moveRow(i, target));
+      moves.appendChild(btn);
+    }
 
     const info = document.createElement('span');
     info.className = 'sched-prio-info';
@@ -311,6 +711,18 @@ function renderPriorities() {
       name.textContent = 'unresolved — save to look up';
       name.classList.add('unknown');
     }
+    const runWarning = runWarningsByNorad.get(p.norad_cat_id);
+    if (runWarning) {
+      const flag = document.createElement('span');
+      // Reuses the existing dead-transmitter tag rather than inventing a
+      // second warning vocabulary for the same row.
+      flag.className = 'rx-tag dead';
+      flag.textContent = 'LAST RUN';
+      flag.title = runWarning;
+      name.appendChild(document.createTextNode(' '));
+      name.appendChild(flag);
+    }
+
     const norad = document.createElement('span');
     norad.className = 'sched-prio-norad';
     norad.textContent = `NORAD ${p.norad_cat_id}`;
@@ -327,6 +739,7 @@ function renderPriorities() {
       : 'weight follows list position — dragging any row recomputes it';
     mode.addEventListener('click', () => {
       priorities[i].mode = isManual ? 'auto' : 'manual';
+      markPrioritiesDirty();
       if (isManual) {
         // Switching back to auto: don't leave the weight stale until the
         // next drag — recompute right away.
@@ -343,6 +756,7 @@ function renderPriorities() {
     weight.value = p.weight.toFixed(2);
     weight.addEventListener('input', () => {
       priorities[i].weight = clamp01(parseFloat(weight.value) || 0);
+      markPrioritiesDirty();
     });
 
     const del = document.createElement('button');
@@ -352,10 +766,11 @@ function renderPriorities() {
     del.textContent = '×';
     del.addEventListener('click', () => {
       priorities.splice(i, 1);
+      markPrioritiesDirty();
       renderPriorities();
     });
 
-    li.append(handle, info, mode, weight, del);
+    li.append(handle, moves, info, mode, weight, del);
 
     li.addEventListener('dragstart', (ev) => {
       dragFrom = i;
@@ -384,6 +799,7 @@ function renderPriorities() {
       if (dragFrom < 0 || dragFrom === i) return;
       const [moved] = priorities.splice(dragFrom, 1);
       priorities.splice(i, 0, moved);
+      markPrioritiesDirty();
       dragFrom = -1;
       rerank();
       renderPriorities();
@@ -608,8 +1024,10 @@ function addEntry() {
 
   priorities.push({
     norad_cat_id: norad,
-    // No weight box on the add bar — a new entry starts neutral and the
-    // operator adjusts it in the row itself, same as any existing entry.
+    // Seeded, then immediately re-derived by rerank() below. A new row landing
+    // at a flat 0.5 while every other auto row is spaced by position made the
+    // list look reordered when it was not: the row sat at the bottom but
+    // outranked half the rows above it.
     weight: DEFAULT_ADD_WEIGHT,
     transmitter_uuid: null,
     mode: 'auto',
@@ -617,10 +1035,31 @@ function addEntry() {
     transmitter_desc: '',
     transmitter_status: null,
   });
+  rerank();
+  markPrioritiesDirty();
   search.value = '';
   pendingAdd = null;
   hideSuggestions();
   search.focus();
+  renderPriorities();
+}
+
+/* Move a row without a mouse.
+
+   The HTML5 drag handlers below are the only reorder this panel had, which
+   made the whole feature unreachable by keyboard and awkward on a touch
+   screen. These arrow buttons and Alt+Arrow do the same job on the same
+   array, so there is one reorder implementation and one rerank() call. */
+function moveRow(from, to) {
+  if (to < 0 || to >= priorities.length || from === to) return;
+  const [moved] = priorities.splice(from, 1);
+  priorities.splice(to, 0, moved);
+  rerank();
+  markPrioritiesDirty();
+  // renderPriorities() restores focus to the same control on the same row by
+  // NORAD, so the operator can press the arrow again immediately - no manual
+  // refocus by position here, which would land on whichever row moved into
+  // that slot instead.
   renderPriorities();
 }
 
@@ -651,6 +1090,7 @@ async function save() {
   try {
     const resp = await api.savePriorities(priorities);
     priorities = resp.entries || priorities;
+    prioritiesDirty = false;
     renderPriorities();
     status.textContent = 'saved';
   } catch (err) {
@@ -695,10 +1135,268 @@ async function loadConfig() {
     maxTotalInput.value = cfg.campaign_max_total || 150;
     document.getElementById('campaign-max-total-value').textContent = maxTotalInput.value;
     networkTokenSet = !!cfg.network_token_set;
+    dbTokenSet = !!cfg.db_token_set;
     updateCampaignGate();
+    renderAutoRun(cfg, { keepEdits: true });
+    refreshRunGate();
   } catch (err) {
     console.error('[schedule] config', err);
   }
+}
+
+/* --- auto run -------------------------------------------------------------
+
+   The timer that runs the station scheduler without anyone present. It ships
+   disabled AND dry-run-only: two deliberate switches between a fresh install
+   and anything booking unattended, mirroring campaign_auto_commit_enabled. */
+function mountAutoRun() {
+  document.getElementById('schedule-auto-enabled')
+    .addEventListener('change', () => { autoDirty = true; paintAutoRun(); });
+  document.getElementById('schedule-auto-mode-times')
+    .addEventListener('click', () => setAutoMode('times'));
+  document.getElementById('schedule-auto-mode-interval')
+    .addEventListener('click', () => setAutoMode('interval'));
+  document.getElementById('schedule-auto-dry')
+    .addEventListener('click', () => setAutoBooking(true));
+  document.getElementById('schedule-auto-book')
+    .addEventListener('click', () => setAutoBooking(false));
+  document.getElementById('schedule-auto-time-add')
+    .addEventListener('click', addAutoTime);
+  document.getElementById('schedule-auto-time-input')
+    .addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); addAutoTime(); }
+    });
+  document.getElementById('schedule-auto-save')
+    .addEventListener('click', saveAutoRun);
+  for (const id of ['schedule-auto-interval', 'schedule-opt-hours',
+                    'schedule-opt-culmination', 'schedule-opt-maxobs',
+                    'schedule-opt-onlyprio']) {
+    document.getElementById(id).addEventListener('input', () => { autoDirty = true; });
+  }
+  const toggle = document.getElementById('schedule-runopts-toggle');
+  const box = document.getElementById('schedule-runopts');
+  toggle.addEventListener('click', () => {
+    const showing = box.hidden;
+    box.hidden = !showing;
+    toggle.setAttribute('aria-expanded', String(showing));
+    toggle.textContent = `Run options ${showing ? '▴' : '▾'}`;
+  });
+}
+
+function renderAutoRun(cfg, { keepEdits = false } = {}) {
+  // loadConfig() runs on every panel open AND every time the ⚙ popover is
+  // toggled. Blowing away unsaved auto-run edits on a popover toggle is a
+  // silent data loss the operator has no way to anticipate, so a refresh
+  // that is not an explicit reload leaves a dirty form alone.
+  if (keepEdits && autoDirty) {
+    autoRunCfg = { ...cfg, ...pendingAutoRunEdits() };
+    paintAutoRun();
+    return;
+  }
+  autoRunCfg = cfg;
+  autoDirty = false;
+  autoTimes = Array.isArray(cfg.auto_run_times) ? [...cfg.auto_run_times] : [];
+  document.getElementById('schedule-auto-enabled').checked = !!cfg.auto_run_enabled;
+  document.getElementById('schedule-auto-interval').value = cfg.auto_run_interval_min || 180;
+  document.getElementById('schedule-opt-hours').value = cfg.schedule_hours ?? 24;
+  document.getElementById('schedule-opt-culmination').value = cfg.min_culmination_deg ?? 3;
+  document.getElementById('schedule-opt-maxobs').value = cfg.max_observation_minutes ?? 30;
+  document.getElementById('schedule-opt-onlyprio').checked = cfg.only_priority !== false;
+  paintAutoRun();
+}
+
+/* The parts of the form the operator has changed but not saved. */
+function pendingAutoRunEdits() {
+  return {
+    auto_run_mode: autoRunCfg?.auto_run_mode,
+    auto_run_dry_run: autoRunCfg?.auto_run_dry_run,
+  };
+}
+
+function setAutoMode(mode) {
+  if (!autoRunCfg) return;
+  autoRunCfg = { ...autoRunCfg, auto_run_mode: mode };
+  autoDirty = true;
+  paintAutoRun();
+}
+
+function setAutoBooking(dryOnly) {
+  if (!autoRunCfg) return;
+  autoRunCfg = { ...autoRunCfg, auto_run_dry_run: dryOnly };
+  autoDirty = true;
+  paintAutoRun();
+}
+
+function paintAutoRun() {
+  const cfg = autoRunCfg || {};
+  const mode = cfg.auto_run_mode === 'interval' ? 'interval' : 'times';
+  const timesTab = document.getElementById('schedule-auto-mode-times');
+  const intervalTab = document.getElementById('schedule-auto-mode-interval');
+  timesTab.classList.toggle('is-active', mode === 'times');
+  intervalTab.classList.toggle('is-active', mode === 'interval');
+  timesTab.setAttribute('aria-selected', String(mode === 'times'));
+  intervalTab.setAttribute('aria-selected', String(mode === 'interval'));
+  document.getElementById('schedule-auto-times-block').hidden = mode !== 'times';
+  document.getElementById('schedule-auto-interval-block').hidden = mode !== 'interval';
+
+  const dryOnly = cfg.auto_run_dry_run !== false;
+  document.getElementById('schedule-auto-dry').classList.toggle('is-active', dryOnly);
+  document.getElementById('schedule-auto-book').classList.toggle('is-active', !dryOnly);
+
+  renderTimeChips();
+
+  // The station publishes its own minimum culmination; -m REPLACES it rather
+  // than adding to it, and only when the station has not marked that limit
+  // hard. Saying so is the difference between a surprising empty run and an
+  // understood one.
+  const note = document.getElementById('schedule-runopts-note');
+  const culmination = document.getElementById('schedule-opt-culmination').value;
+  note.textContent =
+    `Min culmination ${culmination}° replaces the station's own published minimum, `
+    + 'not adds to it - so a lower value accepts grazing passes the station would '
+    + 'normally skip. If the station marks that limit as hard, SatNOGS keeps the '
+    + 'higher of the two and this value is ignored.';
+
+  const status = document.getElementById('schedule-auto-status');
+  if (!dryOnly && document.getElementById('schedule-auto-enabled').checked) {
+    status.textContent = 'Unattended runs will BOOK real observations.';
+    status.classList.add('sched-status-danger');
+  } else {
+    status.textContent = autoDirty ? 'unsaved changes' : '';
+    status.classList.remove('sched-status-danger');
+  }
+}
+
+function renderTimeChips() {
+  const ul = document.getElementById('schedule-auto-times');
+  ul.replaceChildren();
+  if (!autoTimes.length) {
+    const li = document.createElement('li');
+    li.className = 'muted';
+    li.textContent = 'no times set — auto run will never fire';
+    ul.appendChild(li);
+    return;
+  }
+  for (const time of autoTimes) {
+    const li = document.createElement('li');
+    li.className = 'sched-time-chip';
+    const label = document.createElement('span');
+    label.textContent = time;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'sched-chip-x';
+    remove.textContent = '×';
+    remove.setAttribute('aria-label', `Remove ${time}`);
+    remove.addEventListener('click', () => {
+      autoTimes = autoTimes.filter((t) => t !== time);
+      autoDirty = true;
+      paintAutoRun();
+    });
+    li.append(label, remove);
+    ul.appendChild(li);
+  }
+}
+
+function addAutoTime() {
+  const input = document.getElementById('schedule-auto-time-input');
+  const value = (input.value || '').trim();
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return;
+  if (!autoTimes.includes(value)) {
+    autoTimes = [...autoTimes, value].sort();
+    autoDirty = true;
+  }
+  input.value = '';
+  paintAutoRun();
+}
+
+/* Blank means "unchanged", not zero. */
+function numberOr(raw, fallback) {
+  const text = String(raw ?? '').trim();
+  if (text === '') return fallback;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+async function saveAutoRun() {
+  const btn = document.getElementById('schedule-auto-save');
+  const status = document.getElementById('schedule-auto-status');
+  btn.disabled = true;
+  btn.textContent = 'SAVING…';
+  try {
+    const cfg = await api.saveScheduleConfig({
+      auto_run_enabled: document.getElementById('schedule-auto-enabled').checked,
+      auto_run_mode: (autoRunCfg?.auto_run_mode === 'interval') ? 'interval' : 'times',
+      auto_run_times: autoTimes,
+      auto_run_interval_min: numberOr(
+        document.getElementById('schedule-auto-interval').value,
+        autoRunCfg?.auto_run_interval_min ?? 180,
+      ),
+      auto_run_dry_run: autoRunCfg?.auto_run_dry_run !== false,
+      schedule_hours: numberOr(
+        document.getElementById('schedule-opt-hours').value,
+        autoRunCfg?.schedule_hours ?? 24,
+      ),
+      // Number("") is 0, and 0 is a legal minimum culmination, so an empty
+      // box would silently save "accept every grazing pass" rather than
+      // leaving the value alone.
+      min_culmination_deg: numberOr(
+        document.getElementById('schedule-opt-culmination').value,
+        autoRunCfg?.min_culmination_deg ?? 3,
+      ),
+      max_observation_minutes: numberOr(
+        document.getElementById('schedule-opt-maxobs').value,
+        autoRunCfg?.max_observation_minutes ?? 30,
+      ),
+      only_priority: document.getElementById('schedule-opt-onlyprio').checked,
+    });
+    renderAutoRun(cfg);
+    renderNextAutoRun(cfg.auto_run_next_utc);
+    status.textContent = 'saved';
+  } catch (err) {
+    console.error('[schedule] auto run save', err);
+    status.textContent = `could not save: ${err}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'SAVE';
+  }
+}
+
+/* NORAD -> the last run's complaint about it.
+
+   These warnings are the only way the operator ever learns about the quiet
+   failure mode of `-f`: a satellite whose pinned transmitter is not in this
+   station's candidate set is simply never scheduled, and upstream says
+   nothing at all. Surfacing it on the row is what turns "why do I never get
+   this satellite" into something answerable. */
+let runWarningsByNorad = new Map();
+
+function noteRunWarnings(run) {
+  runWarningsByNorad = new Map();
+  for (const notice of run?.notices || []) {
+    // The messages name their satellite as "NORAD 12345" or "12345 was not
+    // considered: ..." - both produced by this backend, both start with the id.
+    const match = /(?:NORAD\s+)?(\d{4,6})\b/.exec(notice.message || '');
+    if (!match) continue;
+    const norad = Number(match[1]);
+    if (!runWarningsByNorad.has(norad)) runWarningsByNorad.set(norad, notice.message);
+  }
+  // The list may already be on screen from a parallel load.
+  if (priorities.length) renderPriorities();
+}
+
+function renderNextAutoRun(iso) {
+  const line = document.getElementById('schedule-auto-next');
+  if (!iso) {
+    line.hidden = true;
+    return;
+  }
+  const when = new Date(iso);
+  const mins = Math.round((when - Date.now()) / 60000);
+  const rel = mins <= 0 ? 'due now'
+    : mins < 60 ? `in ${mins} min`
+    : `in ${Math.floor(mins / 60)} h ${mins % 60} m`;
+  line.textContent = `Next auto run: ${shortDateTime(iso)} (${rel})`;
+  line.hidden = false;
 }
 
 async function verifyStation() {
@@ -818,6 +1516,16 @@ function renderListPicker() {
 }
 
 async function selectList(slug) {
+  // Switching lists reloads priorities from the new list, throwing away
+  // anything typed into the current one. Guarded with the same two-step as
+  // close(); the button that armed it is the list picker's own entry.
+  if (prioritiesDirty) {
+    const current = document.getElementById('schedule-list-current');
+    let proceed = false;
+    confirmDiscard(current, () => { proceed = true; });
+    if (!proceed) return;
+  }
+
   closeListPicker();
   if (slug === activeListSlug) return;
   try {

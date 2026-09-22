@@ -21,3 +21,8 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+
+# satnogs-auto-scheduler's own test fixtures, fetched on demand by
+# backend/tests/data/capture/fetch_upstream_fixtures.sh. Not committed: that
+# project is AGPL-3.0 and this one is MIT.
+backend/tests/data/capture/upstream_fixtures/

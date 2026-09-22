@@ -11,9 +11,11 @@ import asyncio
 
 from fastapi import APIRouter, HTTPException, Request
 
+from fastapi.responses import PlainTextResponse
+
 from ..schemas import (
     CampaignCommitRequest, PriorityListCreate, PriorityListRename, PriorityUpdate,
-    ScheduleConfigUpdate, StationVerifyRequest,
+    ScheduleConfigUpdate, ScheduleRunRequest, StationVerifyRequest,
 )
 
 router = APIRouter()
@@ -35,16 +37,60 @@ def _campaign(request: Request):
 
 @router.get("/schedule")
 async def last_run(request: Request) -> dict:
-    return _service(request).get_last_run()
+    """The last run, plus whether one is happening right now.
+
+    `running` and `progress` are not in the stored result - they are live
+    state. Without them the panel has to infer "still going" from the result
+    file not changing, which is indistinguishable from a run that died.
+    """
+    service = _service(request)
+    payload = dict(service.get_last_run())
+    payload["running"] = service.is_running()
+    payload["progress"] = service.progress()
+    next_run = service.next_auto_run()
+    payload["auto_run_next_utc"] = next_run.isoformat() if next_run else None
+    payload["auto_run_enabled"] = service.auto_run_enabled()
+    payload["auto_run_dry_run"] = service.auto_run_dry_run()
+    return payload
 
 
 @router.post("/schedule/run")
-async def run(request: Request) -> dict:
+async def run(request: Request, body: ScheduleRunRequest) -> dict:
+    """Start a run. `dry_run` is required - see ScheduleRunRequest.
+
+    Still fire-and-forget: a cold run can take minutes, so the caller polls
+    GET /schedule rather than holding a request open.
+    """
     service = _service(request)
     if service.is_running():
-        return {"status": "running"}
-    asyncio.create_task(service.run_plan())
-    return {"status": "started"}
+        return {"status": "running", "dry_run": body.dry_run}
+    asyncio.create_task(service.run_plan(dry_run=body.dry_run, trigger="manual"))
+    return {"status": "started", "dry_run": body.dry_run}
+
+
+@router.get("/schedule/log", response_class=PlainTextResponse)
+async def run_log(request: Request, lines: int = 400) -> str:
+    """The raw transcript of the last run.
+
+    The parsed result cannot carry everything the tool said, and when a run
+    does something surprising the transcript is the only place the answer
+    exists.
+    """
+    return _service(request).read_log(lines)
+
+
+@router.get("/schedule/priorities/export", response_class=PlainTextResponse)
+async def export_priorities(request: Request) -> PlainTextResponse:
+    """The active list in the exact format satnogs-auto-scheduler reads.
+
+    This is the concrete proof of the compatibility claim: the file it
+    downloads can be dropped straight into an existing command line with -P.
+    """
+    text = await _service(request).export_priority_text()
+    return PlainTextResponse(
+        text,
+        headers={"Content-Disposition": 'attachment; filename="prio.txt"'},
+    )
 
 
 @router.get("/schedule/priorities")
@@ -83,10 +129,17 @@ async def get_config(request: Request) -> dict:
 
 @router.post("/schedule/config")
 async def save_config(request: Request, body: ScheduleConfigUpdate) -> dict:
-    return await _service(request).save_config(
-        body.station_id, body.db_token, body.network_token,
-        body.campaign_auto_commit_enabled, body.campaign_max_per_station, body.campaign_max_total,
-    )
+    """Apply only the keys the client actually sent.
+
+    `exclude_unset` is the "leave it unchanged" convention expressed properly:
+    the panel already omits keys it does not mean to touch (it sets them to
+    `undefined`, which JSON.stringify drops), so an omitted key and an
+    explicit null are no longer the same thing.
+    """
+    try:
+        return await _service(request).save_config(**body.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/schedule/config/verify-station")

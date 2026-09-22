@@ -124,9 +124,33 @@ class Settings(BaseSettings):
     # --- schedule -------------------------------------------------------
     # The autoscheduler's own history-pages default (300 obs, ~75s uncached)
     # is what makes triggering a run fire-and-poll rather than blocking.
+    # schedule_poll_s and schedule_hours now only SEED a fresh
+    # schedule_config.json. Once one exists the operator's own Auto run
+    # settings are authoritative and changing these does nothing.
     schedule_poll_s: int = 1800
-    schedule_hours: float = 48.0
+    # 24h rather than the 48h this used to be: it matches run_scheduler.ps1,
+    # the script that has actually been booking this station's passes.
+    schedule_hours: float = 24.0
     schedule_history_pages: int = 12
+    # Backstops on the satnogs-auto-scheduler child process, not tuning knobs.
+    # A cold-cache run genuinely takes minutes, and that tool's booking POST
+    # carries no timeout of its own - which is what the idle one is aimed at.
+    schedule_timeout_s: int = 1800
+    schedule_idle_timeout_s: int = 900
+    # "module" starts the child through sys.executable: no PATH needed, and it
+    # lets us pre-seed logging so severity survives the tool's own
+    # format="%(message)s". "script" uses the installed console script instead.
+    schedule_launcher: str = "module"
+    # None (default) means "follow the global mock flag". Set explicitly to run
+    # the REAL satnogs-auto-scheduler while every other component stays
+    # simulated - the same escape hatch campaign_mock provides, and needed for
+    # the same reason: GS_MOCK=0 would also open a live connection to the
+    # station's rotctld, which is the one thing this station's setup
+    # deliberately avoids (and right now the SPID rotator is powered off).
+    #
+    # Note this switch decides whether a run SPAWNS the tool. It does not
+    # decide whether that run books: that is `dry_run`, per request.
+    schedule_mock: bool | None = None
 
     # --- network campaign -------------------------------------------------
     # Daily, not more often: SatNOGS itself won't accept a booking more than

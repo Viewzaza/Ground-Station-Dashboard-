@@ -14,6 +14,19 @@ async function get(path, params) {
   return resp.json();
 }
 
+/* The one endpoint that answers in plain text rather than JSON: the
+   scheduler's raw transcript, which is what it is precisely because it has
+   no structure worth imposing. */
+async function getText(path, params) {
+  const url = new URL(path, location.origin);
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v !== undefined && v !== null) url.searchParams.set(k, v);
+  }
+  const resp = await fetch(url, { headers: { accept: 'text/plain' } });
+  if (!resp.ok) throw new Error(`${resp.status} ${path}`);
+  return resp.text();
+}
+
 /** A refusal from the control interlock, carrying the gates that are shut. */
 export class Refused extends Error {
   constructor(message, blockedBy) {
@@ -67,7 +80,10 @@ export const api = {
   stopRotator:  ()            => post('/api/control/stop'),
 
   scheduleLastRun: ()         => get('/api/schedule'),
-  runSchedule:     ()         => post('/api/schedule/run', {}),
+  // dry_run is REQUIRED by the backend and has no default there: posting
+  // {} now gets a 422 rather than silently booking real observations.
+  runSchedule:     (dry_run)  => post('/api/schedule/run', { dry_run }),
+  scheduleLog:     (lines)    => getText('/api/schedule/log', { lines }),
   getPriorities:   ()         => get('/api/schedule/priorities'),
   savePriorities:  (entries)  => post('/api/schedule/priorities', { entries }),
   transmittersFor: (norad)    => get(`/api/schedule/transmitters/${norad}`),

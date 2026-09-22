@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 from .config import Settings
@@ -146,12 +147,76 @@ class Scheduler:
             fast = pos is not None and pos.el > -2.0
             await asyncio.sleep(1.0 if fast else 5.0)
 
+    # Never sleep longer than this in one go, however far away the next run
+    # is. It bounds how stale our idea of "now" can get after an NTP step or a
+    # suspend, and it is also the upper bound on how long a config change can
+    # sit unnoticed if the wake-up event is ever missed.
+    _AUTO_RUN_MAX_SLEEP_S = 300.0
+
     async def _schedule_loop(self) -> None:
-        """Periodically re-run the autoscheduler, so the dashboard always has
-        a recent 'last schedule' even if nobody presses Run now."""
+        """Fire the station scheduler when the operator's auto-run says to.
+
+        Two behaviours here are deliberate and are changes from how this used
+        to work.
+
+        **It no longer runs eagerly at boot.** This loop used to execute its
+        body before its first sleep, so every restart triggered a run. That was
+        harmless when a run only ever planned; now that a run can BOOK, a crash
+        loop would book repeatedly. The catch-up grace window in `next_fire`
+        covers the legitimate case - the backend being down across a slot -
+        without turning restarts into bookings.
+
+        **It waits on a config change, not just a clock.** `save_config()` sets
+        an event this wait watches, so editing the auto-run times in the
+        browser takes effect immediately instead of at the end of a multi-hour
+        sleep. That is what makes a restart API unnecessary; the supervisor has
+        none.
+        """
         while True:
-            await self.schedule_service.run_plan(hours=self.s.schedule_hours)
-            await asyncio.sleep(self.s.schedule_poll_s)
+            due = self.schedule_service.next_auto_run()
+            if due is None:
+                # Auto-run is off, or is on with no times set. Sleep on the
+                # config event so turning it on is noticed at once.
+                await self.schedule_service.wait_for_config_change(
+                    self._AUTO_RUN_MAX_SLEEP_S
+                )
+                continue
+
+            now = datetime.now(timezone.utc)
+            wait_s = (due - now).total_seconds()
+            if wait_s > 0:
+                changed = await self.schedule_service.wait_for_config_change(
+                    min(wait_s, self._AUTO_RUN_MAX_SLEEP_S)
+                )
+                if changed:
+                    continue  # recompute against the new settings
+                if (due - datetime.now(timezone.utc)).total_seconds() > 0:
+                    continue  # capped sleep; go round again
+                # fall through: the slot has arrived
+
+            dry_run = self.schedule_service.auto_run_dry_run()
+            # Marked BEFORE the run, not after. A run can take minutes, and if
+            # the process dies mid-run an unmarked slot would fire again on
+            # restart - against a station that may already have the bookings.
+            previous = await self.schedule_service.mark_auto_run()
+            log.info(
+                "auto-run firing (%s)", "dry run" if dry_run else "BOOKING FOR REAL"
+            )
+            result = await self.schedule_service.run_plan(
+                dry_run=dry_run, trigger="auto"
+            )
+            if result.get("status") == "running":
+                # run_plan refused: a manual run was already in flight. Nothing
+                # was planned and nothing was booked, so the slot has not
+                # happened - put the mark back or it is consumed silently and
+                # the scheduled booking never occurs at all. A cold-cache
+                # manual run easily spans a slot boundary, so this is not a
+                # rare race.
+                await self.schedule_service.restore_auto_run_mark(previous)
+                log.warning(
+                    "auto-run slot skipped: a run was already in progress. The "
+                    "slot has been left unfired and will be retried."
+                )
 
     async def _campaign_loop(self) -> None:
         """Keep the ~48h network-campaign booking window full on a timer.

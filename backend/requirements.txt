@@ -8,3 +8,4 @@ sgp4==2.27
 Pillow==12.3.0
 requests==2.32.5
 rich==14.2.0
+satnogs-auto-scheduler @ git+https://gitlab.com/librespacefoundation/satnogs/satnogs-auto-scheduler.git@0f7ec01776dad49f5ba2e66f8678649451075bac

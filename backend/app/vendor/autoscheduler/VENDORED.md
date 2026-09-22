@@ -1,5 +1,15 @@
 # Vendored: satnogs-autoscheduler
 
+> **Scope note.** Since the Station Schedule rewrite this package no longer
+> plans or books this station's own observations — that is done by the Libre
+> Space Foundation's official `satnogs-auto-scheduler`, a pip dependency run as
+> a separate process (see the README's *Station Schedule* section). The two are
+> different projects with similar names. What is still used from here:
+> **Network Campaign** (`campaign.py`, `network_client.py`), **priority
+> enrichment** and **the transmitter picker** (`db_client.pick_transmitter`),
+> and the priority file reader/writer. `cli.plan()`, `report._selection_payload`
+> and `PlanReport` are no longer called by `ScheduleService`.
+
 Copy-vendored rather than a git submodule or pip dependency, because the
 source repo (`D:\Claude\satnogs-autoscheduler`, worktree
 `.claude/worktrees/autoscheduler-build`) had no pushed git remote at the time
@@ -43,17 +53,32 @@ one, and a local editable install would break the Docker build context
    improvement, not a behavior change (station connection/antenna info
    does not change fast enough for an hour-old cache to matter).
 
-4. **`priorities.py`: `Priority` gained a `mode: str = "auto"` field**, with
-   a matching optional 4th column in the file format (`... [transmitter_uuid|-]
-   [manual]`). This is dashboard-side bookkeeping only — the scheduler itself
-   never reads `mode`, only `weight` — added so the dashboard's per-row
-   Auto/Manual weight toggle (a row pinned to "Manual" keeps its typed weight
-   across drag-reorders of other rows) survives a save/reload. Fully
-   backward compatible: a plain 2-3 field line (everything written before
-   this, and everything the official tool writes) still parses as
-   `mode="auto"` with no change in behavior, and `write_priority_file()`
-   only ever emits the 4th field for a "manual" entry, so an all-auto list's
-   file is byte-identical to what it would have been before this patch.
+4. **`priorities.py`: `Priority` gained a `mode: str = "auto"` field.** This is
+   dashboard-side bookkeeping only — the scheduler itself never reads `mode`,
+   only `weight` — added so the dashboard's per-row Auto/Manual weight toggle
+   (a row pinned to "Manual" keeps its typed weight across drag-reorders of
+   other rows) survives a save/reload.
+
+   **Amended.** `mode` was originally written into the file as an optional 4th
+   column (`... [transmitter_uuid|-] [manual]`), on the reasoning that it was
+   backward compatible because the *reader* tolerated it. That reasoning was
+   wrong about the reader that matters. The official
+   `satnogs-auto-scheduler`, which the Station Schedule tab now shells out to,
+   parses with `csv.reader(delimiter=" ")` and discards any line that is not
+   **exactly three fields** — so every 4-column line, and every `-`
+   placeholder line, was dropped in full. Verified against the real tool: a
+   file of such lines parses to `{}`. Under `-f` that is a run which books
+   nothing and exits 0.
+
+   So `write_priority_file()` is now strict: exactly `{norad} {weight:.3f}
+   {uuid}`, single spaces, bare NORAD ids, and no row without a UUID.
+   `mode`, and any row with no transmitter pinned, live in a
+   `<slug>.meta.json` sidecar owned by `ScheduleService` instead.
+   `parse_priority_file()` is deliberately **unchanged** and still accepts the
+   4-field and `-` shapes, so every file written before this keeps loading;
+   that asymmetry is the backward-compatible path, and
+   `ScheduleService._migrate_priority_files()` harvests the old modes into the
+   sidecar once and rewrites the file strict, keeping a `.bak`.
 
 5. **`cli.py`/`report.py`: `plan()` now returns a 3-tuple
    `(station, selection, PlanReport)` instead of `(station, selection)`.**
@@ -104,6 +129,12 @@ one, and a local editable install would break the Docker build context
    recoverable from `errors` without parsing its prose back apart. The
    dashboard needs the per-item answer to cross-check a run against the
    stations' real calendars afterwards.
+
+10. **`priorities.py`: added `render_priority_file(entries)`.** The body of
+    `write_priority_file()`, split out so the dashboard's
+    `GET /api/schedule/priorities/export` endpoint can hand the operator the
+    exact bytes the scheduler reads without going through a file. One
+    definition of the format rather than two that can drift.
 
 ## TODO
 

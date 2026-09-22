@@ -8,10 +8,15 @@ against it.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# 24-hour wall clock, matching util/nextfire.TIME_RE. Duplicated rather
+# than imported so the schema layer does not depend on a service helper.
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 ServerFrameType = Literal[
     "hello", "snapshot", "rotator", "satpos", "pass_next", "passes",
@@ -181,6 +186,12 @@ class PriorityListRename(BaseModel):
 
 
 class ScheduleConfigUpdate(BaseModel):
+    # extra="forbid" so a misspelled key is a 400 rather than a setting that
+    # silently never takes effect. Pydantic's default would drop it before the
+    # service ever saw it, which is the failure this is guarding against: an
+    # operator turning something off and it staying on.
+    model_config = ConfigDict(extra="forbid")
+
     station_id: int | None = None
     # "" clears the override back to the dashboard's own default; None
     # leaves the current value unchanged.
@@ -196,6 +207,54 @@ class ScheduleConfigUpdate(BaseModel):
     campaign_auto_commit_enabled: bool | None = None
     campaign_max_per_station: int | None = None
     campaign_max_total: int | None = None
+
+    # --- station auto run ---------------------------------------------------
+    # Ships off, and dry-run-only, on a fresh install: two deliberate switches
+    # between a new setup and anything booking unattended.
+    auto_run_enabled: bool | None = None
+    auto_run_mode: Literal["times", "interval"] | None = None
+    auto_run_times: list[str] | None = None
+    auto_run_interval_min: int | None = Field(default=None, ge=5, le=1440)
+    auto_run_dry_run: bool | None = None
+
+    # --- run flags ----------------------------------------------------------
+    # 96h is well past SatNOGS's own ~48h booking horizon; anything beyond it
+    # plans passes nobody can book.
+    schedule_hours: float | None = Field(default=None, gt=0, le=96)
+    min_culmination_deg: float | None = Field(default=None, ge=0, le=90)
+    only_priority: bool | None = None
+    max_observation_minutes: int | None = Field(default=None, ge=1, le=120)
+    start_lead_minutes: int | None = Field(default=None, ge=0, le=1440)
+    run_timeout_s: int | None = Field(default=None, ge=60, le=7200)
+
+    @field_validator("auto_run_times")
+    @classmethod
+    def _times_are_wall_clock(cls, value):
+        """24-hour HH:MM only.
+
+        Rejected rather than silently dropped, because a time the scheduler
+        ignores looks identical to one it is waiting for.
+        """
+        if value is None:
+            return value
+        bad = [t for t in value if not _HHMM_RE.fullmatch((t or "").strip())]
+        if bad:
+            raise ValueError(
+                f"auto-run times must be 24-hour HH:MM: {', '.join(map(repr, bad))}"
+            )
+        return [t.strip() for t in value]
+
+
+class ScheduleRunRequest(BaseModel):
+    """Deliberately has NO default.
+
+    A stale client that still posts `{}` - which is exactly what this
+    dashboard's own api.runSchedule() used to do - gets a 422 rather than
+    silently starting a run that books real observations. Failing closed is
+    worth more here than backward compatibility, because the failure mode of
+    the alternative is unattended bookings nobody asked for.
+    """
+    dry_run: bool
 
 
 class StationVerifyRequest(BaseModel):
@@ -225,14 +284,44 @@ class ScheduleNotice(BaseModel):
 
 
 class ScheduleRun(BaseModel):
-    status: Literal["ok", "ok_with_warnings"] = "ok"
+    # "error" and "never_run" are both really written by ScheduleService -
+    # the Literal used to exclude them, which nothing caught because no route
+    # declares this as a response_model.
+    status: Literal["ok", "ok_with_warnings", "error", "never_run", "running"] = "ok"
     station: int
     generated_utc: str
     considered: int
+    # No upstream equivalent in the official scheduler's output. Always 0, and
+    # said so rather than back-computed from considered-minus-planned, which
+    # would attribute elevation filtering to scheduling conflicts.
     rejected_conflict: int
     rejected_capped: int
     notices: list[ScheduleNotice] = Field(default_factory=list)
     observations: list[ScheduleObservation]
+
+    error: str | None = None
+    # False means this run really booked. The two are never inferred from each
+    # other: a dry run reports booked_state "dry_run", not "failed".
+    dry_run: bool = True
+    trigger: Literal["manual", "auto"] = "manual"
+    planned: int = 0
+    booked: int = 0
+    # "mock" is its own state, not a flavour of the others: a simulated run
+    # spawns nothing, so it neither booked nor failed to book, and collapsing
+    # it into "confirmed" told the operator an observation existed that did not.
+    booked_state: Literal[
+        "dry_run", "confirmed", "partial", "unconfirmed", "failed", "mock"
+    ] = "dry_run"
+    # Passes the run found already on the station's calendar. The tool prints
+    # these with zeroed azimuth/elevation, so they are kept apart rather than
+    # rendered as if they were planned now.
+    already_scheduled: list[ScheduleObservation] = Field(default_factory=list)
+    efficiency: dict | None = None
+    exit_code: int | None = None
+    killed_by: str = ""
+    run_duration_s: float = 0.0
+    log_tail: list[str] = Field(default_factory=list)
+    cli_version: str = ""
 
 
 class CampaignItem(BaseModel):
