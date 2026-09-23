@@ -94,6 +94,14 @@ class CampaignPreview:
     items: list[CampaignItem] = field(default_factory=list)
     # [{"station_id": int|None, "station_name": str, "reason": str}]
     skipped: list[dict] = field(default_factory=list)
+    # Station calendars actually fetched. Now that calendars are read lazily,
+    # during selection, this is far below considered_stations on a normal run.
+    calendars_read: int = 0
+    # Set when SatNOGS's read limit stopped the run before every candidate
+    # could be read: {"station_id", "station_name", "reason", "unread_stations"}.
+    # None means the plan is complete. The operator must be told which, because
+    # a truncated plan looks exactly like a small network otherwise.
+    stopped_early: dict | None = None
 
 
 def build_campaign(
@@ -201,54 +209,56 @@ def build_campaign(
             })
             continue
 
+        # No calendar read here. Phase 1 is pure geometry - Skyfield on this
+        # machine, no network - so it can afford to look at every station.
+        # Reading each station's calendar here is what used to spend the
+        # whole SatNOGS read budget (240/hour with a token, against ~300
+        # schedulable stations) on every run: the loop hit the limit, broke,
+        # and because stations arrive in ascending id order the part that fit
+        # inside the budget was always the network's oldest corner. The
+        # per-run shuffle in phase 2 then only reordered that prefix, and the
+        # geographic bias this split exists to remove came straight back.
+        # Calendars are now read in phase 2, lazily, in shuffled order, and
+        # only for stations about to be picked.
+        work.append(_StationWork(
+            station=station, tx=tx, calendar=None,
+            passes=sorted(gated, key=lambda pair: pair[0].aos),
+        ))
+
+    # Every non-excluded station had its geometry examined, so this is now
+    # both the honest number and the whole network.
+    preview.considered_stations = examined
+
+    def load_calendar(entry: "_StationWork") -> None:
+        """Fetch one station's calendar and drop the passes it rules out.
+
+        RateLimitedError is allowed to escape: a throttle is not this one
+        station's problem, the budget is spent for every station still to
+        come, and _select_spread stops reading on it. Any OTHER read failure
+        keeps the behaviour campaign-tuning deliberately chose (VENDORED.md
+        note 12): treat the calendar as empty and carry on, so one slow
+        station cannot abort the whole campaign.
+        """
         try:
-            bookings = network.future_bookings(station.id, now=now)
-        except RateLimitedError as exc:
-            # A throttle is not this one station's problem. The read budget is
-            # spent for every station still to come, and the fallback below
-            # would then read each of them as having an empty calendar - which
-            # is how a campaign ends up booking on top of other people's
-            # observations across the whole rest of the catalogue. Stop here
-            # and hand back what was worked out before the limit was reached.
-            log.warning("stopping the campaign early at station %d: %s", station.id, exc)
-            preview.skipped.append({
-                "station_id": station.id, "station_name": station.name,
-                "reason": f"campaign stopped early - SatNOGS is rate-limiting reads ({exc})",
-            })
-            break
+            bookings = network.future_bookings(entry.station.id, now=now)
+        except RateLimitedError:
+            raise
         except Exception as exc:   # a slow/unavailable station must not abort the whole campaign
-            log.warning("could not read existing bookings for station %d: %s", station.id, exc)
+            log.warning("could not read existing bookings for station %d: %s",
+                        entry.station.id, exc)
             bookings = []
         calendar = Calendar(buffer_s=0.0)
         for booking in bookings:
             calendar.add(booking.start, booking.end)
-        for start, end in (recent_attempts or {}).get(station.id, []):
+        for start, end in (recent_attempts or {}).get(entry.station.id, []):
             calendar.add(start, end)
+        entry.calendar = calendar
+        # Carried WITH the trimmed end, never p.los: see VENDORED.md note 13.
+        entry.passes = [(p, end) for p, end in entry.passes
+                        if not calendar.conflicts(p.aos, end)]
 
-        # Conflict-free passes only, each carried WITH ITS TRIMMED END. The end
-        # is not p.los: passes near the window edge are cut back to hard_end so
-        # they finish inside the server's 2899-minute booking edge (see
-        # VENDORED.md note 13), and booking p.los instead would reintroduce
-        # guaranteed rejections. The calendar travels with the station into
-        # phase 2, because selecting one pass can rule out another on the same
-        # station and that has to be re-checked as we go.
-        free = [(p, end) for p, end in sorted(gated, key=lambda pair: pair[0].aos)
-                if not calendar.conflicts(p.aos, end)]
-        if not free:
-            preview.skipped.append({
-                "station_id": station.id, "station_name": station.name,
-                "reason": "every qualifying pass conflicts with an existing booking",
-            })
-            continue
-
-        work.append(_StationWork(station=station, tx=tx, calendar=calendar, passes=free))
-
-    # The honest number. This was len(stations), assigned before the loop, so a
-    # run that stopped a third of the way through still told the operator it had
-    # considered the whole network - and schedule.js renders it verbatim on the
-    # confirm screen. It is now what was actually examined.
-    preview.considered_stations = examined
-    _select_spread(preview, work, max_per_station=max_per_station, max_total=max_total)
+    _select_spread(preview, work, max_per_station=max_per_station,
+                   max_total=max_total, load_calendar=load_calendar)
     return preview
 
 
@@ -311,6 +321,7 @@ def _select_spread(
     *,
     max_per_station: int,
     max_total: int,
+    load_calendar=None,
 ) -> None:
     """Choose up to `max_total` passes, spread across stations and elevations.
 
@@ -356,15 +367,57 @@ def _select_spread(
     if not work or max_total <= 0:
         return
 
-    remaining = {index: list(entry.passes) for index, entry in enumerate(work)}
+    # Calendars are read lazily: `remaining` gains a station only once its
+    # calendar has been loaded and its conflicting passes removed. That keeps
+    # reads close to the number of stations actually visited - roughly the
+    # number booked - instead of one per station on the network.
+    remaining: dict[int, list] = {}
+    unusable: set[int] = set()          # read, and every pass conflicted
     band_counts = {index: 0 for index in range(len(ELEVATION_BAND_FLOORS))}
+    stop_reading = False
 
     # Seeded from the run's own second, so two runs a day apart - or a minute
     # apart - always start somewhere different, whatever len(work) happens to
-    # be. Stable within one run, so a preview and its commit agree.
+    # be. Stable within one run, so a preview and its commit agree. Because
+    # calendars are read in THIS order, a run cut short by the read limit has
+    # read a random sample of the network rather than its lowest ids.
     shuffler = random.Random(int(preview.generated_utc.timestamp()))
     base_order = list(range(len(work)))
     shuffler.shuffle(base_order)
+
+    def ready(index: int) -> bool:
+        """Load this station's calendar on first visit; is it selectable?"""
+        nonlocal stop_reading
+        if index in remaining:
+            return True
+        if index in unusable or stop_reading:
+            return False
+        entry = work[index]
+        if load_calendar is not None:
+            try:
+                load_calendar(entry)
+            except RateLimitedError as exc:
+                # Stop READING, not selecting: stations already loaded are
+                # still perfectly good candidates, and dropping them would turn
+                # a throttle into an empty plan.
+                stop_reading = True
+                preview.stopped_early = {
+                    "station_id": entry.station.id,
+                    "station_name": entry.station.name,
+                    "reason": f"SatNOGS is rate-limiting reads ({exc})",
+                }
+                log.warning("campaign stopped reading calendars at station %d: %s",
+                            entry.station.id, exc)
+                return False
+            preview.calendars_read += 1
+        if entry.calendar is None:
+            # No loader means nothing is known to be booked there yet.
+            entry.calendar = Calendar(buffer_s=0.0)
+        if not entry.passes:
+            unusable.add(index)
+            return False
+        remaining[index] = list(entry.passes)
+        return True
 
     for round_index in range(max(0, max_per_station)):
         if len(preview.items) >= max_total:
@@ -378,6 +431,8 @@ def _select_spread(
         for index in order:
             if len(preview.items) >= max_total:
                 break
+            if not ready(index):
+                continue
             entry = work[index]
             available = remaining[index]
             if not available:
@@ -421,24 +476,33 @@ def _select_spread(
     # order they are shown in. Selection emits them in shuffled-station,
     # round-by-round order, and schedule.js renders preview.items verbatim with
     # no sort of its own - into a table that deliberately lists every row so
-    # nothing that gets booked goes unseen. In selection order that table is
-    # sorted by neither station nor time and starts at an arbitrary station,
-    # which defeats the review it exists for. Sorting here, once, restores a
-    # table a person can check and keeps any consumer that assumed station
-    # order working. It cannot change what is booked: the set is already fixed.
+    # nothing that gets booked goes unseen. Sorting here, once, restores a
+    # table a person can check. It cannot change what is booked.
     preview.items.sort(key=lambda item: (item.station_id, item.start))
 
-    # A station that reached phase 2 with usable passes but won nothing is a
-    # budget casualty, not a conflict. Saying "every qualifying pass conflicts"
-    # about it - which the old code did - is simply false, and it is the line
-    # the operator reads when wondering why a station was left out.
+    # Account for every station that won nothing, with the reason that is
+    # actually true of it. Four different things used to share one message.
+    if preview.stopped_early is not None:
+        preview.stopped_early["unread_stations"] = sum(
+            1 for index in range(len(work))
+            if index not in remaining and index not in unusable
+        )
     booked_ids = {item.station_id for item in preview.items}
-    for entry in work:
-        if entry.station.id not in booked_ids:
-            preview.skipped.append({
-                "station_id": entry.station.id, "station_name": entry.station.name,
-                "reason": "had a free pass but the booking budget was spent first",
-            })
+    for index, entry in enumerate(work):
+        if entry.station.id in booked_ids:
+            continue
+        if index in unusable:
+            reason = "every qualifying pass conflicts with an existing booking"
+        elif index in remaining:
+            reason = "had a free pass but the booking budget was spent first"
+        elif preview.stopped_early is not None:
+            reason = "not read - SatNOGS's read limit was reached before this station"
+        else:
+            reason = "not reached - the booking budget was spent before this station was read"
+        preview.skipped.append({
+            "station_id": entry.station.id, "station_name": entry.station.name,
+            "reason": reason,
+        })
 
 
 def _campaign_preview_payload(preview: CampaignPreview) -> dict:
@@ -463,4 +527,9 @@ def _campaign_preview_payload(preview: CampaignPreview) -> dict:
             for item in preview.items
         ],
         "skipped": preview.skipped,
+        "calendars_read": preview.calendars_read,
+        # None when the plan is complete. Anything else means the run was cut
+        # short and the plan covers only part of the network - the UI must say
+        # so rather than let a truncated plan pass for a small network.
+        "stopped_early": preview.stopped_early,
     }

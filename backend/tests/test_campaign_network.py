@@ -414,9 +414,24 @@ def test_a_rate_limit_stops_the_run_instead_of_treating_the_rest_as_free(monkeyp
 
     preview = run(network, max_per_station=1)
 
-    assert [item.station_id for item in preview.items] == [1]
-    assert network.asked == [1, 2]          # station 3 was never even asked
-    assert any("rate-limit" in row["reason"] for row in preview.skipped)
+    # Stations are read in a per-run shuffled order now, not 1-2-3, so this
+    # asserts the property rather than a sequence. What must hold whatever the
+    # order: the throttled read is the LAST read - nothing is asked after it -
+    # and nothing is booked on a calendar that was never actually fetched.
+    throttled_at = network.asked.index(2)
+    assert throttled_at == len(network.asked) - 1, (
+        "a station was read after the throttle; the budget is spent for every "
+        "station still to come"
+    )
+    booked = {item.station_id for item in preview.items}
+    assert 2 not in booked
+    assert booked <= set(network.asked[:throttled_at]), (
+        "every booked station must have had its calendar genuinely read - "
+        "booking one that was not is booking on top of unseen observations"
+    )
+    assert preview.stopped_early is not None
+    assert preview.stopped_early["station_id"] == 2
+    assert "rate-limit" in preview.stopped_early["reason"]
 
 
 def test_one_unreachable_station_does_not_stop_the_run(monkeypatch):
@@ -431,8 +446,11 @@ def test_one_unreachable_station_does_not_stop_the_run(monkeypatch):
 
     preview = run(network, max_per_station=1)
 
-    assert [item.station_id for item in preview.items] == [1, 2, 3]
-    assert network.asked == [1, 2, 3]
+    # Sets, not lists: read order is shuffled per run, and the claim here is
+    # that nobody was abandoned, not the order they were asked in.
+    assert {item.station_id for item in preview.items} == {1, 2, 3}
+    assert set(network.asked) == {1, 2, 3}
+    assert preview.stopped_early is None
 
 
 # --------------------------------------------------------------------------
