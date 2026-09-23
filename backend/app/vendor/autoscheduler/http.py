@@ -39,6 +39,23 @@ class SatnogsHTTPError(RuntimeError):
         self.body = body
 
 
+class SatnogsOutcomeUnknown(SatnogsHTTPError):
+    """A write was sent and may or may not have been applied.
+
+    Raised instead of retrying. The request reached the server - it was a read
+    timeout, a dropped connection mid-response, or a 5xx from a gateway sitting
+    in front of an application that may already have committed - so repeating
+    it can create the same rows twice. The only safe next step is to read the
+    real state back, never to send the write again.
+    """
+
+
+# Only these are retried when the request may have reached the server. Every
+# other method creates or changes something, and "try again" is only safe for
+# those when the first attempt provably never arrived.
+_SAFE_TO_REPEAT = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
 def make_session(token: str = "", token_scheme: str = "Token") -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
@@ -56,18 +73,46 @@ def request(
     json_body: Any = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> requests.Response:
-    """One request, retried on transport errors and 5xx but never on 4xx.
+    """One request. Reads are retried on transport errors and 5xx; writes are
+    retried only when they provably never reached the server; nothing is ever
+    retried on 4xx.
 
     A 4xx is the server telling us the request itself is wrong; repeating it
     just wastes everybody's time.
+
+    WRITES ARE DIFFERENT, and this used to treat them as reads. The booking
+    POST went through the same loop, so a read timeout after SatNOGS had
+    already created the observations - or a 504 from a gateway in front of an
+    application that had - sent the whole batch again, twice more. The caller
+    then fell back to re-posting every item on its own, three tries each. A
+    probe against a server that persists every POST and then drops the
+    response turned 3 intended bookings into 12 POSTs and 18 created rows, and
+    the run reported accepted 0, so none of it could be found or cancelled from
+    the dashboard. On a 150-item campaign that is up to 900 create attempts on
+    other people's stations.
+
+    So for a write, only ConnectTimeout is retried: the TCP connection never
+    completed, so nothing can have arrived. Everything else that can happen
+    after the request is on the wire raises SatnogsOutcomeUnknown immediately.
     """
+    repeatable = method.upper() in _SAFE_TO_REPEAT
     last_exc: Exception | None = None
     for attempt in range(MAX_RETRIES):
         try:
             resp = session.request(
                 method, url, params=params, json=json_body, timeout=timeout
             )
+        except requests.exceptions.ConnectTimeout as exc:
+            # Never connected, so never sent: safe to repeat for any method.
+            last_exc = exc
+            log.warning("%s %s could not connect (%s), attempt %d/%d",
+                        method, url, exc, attempt + 1, MAX_RETRIES)
         except requests.RequestException as exc:
+            if not repeatable:
+                raise SatnogsOutcomeUnknown(
+                    f"{method} {url} was sent but no answer arrived ({exc}); "
+                    "it may or may not have been applied",
+                ) from exc
             last_exc = exc
             log.warning("%s %s failed (%s), attempt %d/%d",
                         method, url, exc, attempt + 1, MAX_RETRIES)
@@ -77,6 +122,13 @@ def request(
             if 400 <= resp.status_code < 500:
                 raise SatnogsHTTPError(
                     f"{method} {url} -> HTTP {resp.status_code}",
+                    status=resp.status_code,
+                    body=resp.text[:2000],
+                )
+            if not repeatable:
+                raise SatnogsOutcomeUnknown(
+                    f"{method} {url} -> HTTP {resp.status_code}; the server may "
+                    "have applied it before failing",
                     status=resp.status_code,
                     body=resp.text[:2000],
                 )

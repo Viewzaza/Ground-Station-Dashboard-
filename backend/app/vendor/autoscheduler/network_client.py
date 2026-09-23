@@ -32,7 +32,9 @@ import requests
 
 from .cache import Cache
 from .config import HISTORY_TTL_S, STATIONS_ALL_TTL_S, STATION_TTL_S, Settings
-from .http import SatnogsHTTPError, make_session, paginate, request
+from .http import (
+    SatnogsHTTPError, SatnogsOutcomeUnknown, make_session, paginate, request,
+)
 
 log = logging.getLogger(__name__)
 
@@ -321,6 +323,12 @@ class ScheduleResult:
     # afterwards - and on a partial batch rejection the accepted set is not
     # derivable from `errors` without parsing its prose back apart.
     accepted_items: list[dict] = field(default_factory=list)
+    # Sent, but no reliable answer came back - they may be on the station's
+    # calendar or not. Kept apart from accepted_items (which would claim a
+    # booking nobody confirmed) and from a plain error (which would invite a
+    # resubmit that duplicates any that did land). These are what a
+    # cross-check must read back before anyone tries again.
+    uncertain_items: list[dict] = field(default_factory=list)
 
 
 class NetworkClient:
@@ -487,16 +495,45 @@ class NetworkClient:
         url = f"{self.s.network_base_url}/observations/"
         try:
             request(self.session, "POST", url, json_body=items)
+        except SatnogsOutcomeUnknown as exc:
+            # Caught before SatnogsHTTPError, which it subclasses. The batch
+            # may have been applied, so the one-at-a-time fallback below - which
+            # exists for a batch the server REJECTED - would re-create every
+            # observation that did land. Stop, and say what is not known.
+            log.error("booking outcome unknown for all %d item(s): %s", len(items), exc)
+            result.uncertain_items = list(items)
+            result.errors.append(
+                f"OUTCOME UNKNOWN for all {len(items)} submitted item(s): {exc}. "
+                "Some or all may be booked. Do NOT resubmit - cross-check the "
+                "station calendars first."
+            )
+            return result
         except SatnogsHTTPError as exc:
+            if exc.status is None:
+                # No status means the connection never completed on any
+                # attempt, so nothing reached the server. Trying each item on
+                # its own would only fail the same way len(items) more times.
+                log.warning("could not reach SatNOGS to submit %d item(s): %s", len(items), exc)
+                result.errors.append(
+                    f"could not reach SatNOGS to submit {len(items)} item(s): {exc}. "
+                    "Nothing was booked."
+                )
+                return result
             log.warning("the batch was rejected (%s); retrying one at a time", exc.status)
             log.debug("batch rejection body: %s", exc.body)
             for item in items:
+                where = (f"station {item.get('ground_station')} {item['start']} "
+                         f"transmitter {item['transmitter_uuid']}")
                 try:
                     request(self.session, "POST", url, json_body=[item])
+                except SatnogsOutcomeUnknown as single:
+                    result.uncertain_items.append(item)
+                    result.errors.append(f"{where}: OUTCOME UNKNOWN - {single}")
                 except SatnogsHTTPError as single:
+                    # The station id is in the message now. With 77 stations in
+                    # a run, "HTTP 409" alone did not say which one refused.
                     result.errors.append(
-                        f"{item['start']} norad-transmitter {item['transmitter_uuid']}: "
-                        f"HTTP {single.status} {single.body[:300]}"
+                        f"{where}: HTTP {single.status} {single.body[:300]}"
                     )
                 else:
                     result.accepted += 1
