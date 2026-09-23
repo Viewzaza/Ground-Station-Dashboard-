@@ -14,14 +14,21 @@ Three details bite if you get them wrong:
 * Datetimes are ``%Y-%m-%d %H:%M:%S`` in UTC. ISO-8601 with ``T`` and ``Z`` is
   rejected outright - the serializer names those two formats and no others.
 * The station must be connected and have a location, or the whole batch fails.
+
+Reads are rate-limited by the server and writes are not; see
+``RateLimitedSession`` below for the published budgets and for what this
+client does to stay inside them.
 """
 
 from __future__ import annotations
 
 import logging
-from collections import Counter
+import time
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+import requests
 
 from .cache import Cache
 from .config import HISTORY_TTL_S, STATIONS_ALL_TTL_S, STATION_TTL_S, Settings
@@ -30,6 +37,171 @@ from .http import SatnogsHTTPError, make_session, paginate, request
 log = logging.getLogger(__name__)
 
 API_DATETIME = "%Y-%m-%d %H:%M:%S"
+
+
+# -- staying inside the Network API's published read budget -------------------
+
+# satnogs-network throttles its *list* endpoints, and publishes the rates in
+# its own settings - `DEFAULT_THROTTLE_RATES` in `network/settings.py`, with
+# the scopes wired to views in `network/api/throttling.py` and
+# `network/api/views.py`:
+#
+#     /api/observations/  list    60/hour anonymous, 240/hour with a token
+#     /api/stations/      list   256/hour anonymous, unthrottled with a token
+#
+# Only the `list` action carries a throttle class - fetching one observation
+# by id is not throttled - and both observation throttles return early for
+# POST and PUT, so booking itself never spends any of this. Every read this
+# client makes is a list request, `raw_station()` included: `/stations/?id=N`
+# is a *filtered list*, not a detail lookup, and counts like one.
+OBSERVATION_LIST_PER_HOUR_ANON = 60
+OBSERVATION_LIST_PER_HOUR_AUTH = 240
+# Authenticated station reads are not throttled at all - that scope only has
+# an AnonRateThrottle - but there is no reason to burst harder merely because
+# a token is present, so the anonymous ceiling applies either way.
+STATION_LIST_PER_HOUR = 256
+
+# The server counts with a sliding window an hour wide, so we do too. A fixed
+# bucket would let us fire two full budgets back to back across its boundary.
+THROTTLE_WINDOW_S = 3600.0
+
+# The longest this will block a caller waiting for budget to come free. Past
+# this the budget is genuinely spent, and sleeping on it would hang the
+# dashboard for the better part of an hour; the caller is told instead and
+# gets to decide - see `build_campaign`, which stops and keeps its partial run.
+MAX_PACING_WAIT_S = 30.0
+
+# A 429 names its own wait in `Retry-After`, which DRF writes as whole
+# seconds. Honour it, but not unboundedly: a very long one is a signal to stop
+# for now, not to sit blocked on a socket.
+MAX_RETRY_AFTER_WAIT_S = 120.0
+
+# How many times a single request may be re-sent after a 429. Deliberately
+# small - the point of honouring Retry-After is to stop asking, not to ask
+# politely in a loop.
+MAX_THROTTLE_RETRIES = 2
+
+# Used only when a 429 arrives without a `Retry-After` we can read.
+THROTTLE_BACKOFF_BASE_S = 5.0
+
+
+class RateLimitedError(SatnogsHTTPError):
+    """The Network API is rate-limiting us, or is about to be.
+
+    Distinct from a plain `SatnogsHTTPError` because the two mean opposite
+    things to a caller: a 400 is about the one request that was sent, and the
+    next request may well be fine, whereas a throttle is about the budget and
+    so applies to every request still to come.
+    """
+
+
+class RateLimitedSession:
+    """A `requests.Session` that keeps this client inside network.satnogs.org's
+    published read budget, and obeys a 429 rather than arguing with it.
+
+    Wrapping the session rather than the call sites is deliberate:
+    `http.paginate()` walks cursor pages by calling `session.request()` itself,
+    so anything hooked onto `http.request()` alone would pace the first page of
+    a crawl and none of the rest - and a crawl is where the budget actually goes.
+
+    The count kept here is this process's own traffic only. The server counts
+    per IP when anonymous and per token when not, and the dashboard's waterfall
+    and telemetry panels reach SatNOGS over their own httpx clients without
+    passing through here, so this count is a floor and never a guarantee. That
+    is precisely why the 429 path below has to be right as well: the pacing is
+    the courtesy, and honouring Retry-After is the part that keeps the account.
+    """
+
+    def __init__(self, session: requests.Session, *, authenticated: bool,
+                 sleep=time.sleep, clock=time.monotonic) -> None:
+        self._session = session
+        self._budgets = {
+            "observations": (OBSERVATION_LIST_PER_HOUR_AUTH if authenticated
+                             else OBSERVATION_LIST_PER_HOUR_ANON),
+            "stations": STATION_LIST_PER_HOUR,
+        }
+        self._spent: dict[str, deque] = {scope: deque() for scope in self._budgets}
+        self._sleep = sleep
+        self._clock = clock
+
+    def __getattr__(self, name):
+        # `headers`, `close()` and the rest still belong to the real session.
+        return getattr(self._session, name)
+
+    @staticmethod
+    def _scope(method: str, url: str) -> str | None:
+        """Which server-side budget this request spends, if any."""
+        if method.upper() not in ("GET", "HEAD"):
+            # POST and PUT are explicitly exempted by the server's own throttle
+            # classes, so a booking must never be delayed or refused by us.
+            return None
+        if "/observations" in url:
+            return "observations"
+        if "/stations" in url:
+            return "stations"
+        return None
+
+    def _claim(self, scope: str) -> None:
+        """Take a slot in `scope`'s budget, waiting briefly if one is close."""
+        limit = self._budgets[scope]
+        spent = self._spent[scope]
+        now = self._clock()
+        while spent and now - spent[0] >= THROTTLE_WINDOW_S:
+            spent.popleft()
+        if len(spent) >= limit:
+            wait = THROTTLE_WINDOW_S - (now - spent[0])
+            if wait > MAX_PACING_WAIT_S:
+                raise RateLimitedError(
+                    f"the {scope} read budget ({limit}/hour) is spent; the next "
+                    f"slot is {wait:.0f}s away",
+                    status=429,
+                )
+            self._sleep(wait)
+            spent.popleft()
+        spent.append(self._clock())
+
+    @staticmethod
+    def _retry_after(resp: requests.Response, attempt: int) -> float:
+        """How long the server asked us to wait, in seconds.
+
+        DRF writes `Retry-After` as whole seconds. RFC 9110 also allows an
+        HTTP-date there; nothing on this API sends one, and if something ever
+        does, the unparseable value falls through to a backoff rather than
+        being read as zero.
+        """
+        try:
+            wait = float(resp.headers.get("Retry-After", ""))
+        except ValueError:
+            wait = -1.0
+        if wait < 0:
+            wait = THROTTLE_BACKOFF_BASE_S * (2 ** attempt)
+        return min(wait, MAX_RETRY_AFTER_WAIT_S)
+
+    def request(self, method: str, url: str, **kwargs) -> requests.Response:
+        scope = self._scope(method, url)
+        if scope is None:
+            return self._session.request(method, url, **kwargs)
+
+        resp = None
+        for attempt in range(MAX_THROTTLE_RETRIES + 1):
+            self._claim(scope)
+            resp = self._session.request(method, url, **kwargs)
+            if resp.status_code != 429:
+                return resp
+            wait = self._retry_after(resp, attempt)
+            if attempt >= MAX_THROTTLE_RETRIES:
+                break
+            log.warning(
+                "SatNOGS answered 429 on a %s read; waiting %.0fs before "
+                "attempt %d of %d", scope, wait, attempt + 2, MAX_THROTTLE_RETRIES + 1,
+            )
+            self._sleep(wait)
+
+        raise RateLimitedError(
+            f"{method} {url} -> HTTP 429 after {MAX_THROTTLE_RETRIES + 1} attempt(s)",
+            status=429,
+            body=(resp.text[:2000] if resp is not None else ""),
+        )
 
 
 def format_api_datetime(when: datetime) -> str:
@@ -155,7 +327,14 @@ class NetworkClient:
     def __init__(self, settings: Settings, cache: Cache) -> None:
         self.s = settings
         self.cache = cache
-        self.session = make_session(settings.network_token)
+        # Every read below goes through the rate-limit gate. Whether a token is
+        # configured changes the budget the server applies to us (60/hour
+        # anonymous against 240/hour authenticated on the observation feed), so
+        # the gate is told which one it is working with.
+        self.session = RateLimitedSession(
+            make_session(settings.network_token),
+            authenticated=bool(settings.network_token),
+        )
 
     # -- reads ---------------------------------------------------------------
 
