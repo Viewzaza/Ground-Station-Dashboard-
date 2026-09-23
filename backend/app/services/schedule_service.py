@@ -276,8 +276,17 @@ class ScheduleService:
                 "cli_version": self.cli_version,
             }
 
-    async def save_config(self, **fields) -> dict:
+    async def save_config(self, *, now: datetime | None = None, **fields) -> dict:
         """Apply only the keys actually passed.
+
+        `now` is keyword-only and separate from **fields on purpose: fields is
+        validated against _CONFIG_FIELDS and an unknown key raises, so a clock
+        smuggled in there would be rejected. It exists because the
+        auto_run_changed_utc stamp below used to read the wall clock directly,
+        which made this method impossible to test at a fixed date - two tests
+        asserting against 2026-09-21 fixtures passed when they were written and
+        began failing permanently once real time moved past them. Production
+        passes nothing and gets datetime.now, exactly as before.
 
         `None` is no longer how a caller says "leave unchanged" - simply not
         passing the key is, which is what the route's
@@ -305,8 +314,8 @@ class ScheduleService:
             # Without this, adding a 12:30 time at 12:40 lands inside the
             # 30-minute catch-up grace and fires a REAL booking run seconds
             # after SAVE, for a slot the operator meant to start tomorrow.
-            self._config["auto_run_changed_utc"] = datetime.now(
-                timezone.utc
+            self._config["auto_run_changed_utc"] = (
+                now or datetime.now(timezone.utc)
             ).isoformat()
             await asyncio.to_thread(self._write_config)
         # Wake the auto-run loop so a change to the timer takes effect now
