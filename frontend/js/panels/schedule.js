@@ -48,6 +48,7 @@ let networkTokenSet = false;
 let campaignPreviewItems = null;   // the exact items last previewed, so CONFIRM submits what was shown
 let campaignConfigDirty = false;   // invalidates a stale preview if config changes after it
 let lastPreviewCapableStations = null;  // stations the last preview found usable, for the reach hint
+let lastPreviewStoppedEarly = null;     // the last preview's stopped_early, or null if it was complete
 
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
@@ -1670,6 +1671,10 @@ function updateCampaignGate() {
   const previewBtn = document.getElementById('campaign-preview-btn');
   hint.hidden = networkTokenSet;
   previewBtn.disabled = !networkTokenSet;
+  // One-click previews and then books, so it needs the token at least as much
+  // as PREVIEW does. It was left enabled, and would fail minutes into a run.
+  const oneClick = document.getElementById('campaign-oneclick-btn');
+  if (oneClick) oneClick.disabled = !networkTokenSet;
   if (campaignConfigDirty) invalidateCampaignPreview();
 }
 
@@ -1724,7 +1729,7 @@ async function runCampaignPreview() {
         'A campaign run (preview or submit) is already in progress — wait for it '
         + 'to finish, then try again.'));
       announceCampaign('A campaign run is already in progress.');
-      return;
+      return 'busy';
     }
     const deadline = Date.now() + CAMPAIGN_POLL_TIMEOUT_MS;
     let finished = false;
@@ -1742,11 +1747,14 @@ async function runCampaignPreview() {
         'Still computing after 20 minutes — it may still finish. Nothing has been '
         + 'booked. Reopen this panel later to check, or use PREVIEW again once it has.'));
       announceCampaign('Preview still computing after 20 minutes. Nothing booked.');
+      return 'timeout';
     }
+    return 'ready';
   } catch (err) {
     console.error('[schedule] campaign preview', err);
     box.replaceChildren(alertNote(`Could not compute preview: ${err}`, 'error'));
     announceCampaign(`Preview failed: ${err}`);
+    return 'error';
   } finally {
     btn.disabled = false;
     btn.textContent = 'PREVIEW';
@@ -1825,11 +1833,26 @@ function renderCampaignPreview(preview) {
   // What CONFIRM actually submits — exactly what was just shown, not a
   // recompute at click time, so what's confirmed is what was reviewed.
   campaignPreviewItems = items;
-  // Stations the run could actually use: those it booked, plus those it looked
-  // at and rejected only because the budget ran out. Stations skipped for
-  // antenna range or no pass are NOT usable and must not inflate the ceiling.
+  lastPreviewStoppedEarly = preview.stopped_early || null;
+  if (lastPreviewStoppedEarly) {
+    // Above the table, not in the collapsed report: a plan cut short by the
+    // read limit looks exactly like a small network otherwise, and it is the
+    // fact that changes what the operator should do next.
+    const se = lastPreviewStoppedEarly;
+    box.prepend(alertNote(
+      `Incomplete plan — SatNOGS's read limit stopped this preview at station `
+      + `${se.station_id}${se.station_name ? ` (${se.station_name})` : ''}, with `
+      + `${se.unread_stations ?? 'some'} candidate station(s) never read. The plan `
+      + 'below covers only the stations it reached. Adding a Network token raises '
+      + 'the limit; otherwise try again in an hour.'));
+  }
+  // Stations the run could use: those it booked, plus those it had in hand
+  // but left out only because the booking budget ran out first. Stations
+  // skipped for antenna range, no pass, conflicts, or never read are NOT
+  // evidence of capacity and must not inflate the ceiling.
   const budgetSkipped = (preview.skipped || []).filter(
-    (sk) => typeof sk.reason === 'string' && sk.reason.startsWith('had a free pass'),
+    (sk) => typeof sk.reason === 'string'
+      && (sk.reason.startsWith('had a free pass') || sk.reason.startsWith('not reached')),
   ).length;
   lastPreviewCapableStations = new Set(items.map((it) => it.station_id)).size + budgetSkipped;
   paintCampaignReach();
@@ -2042,6 +2065,16 @@ function paintCampaignReach() {
   // the network we have here; before one exists we can only state the demand.
   const reach = lastPreviewCapableStations;
   let text = `${total} bookings at ${per} per station needs ${stationsNeeded} station(s).`;
+  if (lastPreviewStoppedEarly) {
+    // The last preview never finished reading, so its count describes the read
+    // budget, not the network. Blaming the network here sends the operator to
+    // raise passes/station - depth on the same stations - when breadth is what
+    // was actually missing.
+    text += ' The last preview was cut short by the read limit, so it cannot '
+      + 'say how many stations are usable.';
+    hint.textContent = text;
+    return;
+  }
   if (reach != null) {
     const ceiling = reach * per;
     text += ceiling < total
@@ -2068,6 +2101,22 @@ function paintCampaignReach() {
 async function runCampaignOneClick() {
   const btn = document.getElementById('campaign-oneclick-btn');
   const box = document.getElementById('campaign-preview-result');
+
+  // THE NUMBERS IN THE PROMPT MUST BE THE NUMBERS USED. The prompt reads the
+  // sliders, but the backend plans from the SAVED config - POST /preview
+  // carries no body. So with unsaved slider moves the prompt could say "up to
+  // 20, at most 1 per station" while the run booked 600: a consent prompt that
+  // misstates the thing being consented to. Refusing while there are unsaved
+  // changes makes slider and saved config the same thing at the moment of
+  // asking.
+  if (campaignConfigDirty) {
+    box.prepend(alertNote(
+      'The booking caps have unsaved changes. Press SAVE first — one-click books '
+      + 'using the SAVED caps, so the numbers it asks you to confirm must be the '
+      + 'saved ones. Nothing was started.'));
+    announceCampaign('One-click not started: save the caps first.');
+    return;
+  }
   const total = parseInt(document.getElementById('campaign-max-total').value, 10) || 0;
   const per = parseInt(document.getElementById('campaign-max-per-station').value, 10) || 1;
 
@@ -2084,15 +2133,55 @@ async function runCampaignOneClick() {
   btn.disabled = true;
   btn.textContent = 'PLANNING…';
   try {
-    await runCampaignPreview();
+    const outcome = await runCampaignPreview();
+    if (outcome !== 'ready') {
+      // runCampaignPreview has already written why into the result box. What
+      // must NOT happen is the old fall-through, which reported a busy
+      // backend, a timeout or an error as "the preview found no free passes".
+      announceCampaign(`One-click stopped: the preview ${outcome === 'busy'
+        ? 'could not start because another campaign run is in progress'
+        : outcome === 'timeout' ? 'did not finish in time' : 'failed'}. Nothing was submitted.`);
+      return;
+    }
     if (!campaignPreviewItems || !campaignPreviewItems.length) {
-      // A preview that found nothing is a normal outcome, not a failure, and
-      // submitting it would be a no-op that still writes a run record.
-      box.prepend(note('Nothing to book — the preview found no free passes. Nothing was submitted.'));
+      box.prepend(note(
+        'Nothing to book — the preview completed and found no free passes. '
+        + 'Nothing was submitted.'));
       announceCampaign('One-click finished: nothing to book.');
       return;
     }
-    const stations = new Set(campaignPreviewItems.map((it) => it.station_id)).size;
+
+    // Belt and braces on the same promise: whatever produced this plan (a
+    // second tab, a save from another operator, a config the backend clamped
+    // differently), it is not submitted if it exceeds what was just agreed to.
+    const perStation = new Map();
+    for (const it of campaignPreviewItems) {
+      perStation.set(it.station_id, (perStation.get(it.station_id) || 0) + 1);
+    }
+    const deepest = Math.max(...perStation.values());
+    if (campaignPreviewItems.length > total || deepest > per) {
+      box.prepend(alertNote(
+        `Not submitted — the plan (${campaignPreviewItems.length} booking(s), up to `
+        + `${deepest} on one station) exceeds what you confirmed (${total}, at most `
+        + `${per} per station). The caps were likely changed elsewhere. Review the `
+        + 'plan below and use CONFIRM & SUBMIT if it is what you want.', 'error'));
+      announceCampaign('One-click stopped: the plan exceeded the confirmed caps. Nothing submitted.');
+      return;
+    }
+
+    // "Book worldwide" is not what a run cut short by the read limit
+    // delivers. Submit that automatically and the operator believes the
+    // network is covered when a random part of it was never looked at.
+    if (lastPreviewStoppedEarly) {
+      box.prepend(alertNote(
+        'Not submitted automatically — this plan is incomplete (see above). '
+        + 'Review it and use CONFIRM & SUBMIT to book what it found, or try again '
+        + 'later for a complete plan.'));
+      announceCampaign('One-click stopped: incomplete plan held for review. Nothing submitted.');
+      return;
+    }
+
+    const stations = perStation.size;
     btn.textContent = `SUBMITTING ${campaignPreviewItems.length}…`;
     announceCampaign(
       `Plan ready: ${campaignPreviewItems.length} booking(s) on ${stations} station(s). Submitting.`);
@@ -2102,8 +2191,9 @@ async function runCampaignOneClick() {
     box.prepend(alertNote(`One-click run failed: ${err}`, 'error'));
     announceCampaign(`One-click run failed: ${err}`);
   } finally {
-    btn.disabled = false;
     btn.textContent = 'BOOK WORLDWIDE — ONE CLICK';
+    // Re-derive rather than blindly re-enable: without a token it must stay off.
+    btn.disabled = !networkTokenSet;
   }
 }
 
@@ -2229,7 +2319,36 @@ function renderCampaignLastRun(run) {
    whitespace is what makes this pattern match real data at all. */
 const CAMPAIGN_ERROR_RE = /^(.*?)\s+norad-transmitter\s+(\S+):\s*HTTP\s+(\d+)\s*([\s\S]*)$/;
 
+/* The current per-item line, which leads with the station because "HTTP 409"
+   alone did not say which of 77 stations refused:
+     station <id> <start> transmitter <uuid>: HTTP <status> <body>
+     station <id> <start> transmitter <uuid>: OUTCOME UNKNOWN - <why>
+   The start still contains a space (format_api_datetime), so this anchors on
+   " transmitter " exactly as the old pattern anchored on " norad-transmitter ".
+   CAMPAIGN_ERROR_RE above is kept: run history persists the lines earlier runs
+   wrote, and those are still in the old shape. */
+const CAMPAIGN_ERROR_V2_RE =
+  /^station\s+(\S+)\s+(.*?)\s+transmitter\s+(\S+):\s*(?:HTTP\s+(\d+)\s*([\s\S]*)|OUTCOME UNKNOWN\b[\s\S]*)$/;
+
+// Never folded in with rejections. A rejection is known not to have booked; an
+// unknown outcome may have, and the one thing an operator must not do with it
+// is the thing a rejection invites - try again.
+const UNKNOWN_REASON = 'OUTCOME UNKNOWN · may be booked — cross-check, do NOT resubmit';
+
 function parseCampaignError(raw) {
+  if (/^OUTCOME UNKNOWN\b/.test(raw)) {
+    return { reason: UNKNOWN_REASON, detail: raw };
+  }
+  const v2 = CAMPAIGN_ERROR_V2_RE.exec(raw);
+  if (v2) {
+    const [, station, start, , status, body] = v2;
+    const where = `station ${station}, ${rejectionTime(start)}`;
+    if (status === undefined) {
+      return { reason: UNKNOWN_REASON, detail: `${where} — outcome unknown` };
+    }
+    const reason = extractRejectionReason(body) || `HTTP ${status}`;
+    return { reason: `HTTP ${status} · ${reason}`, detail: `${where} — ${reason}` };
+  }
   const m = CAMPAIGN_ERROR_RE.exec(raw);
   if (!m) return { reason: raw, detail: raw };
   const [, start, , status, body] = m;
