@@ -404,9 +404,10 @@
           <div class="sched-campaign-row sched-campaign-row-slider">
             <!-- max was 150, which silently clamped any larger configured value
                  back down on save. The reachable ceiling is bounded by the
-                 network, not by this control: only ~138 stations can hear the
-                 pinned transmitter, so at 2 per station the plan tops out near
-                 275 whatever this says. -->
+                 network, not by this control: the plan can never exceed
+                 (stations that can hear the pinned transmitter) x (passes per
+                 station), whatever this says. The reach hint below states that
+                 arithmetic against what the last preview actually found. -->
             <label for="campaign-max-total">Max bookings / run</label>
             <input id="campaign-max-total" type="range" min="1" max="600" step="1"
                    aria-describedby="campaign-max-total-value">
