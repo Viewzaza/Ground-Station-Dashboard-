@@ -491,10 +491,15 @@ def _select_spread(
     for index, entry in enumerate(work):
         if entry.station.id in booked_ids:
             continue
+        # No "had a free pass but lost on budget" case any more. A calendar is
+        # loaded only for a station about to be picked, its passes are already
+        # filtered against that calendar, so its first pick cannot conflict -
+        # every loaded station books at least once. Budget casualties are
+        # therefore all stations that were never read. (Mutation testing found
+        # the old branch unreachable: rewording it changed nothing any test,
+        # or any run, could observe.)
         if index in unusable:
             reason = "every qualifying pass conflicts with an existing booking"
-        elif index in remaining:
-            reason = "had a free pass but the booking budget was spent first"
         elif preview.stopped_early is not None:
             reason = "not read - SatNOGS's read limit was reached before this station"
         else:
