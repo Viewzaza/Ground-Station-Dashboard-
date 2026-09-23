@@ -171,15 +171,40 @@ def test_an_http_date_retry_after_is_not_read_as_no_wait_at_all():
     assert clock.slept == [THROTTLE_BACKOFF_BASE_S]
 
 
-def test_an_enormous_retry_after_is_capped_rather_than_blocked_on():
+def test_an_enormous_retry_after_stops_rather_than_being_waited_out():
     """A very long wait is a signal to stop for now, not to hold a thread
-    open for it."""
-    limited, _session, clock = gate(always(429, headers={"Retry-After": "99999"}))
+    open for it.
+
+    It used to be capped instead: sleep MAX_RETRY_AFTER_WAIT_S, send again,
+    twice - which against a server that meant "an hour" is two more requests
+    that each earn another 429, and four minutes of a thread held open for
+    nothing. Stopping at once is what this docstring always asked for."""
+    limited, session, clock = gate(always(429, headers={"Retry-After": "99999"}))
 
     with pytest.raises(RateLimitedError):
         limited.request("GET", OBSERVATIONS)
 
+    assert clock.slept == []
+    assert len(session.calls) == 1
+
+    # And the deadline is remembered: the next read is refused here, without
+    # being sent, rather than asking again inside the window the server set.
+    with pytest.raises(RateLimitedError):
+        limited.request("GET", OBSERVATIONS)
+    assert len(session.calls) == 1
+
+
+def test_the_retry_after_boundary_is_exactly_the_cap():
+    """At the cap a wait is still slept out; one second past it, it is a stop."""
+    limited, _s, clock = gate(always(429, headers={"Retry-After": str(int(MAX_RETRY_AFTER_WAIT_S))}))
+    with pytest.raises(RateLimitedError):
+        limited.request("GET", OBSERVATIONS)
     assert clock.slept == [MAX_RETRY_AFTER_WAIT_S] * MAX_THROTTLE_RETRIES
+
+    limited, session, clock = gate(always(429, headers={"Retry-After": str(int(MAX_RETRY_AFTER_WAIT_S) + 1)}))
+    with pytest.raises(RateLimitedError):
+        limited.request("GET", OBSERVATIONS)
+    assert clock.slept == [] and len(session.calls) == 1
 
 
 def test_a_standing_429_gives_up_instead_of_storming():

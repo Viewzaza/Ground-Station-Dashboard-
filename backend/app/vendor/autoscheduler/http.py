@@ -18,6 +18,7 @@ import time
 from typing import Any, Callable, Iterator
 
 import requests
+from urllib3.exceptions import NewConnectionError
 
 from . import USER_AGENT
 
@@ -56,6 +57,33 @@ class SatnogsOutcomeUnknown(SatnogsHTTPError):
 _SAFE_TO_REPEAT = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
+def _never_sent(exc: requests.RequestException) -> bool:
+    """Did this failure happen before a single request byte left the machine?
+
+    True only for failures that can only arise while opening the connection:
+    a connect timeout, a refused connection, a DNS name that did not resolve.
+    urllib3 raises NewConnectionError (and its subclass NameResolutionError)
+    solely from the connect step, so a ConnectionError carrying one is proof
+    of never-sent. Refused and unresolvable used to be reported as OUTCOME
+    UNKNOWN, sending the operator off to hunt for bookings that could not
+    exist.
+
+    Conservative everywhere else. A ProxyError may mean the proxy accepted and
+    forwarded the request before failing; an SSLError may come mid-stream; a
+    dropped or reset connection, a read timeout or a bad chunk all come after
+    the request is on the wire.
+    """
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return True
+    if isinstance(exc, (requests.exceptions.ProxyError, requests.exceptions.SSLError)):
+        return False
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        cause = exc.args[0] if exc.args else None
+        reason = getattr(cause, "reason", cause)
+        return isinstance(reason, NewConnectionError)
+    return False
+
+
 def make_session(token: str = "", token_scheme: str = "Token") -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
@@ -91,24 +119,27 @@ def request(
     the dashboard. On a 150-item campaign that is up to 900 create attempts on
     other people's stations.
 
-    So for a write, only ConnectTimeout is retried: the TCP connection never
-    completed, so nothing can have arrived. Everything else that can happen
-    after the request is on the wire raises SatnogsOutcomeUnknown immediately.
+    So a write is retried only when _never_sent() proves the connection was
+    never opened - a connect timeout, a refused connection, an unresolvable
+    name. Everything that can happen after the request is on the wire raises
+    SatnogsOutcomeUnknown immediately.
+
+    Redirects are not followed for a write. requests follows them by default,
+    and following one breaks the reasoning above: a POST that was delivered,
+    answered 307, and then connect-timed-out on the redirect target would look
+    like "never connected" and be sent again, then reported as nothing booked.
+    A 3xx on a write is reported as an unknown outcome instead.
     """
     repeatable = method.upper() in _SAFE_TO_REPEAT
     last_exc: Exception | None = None
     for attempt in range(MAX_RETRIES):
         try:
             resp = session.request(
-                method, url, params=params, json=json_body, timeout=timeout
+                method, url, params=params, json=json_body, timeout=timeout,
+                allow_redirects=repeatable,
             )
-        except requests.exceptions.ConnectTimeout as exc:
-            # Never connected, so never sent: safe to repeat for any method.
-            last_exc = exc
-            log.warning("%s %s could not connect (%s), attempt %d/%d",
-                        method, url, exc, attempt + 1, MAX_RETRIES)
         except requests.RequestException as exc:
-            if not repeatable:
+            if not repeatable and not _never_sent(exc):
                 raise SatnogsOutcomeUnknown(
                     f"{method} {url} was sent but no answer arrived ({exc}); "
                     "it may or may not have been applied",
@@ -117,6 +148,14 @@ def request(
             log.warning("%s %s failed (%s), attempt %d/%d",
                         method, url, exc, attempt + 1, MAX_RETRIES)
         else:
+            if not repeatable and 300 <= resp.status_code < 400:
+                raise SatnogsOutcomeUnknown(
+                    f"{method} {url} -> HTTP {resp.status_code} redirect to "
+                    f"{resp.headers.get('Location', '?')}; not followed for a write, "
+                    "and the server may have applied it before redirecting",
+                    status=resp.status_code,
+                    body=resp.text[:2000],
+                )
             if resp.status_code < 400:
                 return resp
             if 400 <= resp.status_code < 500:

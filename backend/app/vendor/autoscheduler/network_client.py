@@ -22,7 +22,9 @@ client does to stay inside them.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -97,6 +99,46 @@ class RateLimitedError(SatnogsHTTPError):
     """
 
 
+class _Gate:
+    """The read budget one credential has spent, shared across clients.
+
+    CampaignService builds a new NetworkClient - and so a new session - for
+    every preview, commit and verify. When each one kept its own count, the
+    count started from zero every time while the server's did not, so a verify
+    or a second preview in the same hour walked straight into real 429s: after
+    a full preview the next one returned 0 items four minutes later, and a
+    cross-check could hang for the better part of an hour. The server counts
+    per token (per IP when anonymous), so this counts per credential too.
+
+    `blocked_until` holds a Retry-After deadline the server set, so that once
+    SatNOGS has said "not for an hour" nothing in this process asks again
+    before then - it is refused here, locally, without sending anything.
+    """
+
+    def __init__(self) -> None:
+        self.spent: dict[str, deque] = {}
+        self.blocked_until: dict[str, float] = {}
+        self.lock = threading.Lock()
+
+
+_GATES: dict[str, _Gate] = {}
+_GATES_LOCK = threading.Lock()
+
+
+def _shared_gate(key: str) -> _Gate:
+    with _GATES_LOCK:
+        gate = _GATES.get(key)
+        if gate is None:
+            gate = _GATES[key] = _Gate()
+        return gate
+
+
+def gate_key(base_url: str, token: str) -> str:
+    """Which shared budget a client belongs to. The token is hashed, never kept."""
+    digest = hashlib.sha256(token.encode()).hexdigest()[:16] if token else "anonymous"
+    return f"{base_url}|{digest}"
+
+
 class RateLimitedSession:
     """A `requests.Session` that keeps this client inside network.satnogs.org's
     published read budget, and obeys a 429 rather than arguing with it.
@@ -115,14 +157,21 @@ class RateLimitedSession:
     """
 
     def __init__(self, session: requests.Session, *, authenticated: bool,
-                 sleep=time.sleep, clock=time.monotonic) -> None:
+                 sleep=time.sleep, clock=time.monotonic,
+                 share_key: str | None = None) -> None:
         self._session = session
         self._budgets = {
             "observations": (OBSERVATION_LIST_PER_HOUR_AUTH if authenticated
                              else OBSERVATION_LIST_PER_HOUR_ANON),
             "stations": STATION_LIST_PER_HOUR,
         }
-        self._spent: dict[str, deque] = {scope: deque() for scope in self._budgets}
+        # With a share_key the count lives in a process-wide gate that every
+        # client on the same credential uses; without one (tests, one-offs) it
+        # is private to this session, as before.
+        self._gate = _shared_gate(share_key) if share_key else _Gate()
+        for scope in self._budgets:
+            self._gate.spent.setdefault(scope, deque())
+        self._spent = self._gate.spent
         self._sleep = sleep
         self._clock = clock
 
@@ -145,6 +194,18 @@ class RateLimitedSession:
 
     def _claim(self, scope: str) -> None:
         """Take a slot in `scope`'s budget, waiting briefly if one is close."""
+        now = self._clock()
+        blocked = self._gate.blocked_until.get(scope, 0.0)
+        if now < blocked:
+            raise RateLimitedError(
+                f"SatNOGS asked for no {scope} reads for another "
+                f"{blocked - now:.0f}s; not asking again before then",
+                status=429,
+            )
+        with self._gate.lock:
+            self._claim_locked(scope)
+
+    def _claim_locked(self, scope: str) -> None:
         limit = self._budgets[scope]
         spent = self._spent[scope]
         now = self._clock()
@@ -177,7 +238,10 @@ class RateLimitedSession:
             wait = -1.0
         if wait < 0:
             wait = THROTTLE_BACKOFF_BASE_S * (2 ** attempt)
-        return min(wait, MAX_RETRY_AFTER_WAIT_S)
+        # Returned uncapped. The caller decides: a short wait is slept out, a
+        # long one is a stop - capping it here is what turned "come back in an
+        # hour" into "try again in two minutes, twice".
+        return wait
 
     def request(self, method: str, url: str, **kwargs) -> requests.Response:
         scope = self._scope(method, url)
@@ -191,6 +255,19 @@ class RateLimitedSession:
             if resp.status_code != 429:
                 return resp
             wait = self._retry_after(resp, attempt)
+            if wait > MAX_RETRY_AFTER_WAIT_S:
+                # A wait longer than we are prepared to hold a thread open for
+                # is the server saying "stop for now", and it has to be obeyed
+                # as that: sleeping MAX_RETRY_AFTER_WAIT_S and re-sending, as
+                # this used to, just earns another 429 each time. Remember the
+                # deadline so nothing in this process asks again before it.
+                self._gate.blocked_until[scope] = self._clock() + wait
+                raise RateLimitedError(
+                    f"{method} {url} -> HTTP 429 with Retry-After {wait:.0f}s; "
+                    "not waiting it out and not asking again before then",
+                    status=429,
+                    body=resp.text[:2000],
+                )
             if attempt >= MAX_THROTTLE_RETRIES:
                 break
             log.warning(
@@ -342,6 +419,9 @@ class NetworkClient:
         self.session = RateLimitedSession(
             make_session(settings.network_token),
             authenticated=bool(settings.network_token),
+            # One budget per credential for the whole process, however many
+            # clients are built - see _Gate.
+            share_key=gate_key(settings.network_base_url, settings.network_token),
         )
 
     # -- reads ---------------------------------------------------------------
@@ -521,7 +601,7 @@ class NetworkClient:
                 return result
             log.warning("the batch was rejected (%s); retrying one at a time", exc.status)
             log.debug("batch rejection body: %s", exc.body)
-            for item in items:
+            for position, item in enumerate(items):
                 where = (f"station {item.get('ground_station')} {item['start']} "
                          f"transmitter {item['transmitter_uuid']}")
                 try:
@@ -530,6 +610,18 @@ class NetworkClient:
                     result.uncertain_items.append(item)
                     result.errors.append(f"{where}: OUTCOME UNKNOWN - {single}")
                 except SatnogsHTTPError as single:
+                    if single.status is None:
+                        # No status: the connection never opened on any attempt,
+                        # so SatNOGS became unreachable part-way through. Every
+                        # remaining item would fail the same way, three tries
+                        # each; say what happened to them instead.
+                        rest = items[position:]
+                        result.errors.append(
+                            f"could not reach SatNOGS for the last {len(rest)} item(s) "
+                            f"({single}); they were not sent and nothing was booked "
+                            "for them"
+                        )
+                        break
                     # The station id is in the message now. With 77 stations in
                     # a run, "HTTP 409" alone did not say which one refused.
                     result.errors.append(
