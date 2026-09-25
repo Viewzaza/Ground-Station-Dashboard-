@@ -21,6 +21,7 @@ webrtc:
   listen: ":8555"
   candidates:
     # Replace with the server's LAN address if the display is a different machine.
+    - 10.90.36.83:8555
     - stun:8555
 
 streams:

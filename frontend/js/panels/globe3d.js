@@ -44,8 +44,32 @@ const HINT_ID = 'globe-hint';
 
 const EARTH_R = 1;                  // scene units; km are scaled to this
 const EARTH_KM = 6371.0;
-const ORBIT_MINUTES = 100;          // a little over one LEO revolution
-const ORBIT_STEP_S = 20;
+/* The arc is drawn twice. ORBIT_NOW_MINUTES is the revolution being flown —
+   bright and thick, the one that answers "where does it go next". Around it
+   sits ORBIT_MINUTES of context, dim and thin, because in an earth-fixed frame
+   each revolution lands about 25 degrees west of the last and a single arc
+   cannot show that drift at all. Three revolutions is where the pattern reads
+   before the globe turns into a ball of wool. */
+const ORBIT_MINUTES = 300;          // ~3 LEO revolutions of context
+const ORBIT_NOW_MINUTES = 100;      // a little over one revolution, drawn emphatically
+/* 5 s, not 20. The arc is a tube now — real geometry — and a tube shows every
+   facet its spine has, where a one-pixel line hid them. At 20 s a LEO
+   satellite moves 150 km between samples and the tube visibly kinks. */
+const ORBIT_STEP_S = 5;
+/* The context arc gets a coarser spine, and that is a cost decision with a
+   measurement behind it. A tube is built on the main thread. Sampled at 5 s,
+   three revolutions is 3,601 control points and TubeGeometry takes 42 ms —
+   a hitch you can see, once a minute, on a display nobody is touching. At 15 s
+   it is 1,201 points, and the pair of tubes together then costs 33 ms
+   (measured on this host under node; a browser's JIT does better). The facets
+   that buys back are invisible on a line 0.003 units thick at 0.20 opacity.
+   The revolution being flown keeps the fine spine: it is thick enough to show
+   them, and at 100 minutes it is only 1,201 points anyway. */
+const ORBIT_CONTEXT_STEP_S = 15;
+const ORBIT_TUBE_R = 0.0030;        // scene units; EARTH_R is 1, so ~19 km
+const ORBIT_NOW_TUBE_R = 0.0052;
+const ORBIT_TICK_MIN = 10;          // a time mark on the arc every this many minutes
+const ORBIT_TICK_KM = 260;          // how far those marks stand off the path
 const PATH_REBUILD_MS = 60_000;
 const NODE_TICK_KM = 420;           // how far the equator-crossing mark stands off
 
@@ -112,7 +136,11 @@ let satHalo = null;
 let subMarker = null;
 let nadirLine = null;
 let trackLine = null;
-let orbitLine = null;
+let orbitLine = null;     // ORBIT_MINUTES of context, dim
+let orbitNow = null;      // the revolution being flown, emphatic
+let orbitTicks = null;    // time marks along that revolution
+let aosMarker = null;
+let losMarker = null;
 let sightLine = null;
 let nodeTicks = null;
 let footprint = null;
@@ -308,12 +336,59 @@ async function build(hostId) {
     new THREE.BufferGeometry(),
     new THREE.LineBasicMaterial({ color: COLOR.track }),
   );
-  orbitLine = new THREE.Line(
+  /* The orbit path is a tube, not a Line, and that is forced rather than
+     chosen: WebGL ignores LineBasicMaterial.linewidth on every desktop driver,
+     so a Line is one pixel at any zoom, and one pixel at 0.32 opacity on a
+     1920x1080 wall seen from across a room is very nearly not there. A
+     TubeGeometry is real geometry, so it takes a real radius — and it reads as
+     depth too: the far half of the orbit passes behind the globe and is
+     occluded, which is the thing a flat overlay line could never say.
+
+     Two of them, same hue, told apart by weight and opacity exactly as the
+     ground track and the orbit already are. depthWrite is off on the dim one
+     so the two nested transparent tubes do not z-fight where they overlap. */
+  orbitLine = new THREE.Mesh(
     new THREE.BufferGeometry(),
-    new THREE.LineBasicMaterial({
-      color: COLOR.track, transparent: true, opacity: 0.32,
+    new THREE.MeshBasicMaterial({
+      color: COLOR.track, transparent: true, opacity: 0.20, depthWrite: false,
     }),
   );
+  orbitNow = new THREE.Mesh(
+    new THREE.BufferGeometry(),
+    new THREE.MeshBasicMaterial({
+      color: COLOR.track, transparent: true, opacity: 0.85,
+    }),
+  );
+
+  /* A mark every ORBIT_TICK_MIN along the revolution being flown. Radial, like
+     the node ticks and for the same reason: nothing else on this globe stands
+     off the surface in a straight line, so they cannot be read as track. They
+     turn the arc from a shape into a schedule, and the spacing is itself a
+     reading — even in time, so visibly uneven wherever the geometry is. */
+  orbitTicks = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({
+      color: COLOR.track, transparent: true, opacity: 0.55,
+    }),
+  );
+
+  /* Where the next pass starts and ends. Read off store.nextPass — the same
+     pass the header and the next-pass card are counting down to — rather than
+     predicted again here, so the three cannot disagree with each other. Rings
+     rather than spheres, built the same way as the satellite's own halo above,
+     because they mean the same kind of thing: a place on the path that matters
+     right now. --contact, because AOS and LOS are the two times this station
+     actually cares about. */
+  const passHalo = () => new THREE.Mesh(
+    new THREE.RingGeometry(0.014, 0.021, 28),
+    new THREE.MeshBasicMaterial({
+      color: COLOR.contact, transparent: true, opacity: 0.9,
+      side: THREE.DoubleSide,
+    }),
+  );
+  aosMarker = passHalo();
+  losMarker = passHalo();
+  aosMarker.visible = losMarker.visible = false;
 
   /* Where the track crosses the equator going north — see ascendingNodeLons()
      for why this is the one element vector that means anything in an
@@ -342,7 +417,8 @@ async function build(hostId) {
     }),
   );
   sightLine.visible = false;
-  scene.add(footprint, trackLine, orbitLine, sightLine, nodeTicks);
+  scene.add(footprint, trackLine, orbitLine, orbitNow, orbitTicks,
+            aosMarker, losMarker, sightLine, nodeTicks);
 
   addStation();
   attachControls();
@@ -461,8 +537,18 @@ export function updateGlobe(orbit) {
   // The orbit arc is expensive and barely changes minute to minute. The
   // equator crossings come off the same clock: they move at the same rate the
   // track does, which is to say slowly.
+  /* The gates move with store.nextPass, not with the clock, and they cost two
+     SGP4 samples — so they are refreshed every tick rather than every minute.
+     Waiting for the rebuild would leave them a minute stale, or absent for a
+     minute after the pass first arrives over the WebSocket. */
+  setPassGates(orbit);
+
   if (Date.now() - lastPathBuild > PATH_REBUILD_MS) {
-    setPoints(orbitLine, buildOrbitPath(orbit, now));
+    setTube(orbitLine,
+      buildOrbitPath(orbit, now, ORBIT_MINUTES, ORBIT_CONTEXT_STEP_S), ORBIT_TUBE_R);
+    setTube(orbitNow,
+      buildOrbitPath(orbit, now, ORBIT_NOW_MINUTES, ORBIT_STEP_S), ORBIT_NOW_TUBE_R);
+    setPoints(orbitTicks, buildOrbitTicks(orbit, now));
     setNodeTicks(track);
     lastPathBuild = Date.now();
   }
@@ -522,18 +608,88 @@ function footprintRing(sample) {
   return points;
 }
 
-function buildOrbitPath(orbit, now) {
+function buildOrbitPath(orbit, now, spanMinutes, stepS) {
   const points = [];
-  const start = now.getTime() - (ORBIT_MINUTES / 2) * 60_000;
-  for (let s = 0; s <= ORBIT_MINUTES * 60; s += ORBIT_STEP_S) {
+  const start = now.getTime() - (spanMinutes / 2) * 60_000;
+  for (let s = 0; s <= spanMinutes * 60; s += stepS) {
     const p = orbit.sample(new Date(start + s * 1000));
     if (p) points.push(toVec3(p.lat, p.lon, p.alt_km));
   }
   return points;
 }
 
+/* Marks along the revolution being flown, one every ORBIT_TICK_MIN. Radial,
+   so they stand off the path rather than lying on it. `now` itself is skipped:
+   the satellite marker is already there and a tick under it would only add a
+   second thing to read at the one place the eye is going anyway. */
+function buildOrbitTicks(orbit, now) {
+  const points = [];
+  const half = ORBIT_NOW_MINUTES / 2;
+  for (let m = -half; m <= half; m += ORBIT_TICK_MIN) {
+    if (m === 0) continue;
+    const p = orbit.sample(new Date(now.getTime() + m * 60_000));
+    if (!p) continue;
+    points.push(
+      toVec3(p.lat, p.lon, p.alt_km),
+      toVec3(p.lat, p.lon, p.alt_km + ORBIT_TICK_KM),
+    );
+  }
+  return points;
+}
+
+/* AOS and LOS for the pass the rest of the console is counting down to.
+
+   lookAt(0, 0, 0) turns each ring to face the Earth's centre, which leaves it
+   tangent to the sphere — a halo around the point rather than a hoop across
+   the path, and readable from any camera angle instead of vanishing edge-on at
+   some of them. It is what satHalo already does, for the same reason.
+
+   Hidden rather than guessed at when there is no pass: a ring left at its last
+   position would go on claiming a pass that is already over. */
+function setPassGates(orbit) {
+  const pass = store.nextPass;
+  if (!pass?.aos || !pass?.los) {
+    aosMarker.visible = losMarker.visible = false;
+    return;
+  }
+  for (const [marker, iso] of [[aosMarker, pass.aos], [losMarker, pass.los]]) {
+    const p = orbit.sample(new Date(iso));
+    if (!p) { marker.visible = false; continue; }
+    marker.position.copy(toVec3(p.lat, p.lon, p.alt_km));
+    marker.lookAt(0, 0, 0);
+    marker.visible = true;
+  }
+}
+
+/* A tube through the sampled path. CatmullRom rather than straight segments
+   because the spine is a resampling of a smooth curve and the interpolation
+   costs nothing here; tubularSegments tracks the sample count so the tube is
+   never smoother or coarser than the propagation behind it.
+
+   The old geometry is disposed explicitly. This runs once a minute for the
+   life of a display that is left on for months, and TubeGeometry at this
+   segment count is a few megabytes of GPU buffer each time — the one thing in
+   this panel that would actually accumulate. */
+function setTube(mesh, points, radius) {
+  if (!points || points.length < 2) {
+    mesh.visible = false;
+    return;
+  }
+  const curve = new THREE.CatmullRomCurve3(points);
+  /* TubeGeometry walks the spine with getPointAt(), which is arc-length
+     parameterised, and CatmullRomCurve3 builds that mapping from
+     arcLengthDivisions samples — 200 by default. Against a 3,600-point spine
+     that is one length sample per eighteen control points, and the tube visibly
+     bunches where the curve is tight. Match the divisions to the samples we
+     actually have; it costs one extra pass over the curve, once a minute. */
+  curve.arcLengthDivisions = Math.max(200, points.length);
+  mesh.geometry.dispose();
+  mesh.geometry = new THREE.TubeGeometry(curve, points.length, radius, 6, false);
+  mesh.visible = true;
+}
+
 /* Read off the ground track rather than from the orbit arc, even though the arc
-   is sampled four times as finely: the mark then falls exactly where the line
+   is now sampled sixteen times as finely: the mark then falls exactly where the line
    the operator can see crosses the equator, and on the 2D map beside it too.
    A node computed from a denser sample would be more nearly right and would
    visibly miss the line it is annotating. */

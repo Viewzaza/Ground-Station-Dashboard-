@@ -138,6 +138,48 @@ fi
 # the default because it needs no image tooling and returns the exact size
 # asked for.
 
+# --- Natural Earth 50m coastlines ---------------------------------------------
+# LICENCE: Natural Earth is public domain. No attribution required.
+#
+# REQUIRED? No. frontend/assets/ne_110m_land.json is committed and the 2D map
+# falls back to it, naming the tier it drew in the panel heading — the same
+# contract the globe's surface has. This tier is the better map, not the only
+# one.
+#
+# WHY IT IS NOT COMMITTED: 1.6 MB of coordinates against a 237 KB fallback that
+# already works. Same rule as the imagery above.
+#
+# WHY NOT 10m: it is ~446,000 coordinate pairs, and the 2D canvas redraws its
+# land on every tick — 1 Hz, forever, on a wall display that is left running.
+# 50m is 60,669 pairs, twelve times the 110m tier, and the last rung that is
+# free at that redraw rate.
+NE_50M_URL="https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_land.geojson"
+NE_50M_OUT="$ASSETS/ne_50m_land.json"
+
+if [ -f "$NE_50M_OUT" ]; then
+  echo "50m coastlines already present, skipping (delete $NE_50M_OUT to refetch)"
+else
+  echo "fetching Natural Earth 50m coastlines…"
+  tmp="$(mktemp -d)"
+  if curl -fsSL --max-time 120 -o "$tmp/ne50.json" "$NE_50M_URL"; then
+    # A GeoJSON FeatureCollection or it is not worth keeping: a rate-limit page
+    # saved under this name would make the map silently blank rather than fall
+    # back, which is the one outcome the tiering exists to prevent.
+    if head -c 200 "$tmp/ne50.json" | grep -q "FeatureCollection"; then
+      mkdir -p "$ASSETS"
+      mv "$tmp/ne50.json" "$NE_50M_OUT"
+      echo "50m coastlines -> $NE_50M_OUT"
+    else
+      echo "50m coastlines: that was not GeoJSON — skipping."
+      echo "  the 2D map will draw the committed 110m tier and say so."
+    fi
+  else
+    echo "50m coastlines: could not reach the Natural Earth mirror — skipping."
+    echo "  the 2D map will draw the committed 110m tier and say so."
+  fi
+  rm -rf "$tmp"
+fi
+
 # --- satellite.js -------------------------------------------------------------
 # Committed, because it is 40 KB and the browser needs it on first paint. Listed
 # here so the pinned version is documented in one place.

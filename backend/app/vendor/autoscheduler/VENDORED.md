@@ -136,13 +136,113 @@ one, and a local editable install would break the Docker build context
     exact bytes the scheduler reads without going through a file. One
     definition of the format rather than two that can drift.
 
+11. **`network_client.py`: new `RateLimitedSession` and `RateLimitedError`,
+    wrapped around the session `NetworkClient` builds.** Upstream sends reads
+    at whatever rate the caller asks for, and `http.py` classifies a 429 as an
+    ordinary 4xx — raised at once, `Retry-After` never read. That is survivable
+    for the single-station CLI, which makes a handful of reads per run, and not
+    survivable for the campaign, which reads one calendar per station across
+    the whole catalogue. The Network API publishes its budgets
+    (`DEFAULT_THROTTLE_RATES` in satnogs-network's `network/settings.py`, wired
+    to views in `network/api/throttling.py`): **60 observation-list reads an
+    hour anonymously, 240 with a token, 256 station-list reads an hour**, on
+    the `list` action only, with POST and PUT explicitly exempt. The wrapper
+    counts against those budgets over the same sliding hour the server uses,
+    obeys a 429's `Retry-After` (DRF sends whole seconds) with a small bounded
+    number of retries, and refuses locally — `RateLimitedError`, no request
+    sent — once a budget is spent, rather than earning the 429 to find out.
+
+    It wraps the *session* rather than `http.request()` on purpose:
+    `http.paginate()` fetches later pages by calling `session.request()`
+    itself, so a gate installed any higher would pace the first page of a
+    crawl and none of the rest. This leaves `http.py` untouched.
+
+12. **`campaign.py`: a rate limit stops the run; every other read failure
+    still does not.** `build_campaign` treats a station whose calendar it
+    cannot read as having an empty one — a fair trade for a single flaky
+    station, and the wrong one for a throttle, because the budget is spent for
+    every station still to come. Unchanged, the run would read the entire rest
+    of the catalogue as free and book on top of other people's observations.
+    It now catches `RateLimitedError` separately, records why it stopped in
+    `skipped`, and returns the partial preview. The pre-existing broad
+    `except Exception` fallback is deliberately left as it was.
+
+13. **`campaign.py`: recordings are trimmed to the server's real booking
+    edge.** The edge is on `end`, not on `start`, and it is 2900 minutes, not
+    2890: `check_end_datetime()` in satnogs-network's `network/base/validators.py`
+    refuses anything ending more than `OBSERVATION_DATE_MIN_START +
+    OBSERVATION_DATE_MAX_RANGE` (10 + 2890) minutes from now. A pass rising
+    just inside this module's own 2880-minute horizon may set up to
+    `WINDOW_OVERRUN` (30 minutes) later — at 2910, past the edge — so those
+    bookings were guaranteed rejections. New `WINDOW_HARD_END_MIN = 2899`
+    trims the window instead of dropping the pass, and the existing duration
+    gate then judges what is left. The comments claiming 2890 was the enforced
+    edge, and that the server's duration floor is 180 seconds (upstream
+    `OBSERVATION_DURATION_MIN` defaults to 120), were corrected in place; the
+    conservative 180-second value itself is unchanged.
+
+14. **`http.py`: a write is retried only when it provably never left.**
+    `request()` used to retry every method alike - on any transport error and
+    any 5xx, three times - which is right for a read and wrong for the booking
+    POST: it cannot tell "never arrived" from "the reply was lost". A read
+    timeout after SatNOGS had created the observations, or a 504 from a gateway
+    in front of an application that had, re-sent the batch, and `schedule()`
+    then re-posted each item alone. A fake server that persists and then drops
+    the reply turned 3 bookings into 18 rows with `accepted 0`. Now a non-GET/
+    HEAD/OPTIONS request is retried only on a connect timeout, a refused
+    connection or an unresolvable name (urllib3 raises `NewConnectionError`
+    only while connecting); everything after the request is on the wire raises
+    the new `SatnogsOutcomeUnknown`, a `SatnogsHTTPError` subclass. Writes do
+    not follow redirects, and a 3xx on a write is an unknown outcome. In
+    `network_client.py`, `schedule()` catches it first, never falls back to
+    item-by-item after an unknown outcome (that fallback is for a batch the
+    server REJECTED), records those items in the new
+    `ScheduleResult.uncertain_items`, stops the per-item loop once the server
+    is unreachable, and names the station in every per-item error. Pinned by
+    `tests/test_booking_writes.py` and `tests/test_transport_safety.py`.
+
+15. **`campaign.py`: gather, then select - and read calendars lazily.**
+    `build_campaign` walked `all_stations()` in the API's order, strictly
+    ascending by id, and stopped when the budget filled, so every run booked
+    the network's oldest corner (177 of 301 stations never examined on a live
+    run). Phase 1 is now geometry only - Skyfield, no network - over every
+    station. Phase 2, `_select_spread`, reads a station's calendar only when it
+    is about to be picked, in an order shuffled per run from the run's
+    timestamp in seconds; gives every station its r-th booking before any gets
+    its (r+1)-th; balances elevation bands only among passes within
+    `MAX_ELEVATION_SACRIFICE_DEG` of the station's own best; and sorts the
+    result by station then time for review. A rate limit stops READING but
+    keeps selecting among stations already read, and the preview carries
+    `stopped_early` and `calendars_read` so a truncated plan is never mistaken
+    for a small network. Reads fall to roughly the number of stations booked
+    (150 of a 240 budget where it used to spend all 240). Pinned by
+    `tests/test_campaign_selection.py`; fifteen deliberate mutations, all
+    caught.
+
+16. **`network_client.py`: one read budget per credential, and a long
+    Retry-After is a stop.** `RateLimitedSession` (patch 11) kept its count per
+    instance, and `CampaignService` builds a client per operation, so every
+    preview, commit and verify started from zero while the server did not.
+    The count now lives in a process-wide gate keyed by base URL and a hash of
+    the token, shared by every client on that credential and locked. A
+    `Retry-After` longer than `MAX_RETRY_AFTER_WAIT_S` is no longer capped and
+    re-sent twice; it raises at once and records the deadline in the gate, so
+    nothing in the process asks again before then.
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this
   vendored copy with a normal dependency (submodule or pinned pip package).
-- Upstream patches 1-6, 8 and 9 above to that repo (7 is dashboard-specific,
-  not upstream material). 8 in particular is a plain bug for any consumer
-  that books on a station it does not own.
+- Upstream patches 1-6, 8-11, 14 and 16 above to that repo. 7, 12, 13 and 15
+  are `campaign.py`, which upstream does not have (see 7), so they are not
+  upstream material. 8 in particular is a plain bug for any consumer that
+  books on a station it does not own; 11 and 16 matter to any consumer that
+  reads more than a few dozen times an hour; 14 matters to any consumer that
+  books at all.
+- `cache.py`'s module docstring still says the SatNOGS APIs are "public and
+  slow rather than rate-limited". That was never quite true and is now
+  actively misleading — see patch 11 for the published rates. Left alone here
+  only because nothing else in that file is being touched.
 - `satnogs-autoscheduler` currently has no LICENSE file. This dashboard is
   MIT. Confirm licensing intent before this vendored copy is redistributed
   beyond this repo (same author/org, so likely fine, but not yet explicit).

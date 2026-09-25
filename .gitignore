@@ -14,6 +14,9 @@ caddy_config/
 # vendored assets fetched by tools/fetch_vendor.sh
 frontend/js/vendor/three/
 frontend/assets/earth-*.jpg
+# Fetched by tools/fetch_vendor.sh; 1.6 MB of coordinates, and the committed
+# 110m tier is a working fallback. See the LAND_TIERS note in js/panels/map2d.js.
+frontend/assets/ne_50m_land.json
 
 # python
 __pycache__/

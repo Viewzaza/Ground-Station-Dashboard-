@@ -207,15 +207,20 @@ class ScheduleConfigUpdate(BaseModel):
     campaign_auto_commit_enabled: bool | None = None
     campaign_max_per_station: int | None = None
     campaign_max_total: int | None = None
+    # A plain bool like campaign_auto_commit_enabled. On: a commit keeps
+    # submitting fresh batches of up to campaign_max_total until nothing is
+    # left to book, instead of stopping after the first.
+    campaign_loop_until_exhausted: bool | None = None
 
     # --- station auto run ---------------------------------------------------
-    # Ships off, and dry-run-only, on a fresh install: two deliberate switches
-    # between a new setup and anything booking unattended.
+    # Ships off on a fresh install. Once it is on, every unattended run books
+    # real observations - there is no dry-run-only mode. A stale client that
+    # still sends auto_run_dry_run gets a 422 from extra="forbid", and nothing
+    # is saved.
     auto_run_enabled: bool | None = None
     auto_run_mode: Literal["times", "interval"] | None = None
     auto_run_times: list[str] | None = None
     auto_run_interval_min: int | None = Field(default=None, ge=5, le=1440)
-    auto_run_dry_run: bool | None = None
 
     # --- run flags ----------------------------------------------------------
     # 96h is well past SatNOGS's own ~48h booking horizon; anything beyond it
@@ -246,15 +251,16 @@ class ScheduleConfigUpdate(BaseModel):
 
 
 class ScheduleRunRequest(BaseModel):
-    """Deliberately has NO default.
+    """Every Station Schedule run books; there is no dry run.
 
-    A stale client that still posts `{}` - which is exactly what this
-    dashboard's own api.runSchedule() used to do - gets a 422 rather than
-    silently starting a run that books real observations. Failing closed is
-    worth more here than backward compatibility, because the failure mode of
-    the alternative is unattended bookings nobody asked for.
+    `book` must be literally true, and nothing else is accepted. A stale tab
+    whose old DRY RUN button posts `{"dry_run": true}` gets a 422, never a
+    real booking it did not ask for - and a bare `{}` is still refused.
+    Failing closed is worth more here than backward compatibility.
     """
-    dry_run: bool
+    model_config = ConfigDict(extra="forbid")
+
+    book: Literal[True]
 
 
 class StationVerifyRequest(BaseModel):
@@ -300,18 +306,14 @@ class ScheduleRun(BaseModel):
     observations: list[ScheduleObservation]
 
     error: str | None = None
-    # False means this run really booked. The two are never inferred from each
-    # other: a dry run reports booked_state "dry_run", not "failed".
-    dry_run: bool = True
     trigger: Literal["manual", "auto"] = "manual"
     planned: int = 0
     booked: int = 0
-    # "mock" is its own state, not a flavour of the others: a simulated run
-    # spawns nothing, so it neither booked nor failed to book, and collapsing
-    # it into "confirmed" told the operator an observation existed that did not.
+    # Every run books, so this is only ever about whether what it booked could
+    # be seen on the station's SatNOGS calendar afterwards.
     booked_state: Literal[
-        "dry_run", "confirmed", "partial", "unconfirmed", "failed", "mock"
-    ] = "dry_run"
+        "confirmed", "partial", "unconfirmed", "failed"
+    ] = "unconfirmed"
     # Passes the run found already on the station's calendar. The tool prints
     # these with zeroed azimuth/elevation, so they are kept apart rather than
     # rendered as if they were planned now.
@@ -364,6 +366,8 @@ class CampaignCommitResult(BaseModel):
     accepted: int = 0
     errors: list[str] = Field(default_factory=list)
     error: str | None = None
+    rounds: int = 1
+    stopped_reason: str | None = None
 
 
 class CampaignHistoryEntry(BaseModel):
@@ -373,3 +377,4 @@ class CampaignHistoryEntry(BaseModel):
     submitted: int = 0
     accepted: int = 0
     rejected: int = 0
+    rounds: int = 1

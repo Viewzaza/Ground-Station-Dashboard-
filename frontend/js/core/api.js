@@ -80,9 +80,9 @@ export const api = {
   stopRotator:  ()            => post('/api/control/stop'),
 
   scheduleLastRun: ()         => get('/api/schedule'),
-  // dry_run is REQUIRED by the backend and has no default there: posting
-  // {} now gets a 422 rather than silently booking real observations.
-  runSchedule:     (dry_run)  => post('/api/schedule/run', { dry_run }),
+  // Every run books - there is no dry run. The backend requires book: true
+  // literally, so {} or a stale {dry_run: ...} gets a 422, never a booking.
+  runSchedule:     ()         => post('/api/schedule/run', { book: true }),
   scheduleLog:     (lines)    => getText('/api/schedule/log', { lines }),
   getPriorities:   ()         => get('/api/schedule/priorities'),
   savePriorities:  (entries)  => post('/api/schedule/priorities', { entries }),

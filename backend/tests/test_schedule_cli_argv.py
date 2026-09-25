@@ -41,21 +41,34 @@ What is actually at stake, test by test:
   tool starts, validates both, and then fails somewhere deep in a download with
   a message about neither.
 
-* **"A dry run needs the token too."** Upstream's `validate_config()` runs
-  before it ever looks at `--dryrun`. An operator who has only set up a dry run
-  will read a bare `exit(1)` as a bug in this dashboard. The sentence
-  `validate_tokens` produces is the only thing standing between them and a bug
-  report, so its wording is pinned here.
+* **No dry run, ever.** Every Station Schedule run books, so `-n`/`--dryrun`
+  must never reach the command line - it would print a plan and book nothing
+  while the panel reported a booking run.
 
-Nothing here touches the network, spawns a process, or reads the real clock:
-every config carries an injected `cfg.now`. No `Settings` is constructed
-because this module needs none — it takes a `RunConfig` and nothing else.
+* **Which token is missing.** Upstream's `validate_config()` runs before it
+  does anything else and exits 1 with no useful message. The sentence
+  `validate_tokens` produces is the only thing standing between the operator
+  and a bug report, so what it names is pinned here.
+
+* **A run cut short stops the tool.** The child lives in its own session, so
+  when the web server is cancelled mid-run - on the dev stack any source save
+  does that, via uvicorn --reload - nothing else would stop it booking.
+
+Nothing here touches the network, spawns a real process, or reads the real
+clock: every config carries an injected `cfg.now`, and the one test of `run()`
+hands it a fake process. No `Settings` is constructed because this module needs
+none — it takes a `RunConfig` and nothing else.
 """
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from app.services import autoscheduler_cli
 from app.services.autoscheduler_cli import (
     START_TIME_FORMAT,
     RunConfig,
@@ -161,19 +174,18 @@ def test_dash_f_is_present_exactly_when_only_priority_is_wanted():
     )
 
 
-def test_dash_n_is_present_exactly_when_the_run_is_a_dry_run():
-    dry = build_argv(cfg(dry_run=True))
-    assert "-n" in dry, (
-        "a dry run was requested but -n was left off, so this invocation would "
-        "really book observations on SatNOGS for station "
-        f"{STATION_ID} while the operator believed they were previewing"
-    )
-
-    live = build_argv(cfg(dry_run=False))
-    assert "-n" not in live, (
-        "a real booking run was requested but -n was sent, so the tool would "
-        "print a plan and book nothing — the operator sees a full schedule and "
-        "the station records none of it"
+def test_dash_n_is_never_passed():
+    shapes = [cfg(), cfg(only_priority=False), cfg(launcher="script"),
+              cfg(priorities_path="/data/priorities.txt")]
+    for config in shapes:
+        argv = build_argv(config)
+        assert "-n" not in argv and "--dryrun" not in argv, (
+            "every Station Schedule run books, but a dry-run flag was sent, so "
+            "the tool would print a plan and book nothing — the operator sees a "
+            f"full schedule and the station records none of it: {argv}"
+        )
+    assert "dry_run" not in {f.name for f in fields(RunConfig)}, (
+        "RunConfig must not be able to ask for a dry run at all"
     )
 
 
@@ -211,8 +223,8 @@ def test_the_station_id_is_always_passed():
 def test_no_token_ever_appears_anywhere_on_the_command_line():
     """Every shape of run, and the whole argv including the -c bootstrap."""
     shapes = {
-        "dry run, priority only": cfg(dry_run=True, only_priority=True),
-        "real booking run, catalogue wide": cfg(dry_run=False, only_priority=False),
+        "priority only": cfg(only_priority=True),
+        "catalogue wide": cfg(only_priority=False),
         "with a priorities file": cfg(priorities_path="/data/priorities.txt"),
         "console-script launcher": cfg(launcher="script"),
         "with base URLs configured": cfg(
@@ -488,7 +500,7 @@ def test_two_empty_tokens_are_reported_as_two_separate_problems():
     )
 
 
-def test_a_missing_token_message_says_a_dry_run_needs_it_too():
+def test_a_missing_token_message_names_the_service_and_the_variable():
     for label, problems in (
         ("Network", validate_tokens(db_token=DB_TOKEN, network_token="")),
         ("DB", validate_tokens(db_token="", network_token=NETWORK_TOKEN)),
@@ -498,12 +510,10 @@ def test_a_missing_token_message_says_a_dry_run_needs_it_too():
             f"reported, so the operator is being sent to check credentials "
             f"that are already fine"
         )
-        assert "dry run" in problems[0].lower(), (
-            f"the message about the missing {label} token does not say that a "
-            f"DRY RUN needs it too: {problems[0]!r}. satnogs-auto-scheduler "
-            f"validates its whole configuration before it looks at --dryrun, so "
-            f"without that sentence an operator who only wanted a preview reads "
-            f"a bare exit(1) as a bug in this dashboard and files a report"
+        assert f"SatNOGS {label}" in problems[0], (
+            f"the message does not say which token is missing: {problems[0]!r}. "
+            f"satnogs-auto-scheduler exits 1 with nothing useful to say, so this "
+            f"sentence is the operator's only pointer to what to fix"
         )
 
     named = validate_tokens(db_token="", network_token=NETWORK_TOKEN)[0]
@@ -575,4 +585,63 @@ def test_build_argv_is_pure_for_a_pinned_clock():
         f"RunConfig is feeding into the invocation — most likely the wall "
         f"clock — and a run can no longer be reproduced from the record we "
         f"keep of it, which is the only evidence available after a bad night"
+    )
+
+
+# --------------------------------------------------------------------------
+# run(): a cancelled run stops the child
+# --------------------------------------------------------------------------
+
+
+class _BlockingStdout:
+    """A pipe that never produces a line, like a tool deep in pass prediction."""
+
+    async def readline(self):
+        await asyncio.Event().wait()
+
+
+class _FakeProcess:
+    def __init__(self):
+        self.stdout = _BlockingStdout()
+        self.returncode = None
+        self.signals = []
+        self._exited = asyncio.Event()
+
+    def terminate(self):
+        self.signals.append("TERM")
+        self.returncode = -15
+        self._exited.set()
+
+    def kill(self):
+        self.signals.append("KILL")
+        self.returncode = -9
+        self._exited.set()
+
+    async def wait(self):
+        await self._exited.wait()
+        return self.returncode
+
+
+async def test_cancelling_a_run_terminates_the_child(monkeypatch, tmp_path):
+    """Otherwise a backend restart mid-run leaves the tool booking unobserved."""
+    proc = _FakeProcess()
+
+    async def fake_spawn(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(autoscheduler_cli.asyncio, "create_subprocess_exec", fake_spawn)
+    task = asyncio.create_task(
+        autoscheduler_cli.run(cfg(cache_dir=str(tmp_path / "cache")),
+                              log_path=tmp_path / "run.log")
+    )
+    for _ in range(20):             # let it spawn and block on the pipe
+        await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert proc.signals == ["TERM"], (
+        "the child runs in its own session and the web server is going away; "
+        f"unless it is told to stop, it keeps booking with no record: {proc.signals}"
     )

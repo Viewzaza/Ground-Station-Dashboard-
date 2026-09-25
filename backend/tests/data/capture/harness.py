@@ -90,13 +90,15 @@ def main() -> int:
             network_token=FAKE_TOKEN_NETWORK,
             cache_dir=CACHE_DIR,
             priorities_path=PRIORITIES,
-            dry_run=True,
             network_base_url=f"http://127.0.0.1:{NETWORK_PORT}",
             db_base_url=f"http://127.0.0.1:{DB_PORT}",
             now=FROZEN_NOW,
         )
 
-        argv = cli.build_argv(cfg)
+        # -n is appended here, by hand. The dashboard never passes it - every
+        # Station Schedule run books - but this capture must not, even against
+        # a stub, so the harness asks for a dry run explicitly.
+        argv = cli.build_argv(cfg) + ["-n"]
         env = cli.build_env(cfg)
 
         # Printed to the harness's own stdout, never into the transcript file.

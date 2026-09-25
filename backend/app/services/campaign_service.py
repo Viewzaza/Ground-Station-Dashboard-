@@ -42,6 +42,12 @@ log = logging.getLogger(__name__)
 # "genuinely free" on our end.
 RECENT_ATTEMPT_TTL = timedelta(hours=2)
 
+# Backstop for campaign_loop_until_exhausted. The loop ends on its own once
+# every station hits its per-station cap or runs out of free passes, since
+# each round can only pick what earlier rounds did not; this just bounds it
+# if that reasoning is ever wrong.
+MAX_LOOP_ROUNDS = 20
+
 
 class CampaignService:
     def __init__(self, settings: Settings, schedule_service: ScheduleService, on_state=None) -> None:
@@ -154,12 +160,13 @@ class CampaignService:
         preview = build_campaign(
             network, db,
             mission_norad=self.s.default_norad,
-            transmitter_uuid=None,
+            transmitter_uuid=self.s.campaign_transmitter_uuid,
             now=now,
             exclude_station_id=self.schedule_service._effective_station_id(),
             max_per_station=self.schedule_service.campaign_max_per_station(),
             max_total=self.schedule_service.campaign_max_total(),
             recent_attempts=self._recent_bookings_by_station(now),
+            buffer_s=auto_settings.buffer_s,
         )
         return _campaign_preview_payload(preview)
 
@@ -219,6 +226,23 @@ class CampaignService:
         finally:
             self._running = False
 
+    def _build_items(self, network: NetworkClient, db: DbClient, auto_settings: AutoSettings,
+                     booked_counts: dict[int, int] | None = None) -> list[dict]:
+        now = datetime.now(timezone.utc)
+        preview = build_campaign(
+            network, db,
+            mission_norad=self.s.default_norad,
+            transmitter_uuid=self.s.campaign_transmitter_uuid,
+            now=now,
+            exclude_station_id=self.schedule_service._effective_station_id(),
+            max_per_station=self.schedule_service.campaign_max_per_station(),
+            max_total=self.schedule_service.campaign_max_total(),
+            recent_attempts=self._recent_bookings_by_station(now),
+            buffer_s=auto_settings.buffer_s,
+            booked_counts=booked_counts,
+        )
+        return _campaign_preview_payload(preview)["items"]
+
     def _commit_sync(self, items: list[dict] | None, trigger: str) -> dict:
         auto_settings = self._build_autoscheduler_settings()
         if not auto_settings.network_token:
@@ -231,27 +255,72 @@ class CampaignService:
 
         cache = Cache(self.schedule_service.cache_dir, offline=self.s.offline)
         network = NetworkClient(auto_settings, cache)
-        now = datetime.now(timezone.utc)
+        loop = self.schedule_service.campaign_loop_until_exhausted()
+        db: DbClient | None = None
 
         if items is None:
             db = DbClient(auto_settings, cache)
-            preview = build_campaign(
-                network, db,
-                mission_norad=self.s.default_norad,
-                transmitter_uuid=None,
-                now=now,
-                exclude_station_id=self.schedule_service._effective_station_id(),
-                max_per_station=self.schedule_service.campaign_max_per_station(),
-                max_total=self.schedule_service.campaign_max_total(),
-                recent_attempts=self._recent_bookings_by_station(now),
-            )
-            items = _campaign_preview_payload(preview)["items"]
+            items = self._build_items(network, db, auto_settings)
 
+        submitted = 0
+        errors: list[str] = []
+        accepted_detail: list[dict] = []
+        booked_counts: dict[int, int] = {}
+        rounds = 0
+        stopped = "one batch per commit (looping is off)"
+
+        while True:
+            rounds += 1
+            batch_submitted, batch_errors, batch_accepted = self._submit_batch(network, items)
+            submitted += batch_submitted
+            errors += batch_errors
+            accepted_detail += batch_accepted
+            for item in batch_accepted:
+                booked_counts[item["station_id"]] = booked_counts.get(item["station_id"], 0) + 1
+            self.on_state("campaign", "ok",
+                          f"round {rounds}: {len(accepted_detail)} booked so far")
+
+            if not loop:
+                break
+            if not batch_accepted:
+                # A round where SatNOGS took nothing is a systemic answer (rate
+                # limit, bad token, their outage), not a few stale slots -
+                # rebuilding and resubmitting would just hammer it again.
+                stopped = f"round {rounds} had every booking rejected"
+                break
+            if rounds >= MAX_LOOP_ROUNDS:
+                stopped = f"hit the {MAX_LOOP_ROUNDS}-round safety limit"
+                break
+            # The next round sees everything submitted so far as occupied via
+            # _recent_attempts, and every station's bookings so far via
+            # booked_counts, so it can only pick up what is still left.
+            db = db or DbClient(auto_settings, cache)
+            items = self._build_items(network, db, auto_settings, booked_counts)
+            if not items:
+                stopped = "no bookings left"
+                break
+
+        return {
+            "status": "ok" if not errors else "ok_with_warnings",
+            "trigger": trigger,
+            "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "submitted": submitted,
+            "accepted": len(accepted_detail),
+            "errors": errors,
+            "accepted_items": accepted_detail,
+            "rounds": rounds,
+            "stopped_reason": stopped,
+        }
+
+    def _submit_batch(self, network: NetworkClient, items: list[dict]) -> tuple[int, list[str], list[dict]]:
+        """Submit one batch; returns (submitted, errors, accepted rows)."""
+        if not items:
+            return 0, [], []
         # Recorded before submitting, not just on acceptance - a rejected
         # item is still "just tried", and retrying it immediately (before
         # SatNOGS's own read view has any chance of catching up) would only
         # reproduce the same rejection. See RECENT_ATTEMPT_TTL.
-        self._record_attempts(items, now)
+        self._record_attempts(items, datetime.now(timezone.utc))
 
         schedule_items = [
             to_schedule_item(
@@ -281,16 +350,7 @@ class CampaignService:
             for original, sent in zip(items, schedule_items)
             if id(sent) in accepted_ids
         ]
-
-        return {
-            "status": "ok" if not result.errors else "ok_with_warnings",
-            "trigger": trigger,
-            "generated_utc": datetime.now(timezone.utc).isoformat(),
-            "submitted": result.submitted,
-            "accepted": result.accepted,
-            "errors": result.errors,
-            "accepted_items": accepted_detail,
-        }
+        return result.submitted, list(result.errors), accepted_detail
 
     def _mock_commit(self, items: list[dict] | None, trigger: str) -> dict:
         count = len(items) if items is not None else 1
@@ -299,6 +359,8 @@ class CampaignService:
             "generated_utc": datetime.now(timezone.utc).isoformat(),
             "submitted": count, "accepted": count, "errors": [],
             "accepted_items": list(items or []),
+            "rounds": 1,
+            "stopped_reason": "mock run",
         }
 
     def get_last_run(self) -> dict:
@@ -422,6 +484,7 @@ class CampaignService:
             "submitted": submitted,
             "accepted": accepted,
             "rejected": submitted - accepted,
+            "rounds": result.get("rounds", 1),
         })
         # A daily cadence means even a year of history is small, but there's
         # no reason to let this grow forever.

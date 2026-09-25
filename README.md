@@ -395,34 +395,36 @@ which belongs inside a web server. And its summary table is written to
 **stderr** via `logging.info`, so the wrapper merges stderr into stdout and
 reads the transcript back — there is no return value to import.
 
-**Both SatNOGS tokens are required, even for a dry run.** The tool's
-`settings.validate_config()` runs unconditionally before it ever looks at
-`--dryrun`, and it demands `SATNOGS_API_TOKEN` (Network) *and*
-`SATNOGS_DB_API_TOKEN` (DB), each exactly 40 lowercase hex characters. The DB
-token alone used to be enough for this tab. Both run buttons are disabled until
-both are set, and the hint says why — a disabled DRY RUN reads as a bug
-otherwise. Both are entered in the panel's ⚙ popover and are stored, in
-plaintext, in `schedule_config.json` under `GS_DATA_DIR`; treat that file as a
-secret.
+**Both SatNOGS tokens are required.** The tool's `settings.validate_config()`
+runs unconditionally before it does anything else, and it demands
+`SATNOGS_API_TOKEN` (Network) *and* `SATNOGS_DB_API_TOKEN` (DB), each exactly 40
+lowercase hex characters. RUN NOW is disabled until both are set, and the hint
+says which one is missing. Both are entered in the panel's ⚙ popover and are
+stored, in plaintext, in `schedule_config.json` under `GS_DATA_DIR`; treat that
+file as a secret.
 
-**DRY RUN vs RUN NOW.** DRY RUN passes `-n` and books nothing. RUN NOW books,
-so it arms on the first click and fires on the second. The confirmation says
-plainly that the run **recomputes from scratch** and may select a different set
-than the preview showed: there is no "book exactly this list" path through the
-CLI, so preview and commit are two independent runs. What actually landed is
+**Every run books — there is no dry run and no simulation.** RUN NOW arms on
+the first click and fires on the second, and what it selects is booked for real;
+`-n` is never passed. `POST /api/schedule/run` requires `{"book": true}`
+literally, so a stale browser tab that still posts the old `{"dry_run": ...}`
+gets a 422 rather than a booking it did not ask for. What actually landed is
 established afterwards by reading the station's calendar back from SatNOGS
 Network and matching on NORAD and start time to within 90 s — `booked_state` is
-one of `dry_run`, `confirmed`, `partial`, `unconfirmed` or `failed`.
+one of `confirmed`, `partial`, `unconfirmed` or `failed`. A run cut short by a
+backend restart stops the tool and is recorded as `unconfirmed`: check
+network.satnogs.org before running again.
 
 **Auto run** fires the same thing on a timer, either at fixed times of day in
-`GS_TIMEZONE` or on an interval. It ships **disabled** *and* **dry-run-only** —
-two deliberate switches before anything books unattended, mirroring
-`campaign_auto_commit_enabled`. Editing it takes effect immediately: the loop
-waits on a config-change event rather than a bare sleep, so there is no restart
-API to call. The loop no longer runs eagerly at boot, because with booking
-enabled a crash loop would book repeatedly; a slot missed while the backend was
-down is covered by a 30-minute catch-up grace window instead, and a slot missed
-by more than that is skipped rather than booked late.
+`GS_TIMEZONE` or on an interval. It ships **disabled**, and once it is on every
+fire books. Upgrading from a version that had a dry-run-only auto run switches
+such an auto run **off** rather than letting it start booking unattended;
+re-enable it deliberately. Editing it takes effect immediately: the loop waits
+on a config-change event rather than a bare sleep, so there is no restart API to
+call, and a SAVE never fires a slot on its own — both modes count from the last
+settings change. The loop does not run eagerly at boot, because a crash loop
+would book repeatedly; a slot missed while the backend was down is covered by a
+30-minute catch-up grace window instead, and a slot missed by more than that is
+skipped rather than booked late.
 
 **The priority file is a strict three-column format** and that is the whole
 contract, because the official tool parses it with `csv.reader(delimiter=" ")`
@@ -444,17 +446,33 @@ neither fits in three columns; unpinned rows get a transmitter chosen at run
 time. `GET /api/schedule/priorities/export` hands back the exact bytes the
 scheduler reads, droppable straight into an existing `-P` command line.
 
-**Mocking is a separate switch from booking.** `GS_SCHEDULE_MOCK` decides
-whether a run *starts* the tool at all; DRY RUN vs RUN NOW decides whether that
-run *books*. They are independent, and conflating them is how a dashboard ends
-up claiming a booking it never made. Blank follows `GS_MOCK`; set it to `0` to
-run the real scheduler while the rotator and cameras stay simulated — which is
-what you want on this station, because `GS_MOCK=0` would also open a live
-connection to the rotator. A simulated run reports `booked_state: "mock"` and
-says so on the run itself: it returns before anything is spawned, so nothing
-reaches SatNOGS however the buttons were pressed. If `GET /api/schedule/config`
-says `cli_version: "NOT INSTALLED - rebuild the backend image"`, the container
-predates the dependency and no real run can work until it is rebuilt.
+**The Station Schedule is never simulated.** It always spawns the real tool,
+whatever `GS_MOCK` says — `GS_MOCK` only simulates the rotator and cameras, so
+`GS_MOCK=1` is still what you want on this station (`GS_MOCK=0` would also open
+a live connection to the rotator). The only things that stop a run are
+`GS_OFFLINE=1`, a missing token, and a missing tool. A result an older version
+stored from a simulated or dry run is deleted at startup, so the board only
+ever shows runs that could book. If `GET /api/schedule/config` says
+`cli_version: "NOT INSTALLED - rebuild the backend image"`, the container
+predates the dependency; runs are refused, nothing is spawned, and nothing can
+book until it is rebuilt.
+
+**One dead satellite can crash the whole run, so its TLE is screened out
+first.** The tool predicts passes for every receivable satellite (700-odd for
+this station, `-f` or not; `-f` filters afterwards), and its predictor
+(`satnogs-predict` 0.6 and 1.0 alike) aborts the run with `AssertionError: Set
+event without active pass` on a satellite whose SGP4 positions come back NaN.
+SatNOGS DB carries such TLEs: objects that have re-entered but are still listed
+as in orbit. NORAD 51840 "OBJECT S", on a five-month-old element set, crashed
+the first real run this way, before anything was booked. So before each run the
+dashboard drops every TLE that SGP4 cannot propagate across the run's window
+from the tool's own cache (`tles.json` under `autoscheduler_cache/`). It never
+touches the tool's code or its freshness marker. The panel names what was left
+out, and says loudly if a priority satellite was among them. The tool
+re-downloads its TLEs once a day, *inside* a run and after that screen. If a
+refresh brings a bad TLE back and the run crashes in pass prediction (which
+comes before any booking), the fresh cache is screened and the run is retried
+**once**, and only if the screen actually removed something.
 
 **The first run on a cold cache takes minutes,** not seconds — the tool
 refetches every transmitter's statistics and says so itself. The cache lives
@@ -701,7 +719,7 @@ eyes on the mast and the station should be out of the SatNOGS schedule.
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 399 tests
+.venv/Scripts/python -m pytest              # offline, never spawns the scheduler
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
 
@@ -710,7 +728,8 @@ cd backend
 
 `tests/test_schedule_cli_network.py` is the only test that proves the backend
 image actually built: it spawns the real `satnogs-auto-scheduler` and checks
-the pinned version. It needs the package installed, so run it inside the image
+the pinned version. It never contacts SatNOGS — every Station Schedule run
+books, so there is no safe live run for a test to make. It needs the package installed, so run it inside the image
 rather than on a dev box:
 
 ```bash
@@ -720,9 +739,6 @@ docker run --rm -v "$PWD/backend/tests:/app/tests:ro" \
   --entrypoint sh ground-station-dashboard-backend:latest \
   -c 'pip install -q pytest pytest-asyncio && python -m pytest -m network'
 ```
-
-Its live-API test skips unless both SatNOGS tokens are in the environment; the
-two that verify the install do not.
 
 `tests/data/schedule_dry_run.log` is a real transcript from the real scheduler
 binary run against a stubbed SatNOGS on loopback with `--network=none` — real
@@ -748,6 +764,11 @@ python tools/fake_rotctld.py --split-frames      # replies one byte at a time
 
 `GS_MOCK=1` is the only flag. It selects implementations at construction time,
 so there are no `if mock:` branches in the business logic.
+
+**It does not simulate the Station Schedule.** With both SatNOGS tokens in the
+data dir, RUN NOW and an enabled auto run book real observations from a dev box
+too. Develop against a data dir without tokens (a run then fails at token
+validation, before anything is spawned), or set `GS_OFFLINE=1`.
 
 - **Cameras**  `deploy/go2rtc/go2rtc.mock.yaml` declares the *same stream
   names* as production, backed by generated video. No frontend or backend code

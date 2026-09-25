@@ -206,7 +206,8 @@ def _service(tmp_path):
     """A ScheduleService on a throwaway data dir, built the way tests here do.
 
     Constructed directly from Settings rather than get_settings(), which is
-    lru_cache'd and would leak one test's data dir into the next.
+    lru_cache'd and would leak one test's data dir into the next. conftest.py
+    stubs the startup version probe, so constructing it spawns nothing.
     """
     from app.config import Settings
     from app.services.schedule_service import ScheduleService

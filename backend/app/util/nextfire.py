@@ -153,7 +153,14 @@ def next_fire(
         minutes = int(interval_min or 0)
         if minutes <= 0:
             return None
-        due = (last or now) + timedelta(minutes=minutes)
+        base = last or now
+        if not_before is not None:
+            # The interval restarts from the last settings change, the same
+            # rule times mode applies. Without it, pressing SAVE on an overdue
+            # interval - or turning it back on after a pause - fired a run
+            # within a millisecond, and every run books real observations.
+            base = max(base, _as_utc(not_before))
+        due = base + timedelta(minutes=minutes)
         if due <= now:
             # Overdue, possibly by many periods. One run, now - stepping
             # forward period by period would book a burst of back-to-back runs

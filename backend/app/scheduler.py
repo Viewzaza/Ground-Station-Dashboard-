@@ -153,6 +153,12 @@ class Scheduler:
     # sit unnoticed if the wake-up event is ever missed.
     _AUTO_RUN_MAX_SLEEP_S = 300.0
 
+    # How long to back off when a slot comes due while a manual run is still
+    # going. Without it the loop re-marks, is refused and restores as fast as
+    # it can go - two config writes and two log lines per pass - for as long
+    # as that run lasts, which on a cold cache is minutes.
+    _AUTO_RUN_BUSY_RETRY_S = 30.0
+
     async def _schedule_loop(self) -> None:
         """Fire the station scheduler when the operator's auto-run says to.
 
@@ -161,8 +167,8 @@ class Scheduler:
 
         **It no longer runs eagerly at boot.** This loop used to execute its
         body before its first sleep, so every restart triggered a run. That was
-        harmless when a run only ever planned; now that a run can BOOK, a crash
-        loop would book repeatedly. The catch-up grace window in `next_fire`
+        harmless when a run only ever planned; now that every run BOOKS, a
+        crash loop would book repeatedly. The catch-up grace window in `next_fire`
         covers the legitimate case - the backend being down across a slot -
         without turning restarts into bookings.
 
@@ -194,17 +200,12 @@ class Scheduler:
                     continue  # capped sleep; go round again
                 # fall through: the slot has arrived
 
-            dry_run = self.schedule_service.auto_run_dry_run()
             # Marked BEFORE the run, not after. A run can take minutes, and if
             # the process dies mid-run an unmarked slot would fire again on
             # restart - against a station that may already have the bookings.
             previous = await self.schedule_service.mark_auto_run()
-            log.info(
-                "auto-run firing (%s)", "dry run" if dry_run else "BOOKING FOR REAL"
-            )
-            result = await self.schedule_service.run_plan(
-                dry_run=dry_run, trigger="auto"
-            )
+            log.info("auto-run firing (BOOKING FOR REAL)")
+            result = await self.schedule_service.run_plan(trigger="auto")
             if result.get("status") == "running":
                 # run_plan refused: a manual run was already in flight. Nothing
                 # was planned and nothing was booked, so the slot has not
@@ -215,8 +216,10 @@ class Scheduler:
                 await self.schedule_service.restore_auto_run_mark(previous)
                 log.warning(
                     "auto-run slot skipped: a run was already in progress. The "
-                    "slot has been left unfired and will be retried."
+                    "slot has been left unfired and will be retried in %.0fs.",
+                    self._AUTO_RUN_BUSY_RETRY_S,
                 )
+                await asyncio.sleep(self._AUTO_RUN_BUSY_RETRY_S)
 
     async def _campaign_loop(self) -> None:
         """Keep the ~48h network-campaign booking window full on a timer.

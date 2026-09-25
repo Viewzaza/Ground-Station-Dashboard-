@@ -330,8 +330,30 @@
   background: var(--graf-panel);
   box-shadow: var(--shadow);
 }
+/* Grafana sizes a stat panel's type to its own viewport, and that viewport is
+   this iframe. At the width a quarter of the footer gives it, the panel title
+   clips and "No data" wraps mid-word — and none of that is reachable from here,
+   because the frame is cross-origin and no stylesheet of ours crosses it.
+
+   So hand Grafana a viewport 1/--graf-scale larger than the cell and scale the
+   whole frame back down. It lays out for the big viewport — smaller type
+   relative to the panel, titles that fit, numbers that do not wrap — and then
+   lands at exactly the cell's size. This is the only lever there is on text
+   inside a cross-origin frame, which is why it is a transform and not a
+   font-size. Lower --graf-scale for smaller type; the cell does not move.
+
+   transform-origin has to be top left: scaling about the default centre would
+   hang the oversized frame off all four edges instead of seating it in the
+   corner, and .graf-cell's overflow:hidden would then crop the panel's own
+   title. The ::after badge mask still lands right, because a frame scaled from
+   its top-left corner keeps its top-right corner where the cell's is. */
 .graf-strip iframe {
-  width: 100%; height: 100%; border: 0; display: block; background: transparent;
+  --graf-scale: 0.7;
+  width: calc(100% / var(--graf-scale));
+  height: calc(100% / var(--graf-scale));
+  transform: scale(var(--graf-scale));
+  transform-origin: top left;
+  border: 0; display: block; background: transparent;
 }
 /* Grafana draws its own "Powered by Grafana" badge inside the panel, and the
    iframe is cross-origin, so no stylesheet or script of ours can reach it. The

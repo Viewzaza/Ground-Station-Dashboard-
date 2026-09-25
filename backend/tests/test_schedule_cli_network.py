@@ -14,28 +14,20 @@ and excluded by default (`pytest.ini` sets `-m "not network"`); run it with
 `-m network` inside the built image, or on a box where the package is
 installed.
 
-The second test needs both SatNOGS tokens and reaches the live API. It SKIPS
-rather than fails when they are absent, in the same style as
-`test_satnogs_oracle.py`: a developer without tokens should not see a red
-suite, but a wrong answer with tokens present must not be hidden.
+Neither test contacts SatNOGS. There used to be a third, a short dry run
+against the live API; it is gone with the dry run itself. Every Station
+Schedule run now books real observations, so there is no live run a test can
+safely make - the parser is pinned instead by the captured transcript in
+`tests/data/`, which was recorded against a stubbed SatNOGS.
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
-import sys
-from datetime import datetime, timezone
 
 import pytest
 
-from app.services.autoscheduler_cli import (
-    RunConfig,
-    build_argv,
-    build_env,
-    classify_failure,
-    parse_output,
-)
+from app.services.autoscheduler_cli import RunConfig, build_argv
 
 pytestmark = pytest.mark.network
 
@@ -92,58 +84,3 @@ def test_the_console_script_entry_point_also_resolves():
     )
     proc = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr[-400:]
-
-
-@requires_install
-def test_a_short_dry_run_against_live_satnogs():
-    """The whole path: our argv, our environment, their tool, our parser.
-
-    Deliberately `-n` and a half-hour window. Nothing here can book: `-n`
-    skips the scheduling call entirely.
-    """
-    db_token = os.environ.get("GS_SATNOGS_DB_TOKEN", "")
-    net_token = os.environ.get("GS_SATNOGS_NETWORK_TOKEN", "")
-    if not (db_token and net_token):
-        pytest.skip(
-            "needs GS_SATNOGS_DB_TOKEN and GS_SATNOGS_NETWORK_TOKEN; the tool "
-            "validates both before it looks at --dryrun, so a dry run cannot "
-            "be done without them"
-        )
-
-    cfg = RunConfig(
-        station_id=int(os.environ.get("GS_STATION_ID", "5024")),
-        db_token=db_token,
-        network_token=net_token,
-        cache_dir=os.environ.get("GS_CACHE_DIR", "/tmp/satnogs-cache-test"),
-        dry_run=True,
-        hours=0.5,
-        now=datetime.now(timezone.utc),
-    )
-    proc = subprocess.run(
-        build_argv(cfg),
-        env=build_env(cfg),
-        capture_output=True,
-        text=True,
-        # A cold cache genuinely takes minutes: the tool refetches every
-        # transmitter's statistics and says so itself.
-        timeout=1800,
-    )
-    lines = (proc.stdout + proc.stderr).splitlines()
-    failure = classify_failure(lines, proc.returncode)
-    assert failure is None, (
-        f"a dry run against live SatNOGS failed ({failure[0]}): {failure[1]}\n"
-        + "\n".join(lines[-30:])
-    )
-
-    parsed = parse_output(lines)
-    # A half-hour window over one station may legitimately select nothing, so
-    # the assertion is about the transcript being INTELLIGIBLE, not full.
-    assert parsed.efficiency is not None or parsed.no_passes, (
-        "the run produced neither an efficiency report nor a 'no appropriate "
-        "passes' line, which means our parser no longer recognises this "
-        "tool's output - the most likely cause is an upstream version change:\n"
-        + "\n".join(lines[-30:])
-    )
-    for row in parsed.planned:
-        assert row.start.tzinfo is not None, "parsed times must be timezone-aware"
-        assert row.duration_s > 0, f"a selected pass with no duration: {row}"

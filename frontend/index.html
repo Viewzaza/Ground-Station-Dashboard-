@@ -251,7 +251,6 @@
           <div class="schedule-section-head">
             <h3>Last auto schedule</h3>
             <div class="sched-run-actions">
-              <button class="btn" id="schedule-dry-run" type="button">DRY RUN</button>
               <button class="btn sched-btn-danger" id="schedule-run" type="button">RUN NOW</button>
             </div>
           </div>
@@ -300,14 +299,6 @@
             <label for="schedule-auto-interval">Every</label>
             <input type="number" id="schedule-auto-interval" min="5" max="1440" step="5">
             <span class="hint">minutes</span>
-          </div>
-
-          <div class="sched-auto-row">
-            <span class="sched-auto-label">Unattended runs:</span>
-            <button class="sched-mode-tab is-active" id="schedule-auto-dry"
-                    type="button">DRY RUN ONLY</button>
-            <button class="sched-mode-tab sched-mode-tab-danger" id="schedule-auto-book"
-                    type="button">BOOK FOR REAL</button>
           </div>
 
           <button class="sched-notices-toggle" id="schedule-runopts-toggle" type="button"
@@ -402,12 +393,38 @@
             <span class="muted">Target: KNACKSAT-2 · NORAD 67683</span>
           </div>
           <div class="sched-campaign-row sched-campaign-row-slider">
+            <!-- max was 150, which silently clamped any larger configured value
+                 back down on save. The reachable ceiling is bounded by the
+                 network, not by this control: the plan can never exceed
+                 (stations that can hear the pinned transmitter) x (passes per
+                 station), whatever this says. The reach hint below states that
+                 arithmetic against what the last preview actually found. -->
             <label for="campaign-max-total">Max bookings / run</label>
-            <input id="campaign-max-total" type="range" min="1" max="150" step="1"
+            <input id="campaign-max-total" type="range" min="1" max="600" step="1"
                    aria-describedby="campaign-max-total-value">
             <output id="campaign-max-total-value" for="campaign-max-total">150</output>
+          </div>
+          <div class="sched-campaign-row sched-campaign-row-slider">
+            <!-- The real cost knob. Total alone cannot raise the plan past
+                 (capable stations x this), so reaching 600 needs 5 here, not a
+                 bigger total. Each increment asks every borrowed station for
+                 one more slot per 48 h window. -->
+            <label for="campaign-max-per-station">Passes / station</label>
+            <input id="campaign-max-per-station" type="range" min="1" max="8" step="1"
+                   aria-describedby="campaign-max-per-station-value">
+            <output id="campaign-max-per-station-value" for="campaign-max-per-station">2</output>
             <span id="campaign-cfg-status" class="hint" role="status"></span>
             <button class="btn btn-quiet" id="campaign-cfg-save" type="button">SAVE</button>
+          </div>
+          <div class="sched-campaign-row">
+            <label class="sched-auto-enable" for="campaign-loop">
+              <input type="checkbox" id="campaign-loop">
+              <span>Loop until no bookings left</span>
+            </label>
+            <span class="hint">after each batch, recompute and submit the next one until nothing is left to book</span>
+          </div>
+          <div class="sched-campaign-row">
+            <span id="campaign-reach-hint" class="hint"></span>
           </div>
           <p id="campaign-token-hint" class="sched-notice" hidden>
             Set a Network token in ⚙ settings before Network Campaign can run.
@@ -419,6 +436,35 @@
             list and click CONFIRM &amp; SUBMIT.
           </p></div>
           <button class="btn btn-danger" id="campaign-commit-btn" type="button" hidden>CONFIRM &amp; SUBMIT</button>
+
+          <!-- One press does the whole thing: compute the plan, then submit it
+               without needing anyone to come back four minutes later. The
+               two-step flow above still exists and is still the right one when
+               you want to read the plan first; this is for when the plan is
+               routine and the waiting is the only friction. -->
+          <div class="sched-campaign-oneclick">
+            <button class="btn btn-danger sched-oneclick-btn" id="campaign-oneclick-btn" type="button">
+              BOOK WORLDWIDE — ONE CLICK
+            </button>
+            <span id="campaign-oneclick-hint" class="hint">
+              Previews, then submits the result automatically. Asks once, up front.
+            </span>
+          </div>
+
+          <!-- Unattended booking. Distinct from the station Auto run above:
+               that one books OUR antenna, this one books other people's. -->
+          <div class="sched-campaign-row sched-campaign-auto">
+            <label class="sched-auto-toggle">
+              <input type="checkbox" id="campaign-auto-commit">
+              <span>Book automatically, without asking</span>
+            </label>
+            <span id="campaign-auto-status" class="hint" role="status"></span>
+          </div>
+          <p id="campaign-auto-warn" class="sched-notice" hidden>
+            Every cycle will submit real bookings to community stations with no
+            human in the loop. The plan is never shown to anyone before it is
+            sent.
+          </p>
         </section>
 
         <!-- An accepted POST and an observation actually on a station's

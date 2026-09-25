@@ -14,22 +14,273 @@ Three details bite if you get them wrong:
 * Datetimes are ``%Y-%m-%d %H:%M:%S`` in UTC. ISO-8601 with ``T`` and ``Z`` is
   rejected outright - the serializer names those two formats and no others.
 * The station must be connected and have a location, or the whole batch fails.
+
+Reads are rate-limited by the server and writes are not; see
+``RateLimitedSession`` below for the published budgets and for what this
+client does to stay inside them.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections import Counter
+import threading
+import time
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+import requests
+
 from .cache import Cache
 from .config import HISTORY_TTL_S, STATIONS_ALL_TTL_S, STATION_TTL_S, Settings
-from .http import SatnogsHTTPError, make_session, paginate, request
+from .http import (
+    SatnogsHTTPError, SatnogsOutcomeUnknown, make_session, paginate, request,
+)
 
 log = logging.getLogger(__name__)
 
 API_DATETIME = "%Y-%m-%d %H:%M:%S"
+
+
+# -- staying inside the Network API's published read budget -------------------
+
+# satnogs-network throttles its *list* endpoints, and publishes the rates in
+# its own settings - `DEFAULT_THROTTLE_RATES` in `network/settings.py`, with
+# the scopes wired to views in `network/api/throttling.py` and
+# `network/api/views.py`:
+#
+#     /api/observations/  list    60/hour anonymous, 240/hour with a token
+#     /api/stations/      list   256/hour anonymous, unthrottled with a token
+#
+# Only the `list` action carries a throttle class - fetching one observation
+# by id is not throttled - and both observation throttles return early for
+# POST and PUT, so booking itself never spends any of this. Every read this
+# client makes is a list request, `raw_station()` included: `/stations/?id=N`
+# is a *filtered list*, not a detail lookup, and counts like one.
+OBSERVATION_LIST_PER_HOUR_ANON = 60
+OBSERVATION_LIST_PER_HOUR_AUTH = 240
+# Authenticated station reads are not throttled at all - that scope only has
+# an AnonRateThrottle - but there is no reason to burst harder merely because
+# a token is present, so the anonymous ceiling applies either way.
+STATION_LIST_PER_HOUR = 256
+
+# The server counts with a sliding window an hour wide, so we do too. A fixed
+# bucket would let us fire two full budgets back to back across its boundary.
+THROTTLE_WINDOW_S = 3600.0
+
+# The longest this will block a caller waiting for budget to come free. Past
+# this the budget is genuinely spent, and sleeping on it would hang the
+# dashboard for the better part of an hour; the caller is told instead and
+# gets to decide - see `build_campaign`, which stops and keeps its partial run.
+MAX_PACING_WAIT_S = 30.0
+
+# A 429 names its own wait in `Retry-After`, which DRF writes as whole
+# seconds. Honour it, but not unboundedly: a very long one is a signal to stop
+# for now, not to sit blocked on a socket.
+MAX_RETRY_AFTER_WAIT_S = 120.0
+
+# How many times a single request may be re-sent after a 429. Deliberately
+# small - the point of honouring Retry-After is to stop asking, not to ask
+# politely in a loop.
+MAX_THROTTLE_RETRIES = 2
+
+# Used only when a 429 arrives without a `Retry-After` we can read.
+THROTTLE_BACKOFF_BASE_S = 5.0
+
+
+class RateLimitedError(SatnogsHTTPError):
+    """The Network API is rate-limiting us, or is about to be.
+
+    Distinct from a plain `SatnogsHTTPError` because the two mean opposite
+    things to a caller: a 400 is about the one request that was sent, and the
+    next request may well be fine, whereas a throttle is about the budget and
+    so applies to every request still to come.
+    """
+
+
+class _Gate:
+    """The read budget one credential has spent, shared across clients.
+
+    CampaignService builds a new NetworkClient - and so a new session - for
+    every preview, commit and verify. When each one kept its own count, the
+    count started from zero every time while the server's did not, so a verify
+    or a second preview in the same hour walked straight into real 429s: after
+    a full preview the next one returned 0 items four minutes later, and a
+    cross-check could hang for the better part of an hour. The server counts
+    per token (per IP when anonymous), so this counts per credential too.
+
+    `blocked_until` holds a Retry-After deadline the server set, so that once
+    SatNOGS has said "not for an hour" nothing in this process asks again
+    before then - it is refused here, locally, without sending anything.
+    """
+
+    def __init__(self) -> None:
+        self.spent: dict[str, deque] = {}
+        self.blocked_until: dict[str, float] = {}
+        self.lock = threading.Lock()
+
+
+_GATES: dict[str, _Gate] = {}
+_GATES_LOCK = threading.Lock()
+
+
+def _shared_gate(key: str) -> _Gate:
+    with _GATES_LOCK:
+        gate = _GATES.get(key)
+        if gate is None:
+            gate = _GATES[key] = _Gate()
+        return gate
+
+
+def gate_key(base_url: str, token: str) -> str:
+    """Which shared budget a client belongs to. The token is hashed, never kept."""
+    digest = hashlib.sha256(token.encode()).hexdigest()[:16] if token else "anonymous"
+    return f"{base_url}|{digest}"
+
+
+class RateLimitedSession:
+    """A `requests.Session` that keeps this client inside network.satnogs.org's
+    published read budget, and obeys a 429 rather than arguing with it.
+
+    Wrapping the session rather than the call sites is deliberate:
+    `http.paginate()` walks cursor pages by calling `session.request()` itself,
+    so anything hooked onto `http.request()` alone would pace the first page of
+    a crawl and none of the rest - and a crawl is where the budget actually goes.
+
+    The count kept here is this process's own traffic only. The server counts
+    per IP when anonymous and per token when not, and the dashboard's waterfall
+    and telemetry panels reach SatNOGS over their own httpx clients without
+    passing through here, so this count is a floor and never a guarantee. That
+    is precisely why the 429 path below has to be right as well: the pacing is
+    the courtesy, and honouring Retry-After is the part that keeps the account.
+    """
+
+    def __init__(self, session: requests.Session, *, authenticated: bool,
+                 sleep=time.sleep, clock=time.monotonic,
+                 share_key: str | None = None) -> None:
+        self._session = session
+        self._budgets = {
+            "observations": (OBSERVATION_LIST_PER_HOUR_AUTH if authenticated
+                             else OBSERVATION_LIST_PER_HOUR_ANON),
+            "stations": STATION_LIST_PER_HOUR,
+        }
+        # With a share_key the count lives in a process-wide gate that every
+        # client on the same credential uses; without one (tests, one-offs) it
+        # is private to this session, as before.
+        self._gate = _shared_gate(share_key) if share_key else _Gate()
+        for scope in self._budgets:
+            self._gate.spent.setdefault(scope, deque())
+        self._spent = self._gate.spent
+        self._sleep = sleep
+        self._clock = clock
+
+    def __getattr__(self, name):
+        # `headers`, `close()` and the rest still belong to the real session.
+        return getattr(self._session, name)
+
+    @staticmethod
+    def _scope(method: str, url: str) -> str | None:
+        """Which server-side budget this request spends, if any."""
+        if method.upper() not in ("GET", "HEAD"):
+            # POST and PUT are explicitly exempted by the server's own throttle
+            # classes, so a booking must never be delayed or refused by us.
+            return None
+        if "/observations" in url:
+            return "observations"
+        if "/stations" in url:
+            return "stations"
+        return None
+
+    def _claim(self, scope: str) -> None:
+        """Take a slot in `scope`'s budget, waiting briefly if one is close."""
+        now = self._clock()
+        blocked = self._gate.blocked_until.get(scope, 0.0)
+        if now < blocked:
+            raise RateLimitedError(
+                f"SatNOGS asked for no {scope} reads for another "
+                f"{blocked - now:.0f}s; not asking again before then",
+                status=429,
+            )
+        with self._gate.lock:
+            self._claim_locked(scope)
+
+    def _claim_locked(self, scope: str) -> None:
+        limit = self._budgets[scope]
+        spent = self._spent[scope]
+        now = self._clock()
+        while spent and now - spent[0] >= THROTTLE_WINDOW_S:
+            spent.popleft()
+        if len(spent) >= limit:
+            wait = THROTTLE_WINDOW_S - (now - spent[0])
+            if wait > MAX_PACING_WAIT_S:
+                raise RateLimitedError(
+                    f"the {scope} read budget ({limit}/hour) is spent; the next "
+                    f"slot is {wait:.0f}s away",
+                    status=429,
+                )
+            self._sleep(wait)
+            spent.popleft()
+        spent.append(self._clock())
+
+    @staticmethod
+    def _retry_after(resp: requests.Response, attempt: int) -> float:
+        """How long the server asked us to wait, in seconds.
+
+        DRF writes `Retry-After` as whole seconds. RFC 9110 also allows an
+        HTTP-date there; nothing on this API sends one, and if something ever
+        does, the unparseable value falls through to a backoff rather than
+        being read as zero.
+        """
+        try:
+            wait = float(resp.headers.get("Retry-After", ""))
+        except ValueError:
+            wait = -1.0
+        if wait < 0:
+            wait = THROTTLE_BACKOFF_BASE_S * (2 ** attempt)
+        # Returned uncapped. The caller decides: a short wait is slept out, a
+        # long one is a stop - capping it here is what turned "come back in an
+        # hour" into "try again in two minutes, twice".
+        return wait
+
+    def request(self, method: str, url: str, **kwargs) -> requests.Response:
+        scope = self._scope(method, url)
+        if scope is None:
+            return self._session.request(method, url, **kwargs)
+
+        resp = None
+        for attempt in range(MAX_THROTTLE_RETRIES + 1):
+            self._claim(scope)
+            resp = self._session.request(method, url, **kwargs)
+            if resp.status_code != 429:
+                return resp
+            wait = self._retry_after(resp, attempt)
+            if wait > MAX_RETRY_AFTER_WAIT_S:
+                # A wait longer than we are prepared to hold a thread open for
+                # is the server saying "stop for now", and it has to be obeyed
+                # as that: sleeping MAX_RETRY_AFTER_WAIT_S and re-sending, as
+                # this used to, just earns another 429 each time. Remember the
+                # deadline so nothing in this process asks again before it.
+                self._gate.blocked_until[scope] = self._clock() + wait
+                raise RateLimitedError(
+                    f"{method} {url} -> HTTP 429 with Retry-After {wait:.0f}s; "
+                    "not waiting it out and not asking again before then",
+                    status=429,
+                    body=resp.text[:2000],
+                )
+            if attempt >= MAX_THROTTLE_RETRIES:
+                break
+            log.warning(
+                "SatNOGS answered 429 on a %s read; waiting %.0fs before "
+                "attempt %d of %d", scope, wait, attempt + 2, MAX_THROTTLE_RETRIES + 1,
+            )
+            self._sleep(wait)
+
+        raise RateLimitedError(
+            f"{method} {url} -> HTTP 429 after {MAX_THROTTLE_RETRIES + 1} attempt(s)",
+            status=429,
+            body=(resp.text[:2000] if resp is not None else ""),
+        )
 
 
 def format_api_datetime(when: datetime) -> str:
@@ -82,14 +333,32 @@ class Station:
 
     @property
     def schedulable(self) -> bool:
-        # The API enforces exactly this before accepting a booking. A
-        # "Testing" station rejects scheduling from anyone but its owner -
-        # surfaces from the real API as "No permission to schedule
-        # observations on station: N" - and an "Offline" one will never
-        # actually perform whatever gets booked on it.
+        # Verified 2026-09-22 against the live observations/new/ station list,
+        # which SatNOGS builds with has_perm_to_schedule_on_station(): this
+        # reproduces all 155 stations the form offered for KNACKSAT-2's UHF
+        # transmitter - 100% recall, and the only 3 over-inclusions were
+        # stations that changed state after the cache was written.
+        #
+        # A "Testing" station is NOT owner-only: the form offered 17 of the 18
+        # to a non-owning account. The previous status == "Online" gate here
+        # dropped those 17 - 11% of the reachable network. The comment it
+        # carried was inferred, not observed; the six real rejections behind it
+        # ("No permission to schedule observations on station: N") named
+        # stations 12, 16 and 36, all of which are Offline and none Testing.
+        # Upstream satnogs-auto-scheduler attributes that error to a
+        # per-(station, satellite, transmitter) permission and schedules
+        # Testing stations under --allow-testing.
+        #
+        # Offline stays excluded: such a station will never actually perform
+        # whatever gets booked on it.
+        #
+        # Do NOT key on the `testing` boolean instead. It is True for 4123 of
+        # 4483 stations network-wide versus 38 with status == "Testing" - it is
+        # a persistent owner flag that Offline masks - so it would admit some
+        # 4100 dead stations.
         return (
             self.is_connected and self.lat is not None and self.lng is not None
-            and self.status == "Online"
+            and self.status in ("Online", "Testing")
         )
 
     @classmethod
@@ -149,13 +418,29 @@ class ScheduleResult:
     # afterwards - and on a partial batch rejection the accepted set is not
     # derivable from `errors` without parsing its prose back apart.
     accepted_items: list[dict] = field(default_factory=list)
+    # Sent, but no reliable answer came back - they may be on the station's
+    # calendar or not. Kept apart from accepted_items (which would claim a
+    # booking nobody confirmed) and from a plain error (which would invite a
+    # resubmit that duplicates any that did land). These are what a
+    # cross-check must read back before anyone tries again.
+    uncertain_items: list[dict] = field(default_factory=list)
 
 
 class NetworkClient:
     def __init__(self, settings: Settings, cache: Cache) -> None:
         self.s = settings
         self.cache = cache
-        self.session = make_session(settings.network_token)
+        # Every read below goes through the rate-limit gate. Whether a token is
+        # configured changes the budget the server applies to us (60/hour
+        # anonymous against 240/hour authenticated on the observation feed), so
+        # the gate is told which one it is working with.
+        self.session = RateLimitedSession(
+            make_session(settings.network_token),
+            authenticated=bool(settings.network_token),
+            # One budget per credential for the whole process, however many
+            # clients are built - see _Gate.
+            share_key=gate_key(settings.network_base_url, settings.network_token),
+        )
 
     # -- reads ---------------------------------------------------------------
 
@@ -308,16 +593,57 @@ class NetworkClient:
         url = f"{self.s.network_base_url}/observations/"
         try:
             request(self.session, "POST", url, json_body=items)
+        except SatnogsOutcomeUnknown as exc:
+            # Caught before SatnogsHTTPError, which it subclasses. The batch
+            # may have been applied, so the one-at-a-time fallback below - which
+            # exists for a batch the server REJECTED - would re-create every
+            # observation that did land. Stop, and say what is not known.
+            log.error("booking outcome unknown for all %d item(s): %s", len(items), exc)
+            result.uncertain_items = list(items)
+            result.errors.append(
+                f"OUTCOME UNKNOWN for all {len(items)} submitted item(s): {exc}. "
+                "Some or all may be booked. Do NOT resubmit - cross-check the "
+                "station calendars first."
+            )
+            return result
         except SatnogsHTTPError as exc:
+            if exc.status is None:
+                # No status means the connection never completed on any
+                # attempt, so nothing reached the server. Trying each item on
+                # its own would only fail the same way len(items) more times.
+                log.warning("could not reach SatNOGS to submit %d item(s): %s", len(items), exc)
+                result.errors.append(
+                    f"could not reach SatNOGS to submit {len(items)} item(s): {exc}. "
+                    "Nothing was booked."
+                )
+                return result
             log.warning("the batch was rejected (%s); retrying one at a time", exc.status)
             log.debug("batch rejection body: %s", exc.body)
-            for item in items:
+            for position, item in enumerate(items):
+                where = (f"station {item.get('ground_station')} {item['start']} "
+                         f"transmitter {item['transmitter_uuid']}")
                 try:
                     request(self.session, "POST", url, json_body=[item])
+                except SatnogsOutcomeUnknown as single:
+                    result.uncertain_items.append(item)
+                    result.errors.append(f"{where}: OUTCOME UNKNOWN - {single}")
                 except SatnogsHTTPError as single:
+                    if single.status is None:
+                        # No status: the connection never opened on any attempt,
+                        # so SatNOGS became unreachable part-way through. Every
+                        # remaining item would fail the same way, three tries
+                        # each; say what happened to them instead.
+                        rest = items[position:]
+                        result.errors.append(
+                            f"could not reach SatNOGS for the last {len(rest)} item(s) "
+                            f"({single}); they were not sent and nothing was booked "
+                            "for them"
+                        )
+                        break
+                    # The station id is in the message now. With 77 stations in
+                    # a run, "HTTP 409" alone did not say which one refused.
                     result.errors.append(
-                        f"{item['start']} norad-transmitter {item['transmitter_uuid']}: "
-                        f"HTTP {single.status} {single.body[:300]}"
+                        f"{where}: HTTP {single.status} {single.body[:300]}"
                     )
                 else:
                     result.accepted += 1

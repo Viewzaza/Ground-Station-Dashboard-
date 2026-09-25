@@ -31,9 +31,9 @@ until you read its source:
      `logging.basicConfig()` with no `stream=`, and the table is printed with
      `printer=logging.info`. We merge stderr into stdout so the transcript is
      in order.
-  3. A **dry run still needs both tokens** — `validate_config()` runs before the
-     tool ever looks at `--dryrun`. `validate_tokens` exists so that becomes a
-     sentence the operator can act on instead of an opaque child `exit(1)`.
+  3. **Both tokens are always required** — `validate_config()` runs before the
+     tool does anything else. `validate_tokens` exists so a missing one becomes
+     a sentence the operator can act on instead of an opaque child `exit(1)`.
   4. `logging.basicConfig` is a no-op once the root logger has handlers, and
      the level is set inside that same guard. Pre-seeding lets us keep severity
      visible — but only if the pre-seed sets a level itself. See `_BOOTSTRAP`.
@@ -42,6 +42,7 @@ until you read its source:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -51,6 +52,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import numpy as np
+from sgp4.api import Satrec, SatrecArray, jday
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +138,6 @@ class RunConfig:
     network_token: str = ""
     cache_dir: str = ""
     priorities_path: str = ""
-    dry_run: bool = True
 
     # Defaults mirror the station's proven run_scheduler.ps1, not the
     # dashboard's older 48h planning window.
@@ -262,8 +265,9 @@ def build_argv(cfg: RunConfig) -> list[str]:
         # Do not "fix" this to `if not cfg.only_priority`. That books the
         # station's entire receivable catalogue.
         argv.append("-f")
-    if cfg.dry_run:
-        argv.append("-n")
+    # -n/--dryrun is never passed. Every Station Schedule run books: there is
+    # no dry run, and a run that plans without booking is not something this
+    # dashboard offers any more.
     # -l is deliberately never passed: our pre-seeded root logger makes the
     # tool's own basicConfig a no-op, so the flag would be silently ignored.
     return argv
@@ -300,9 +304,7 @@ def validate_tokens(db_token: str, network_token: str) -> list[str]:
     """Problems that would make the child exit(1) before doing any work.
 
     Mirrors upstream's rule exactly: both tokens present, both 40 lowercase hex
-    characters. Returned as sentences because this is what the UI shows, and
-    because "a dry run needs the Network token too" is surprising enough that
-    it reads as a bug unless it is spelled out.
+    characters. Returned as sentences because this is what the UI shows.
     """
     problems: list[str] = []
     for value, label, env_name in (
@@ -312,9 +314,9 @@ def validate_tokens(db_token: str, network_token: str) -> list[str]:
         token = (value or "").strip()
         if not token:
             problems.append(
-                f"The {label} token is not set. satnogs-auto-scheduler validates "
-                f"its whole configuration before it looks at the dry-run flag, so "
-                f"even a DRY RUN needs it ({env_name})."
+                f"The {label} token is not set. satnogs-auto-scheduler needs both "
+                f"SatNOGS tokens to run ({env_name}); set it in the Station "
+                f"Schedule's ⚙ settings."
             )
             continue
         if _TOKEN_RE.fullmatch(token):
@@ -560,7 +562,7 @@ _FAILURES: tuple[tuple[str, str, str], ...] = (
         "token_missing",
         "No value for SATNOGS_",
         "satnogs-auto-scheduler refused to start: one of its two API tokens was "
-        "empty. It checks both before it looks at the dry-run flag.",
+        "empty. It needs both to run.",
     ),
     (
         "token_invalid",
@@ -579,8 +581,7 @@ _FAILURES: tuple[tuple[str, str, str], ...] = (
         "station_offline",
         "neither in 'online' nor in 'testing' mode",
         "The station is neither online nor in testing mode, so SatNOGS will not "
-        "accept bookings for it. A DRY RUN skips this check, which is why one "
-        "can succeed where a real run refuses.",
+        "accept bookings for it.",
     ),
     (
         "no_permission",
@@ -670,6 +671,165 @@ def missing_priority_notices(
     ]
 
 
+# --------------------------------------------------------------------------
+# The tool's TLE cache: leave out what SGP4 cannot propagate
+# --------------------------------------------------------------------------
+#
+# One unpropagatable TLE crashes the whole run. The tool predicts passes for
+# every receivable satellite - 700-odd for this station, under -f too, which
+# only filters afterwards - and its predictor asserts rather than skipping a
+# satellite whose positions come back NaN. SatNOGS DB does carry such TLEs: an
+# object that has re-entered but is still listed "in orbit", its last element
+# set months old, so SGP4 fails outright ("semilatus rectum is less than
+# zero") across much of any window. The run then dies in pass prediction with
+# "Set event without active pass", before it has booked anything.
+#
+# The fix is to the tool's input, not to the tool: the TLE cache it reads from
+# CACHE_DIR is data this dashboard hands it, the same as the priority file. A
+# satellite SGP4 cannot propagate has no pass the tool could predict anyway.
+
+TOOL_TLE_FILE = "tles.json"          # upstream CacheManager.tles_file
+_SCREEN_STEP_S = 120
+# The tool computes its own window from its own clock, a moment after this
+# screen runs; the margin covers that and a retry's later start.
+_SCREEN_MARGIN = timedelta(hours=1)
+
+
+def _tle_epoch(line1: str) -> datetime | None:
+    try:
+        yy = int(line1[18:20])
+        day_of_year = float(line1[20:32])
+    except (TypeError, ValueError):
+        return None
+    year = 2000 + yy if yy < 57 else 1900 + yy
+    return datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=day_of_year - 1)
+
+
+def unpropagatable_tles(
+    tles: list[dict], start: datetime, end: datetime, step_s: int = _SCREEN_STEP_S
+) -> list[dict]:
+    """The entries SGP4 fails on, or returns NaN for, anywhere in [start, end]."""
+    start = start.astimezone(timezone.utc)
+    jd0, fr0 = jday(start.year, start.month, start.day, start.hour, start.minute,
+                    start.second + start.microsecond / 1e6)
+    offsets = np.arange(0.0, max((end - start).total_seconds(), 0.0) + step_s, step_s) / 86400.0
+    jd = np.full_like(offsets, jd0)
+    fr = fr0 + offsets
+
+    bad: list[dict] = []
+    sats: list = []
+    owners: list[dict] = []
+    for tle in tles:
+        try:
+            sats.append(Satrec.twoline2rv(tle["tle1"], tle["tle2"]))
+            owners.append(tle)
+        except (KeyError, TypeError, ValueError):
+            bad.append(tle)
+    if sats:
+        errors, positions, _velocities = SatrecArray(sats).sgp4(jd, fr)
+        broken = (errors != 0).any(axis=1) | np.isnan(positions).any(axis=(1, 2))
+        bad.extend(owners[i] for i in np.flatnonzero(broken))
+    return bad
+
+
+def screen_tool_tles(cache_dir, start: datetime, end: datetime) -> list[dict]:
+    """Drop unpropagatable TLEs from the tool's cache, and say which.
+
+    Only `tles.json` is rewritten. The tool judges its cache's freshness by a
+    separate last-update file, so this never makes it refetch anything.
+    """
+    path = Path(cache_dir) / TOOL_TLE_FILE
+    if not path.is_file():
+        return []
+    try:
+        tles = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(tles, list):
+        return []
+
+    bad = unpropagatable_tles(tles, start - _SCREEN_MARGIN, end + _SCREEN_MARGIN)
+    if not bad:
+        return []
+    bad_ids = {id(tle) for tle in bad}
+    kept = [tle for tle in tles if id(tle) not in bad_ids]
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(kept), encoding="utf-8")
+    tmp.replace(path)
+
+    screened = []
+    for tle in bad:
+        epoch = _tle_epoch(tle.get("tle1") or "")
+        screened.append({
+            "norad_cat_id": str(tle.get("norad_cat_id", "?")),
+            "name": str(tle.get("tle0") or "").removeprefix("0 ").strip(),
+            "epoch": epoch.date().isoformat() if epoch else "unknown",
+        })
+    return screened
+
+
+def screened_notice(screened: list[dict], priority_norads=()) -> dict | None:
+    """One line for the panel. Whether a PRIORITY satellite was lost is what matters."""
+    if not screened:
+        return None
+    wanted = {str(n) for n in priority_norads}
+    lost = [s for s in screened if s["norad_cat_id"] in wanted]
+    oldest = sorted(screened, key=lambda s: s["epoch"])[:3]
+    examples = ", ".join(
+        f"NORAD {s['norad_cat_id']} {s['name']} (TLE from {s['epoch']})".replace("  ", " ")
+        for s in oldest
+    )
+    if lost:
+        which = ", ".join(f"NORAD {s['norad_cat_id']} {s['name']}".strip() for s in lost)
+        lead = (f"Left out {len(screened)} satellite(s), INCLUDING priority {which}: "
+                f"SatNOGS's orbit data for them cannot be propagated over this run's "
+                f"window, so they cannot be booked until it is fixed.")
+    else:
+        lead = (f"Left out {len(screened)} satellite(s) whose SatNOGS orbit data cannot "
+                f"be propagated over this run's window - none of them is in the "
+                f"priority list.")
+    return {
+        "severity": "warning",
+        "message": (
+            f"{lead} Most are objects that have re-entered but are still listed as in "
+            f"orbit, e.g. {examples}. satnogs-auto-scheduler's pass prediction crashes "
+            f"on such a TLE, so they are removed from its cache before it runs."
+        ),
+    }
+
+
+_NO_TLE_RE = re.compile(r"No TLE found for transmitter \S+ on NORAD (\d+)")
+
+
+def without_screened_tle_warnings(notices: list[dict], screened: list[dict]) -> list[dict]:
+    """Drop the tool's per-transmitter 'No TLE found' for satellites we screened.
+
+    The tool prints one per transmitter it can no longer find a TLE for - fifty
+    lines on the board for what screened_notice() already says in one.
+    """
+    ids = {s["norad_cat_id"] for s in screened}
+    if not ids:
+        return list(notices)
+    kept = []
+    for notice in notices:
+        match = _NO_TLE_RE.search(notice.get("message") or "")
+        if match and match.group(1) in ids:
+            continue
+        kept.append(notice)
+    return kept
+
+
+def crashed_in_prediction(outcome: "RunOutcome") -> bool:
+    """A crash inside pass prediction - which comes before any booking."""
+    if outcome.failure is None or outcome.failure[0] != "crashed":
+        return False
+    parsed = outcome.parsed
+    if parsed.attempted_booking or parsed.planned or parsed.booked_log:
+        return False
+    transcript = "\n".join(outcome.lines)
+    return "find_constrained_passes" in transcript or "satnogs_predict" in transcript
+
+
 async def run(
     cfg: RunConfig,
     on_line=None,
@@ -747,6 +907,21 @@ async def run(
         if outcome.killed_by:
             await _terminate(proc)
         outcome.exit_code = await proc.wait()
+    except asyncio.CancelledError:
+        # The web server is going away mid-run - on the dev stack any source
+        # save does this, via uvicorn --reload. The child lives in its own
+        # session, so nothing else would stop it: it would carry on booking
+        # with nobody left to read its output or record what it did.
+        _stop_on_cancel(proc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except BaseException:  # noqa: BLE001 - cancelled again, or still alive
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        raise
     finally:
         if sink is not None:
             sink.close()
@@ -766,6 +941,16 @@ async def run(
             ),
         )
     return outcome
+
+
+def _stop_on_cancel(proc) -> None:
+    """SIGTERM now, synchronously, so it is sent even if nothing after it runs."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        pass
 
 
 async def _terminate(proc) -> None:

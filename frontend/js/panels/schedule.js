@@ -16,9 +16,8 @@ const POLL_MS = 3000;
 // anything was booked, which is the worst possible state on this tab.
 const POLL_TIMEOUT_MS = 25 * 60_000;
 
-// State the two run buttons need. Both are disabled until BOTH SatNOGS tokens
-// are set - including DRY RUN, because satnogs-auto-scheduler validates its
-// whole configuration before it looks at the dry-run flag.
+// State RUN NOW needs. It is disabled until BOTH SatNOGS tokens are set,
+// because satnogs-auto-scheduler validates its whole configuration first.
 let dbTokenSet = false;
 let armedRealRun = false;      // RUN NOW's two-step confirm
 let armedRealRunTimer = null;
@@ -27,10 +26,12 @@ let autoTimes = [];            // HH:MM chips, the editable copy
 let autoDirty = false;
 // Network Campaign walks every candidate station's booking history one at a
 // time to stay polite to SatNOGS's rate limit - against real data (hundreds
-// of stations) that has taken several minutes in testing, not the seconds a
-// Station Schedule run or mock data returns in. The 120s timeout above would
-// give up on a still-healthy real run and misreport it as unresponsive.
+// of stations) that has taken several minutes in testing. A short timeout
+// would give up on a still-healthy real run and misreport it as unresponsive.
 const CAMPAIGN_POLL_TIMEOUT_MS = 20 * 60_000;
+// A looped submit recomputes the whole campaign between batches, so each extra
+// round can cost as long as one full preview.
+const CAMPAIGN_LOOP_POLL_TIMEOUT_MS = 90 * 60_000;
 
 let priorities = [];   // [{norad_cat_id, weight, transmitter_uuid, mode}], current display order
 let dragFrom = -1;
@@ -46,12 +47,14 @@ let settingsOpen = false;
 
 let networkTokenSet = false;
 let campaignPreviewItems = null;   // the exact items last previewed, so CONFIRM submits what was shown
+let campaignLoop = false;          // campaign_loop_until_exhausted, as last loaded/saved
 let campaignConfigDirty = false;   // invalidates a stale preview if config changes after it
+let lastPreviewCapableStations = null;  // stations the last preview found usable, for the reach hint
+let lastPreviewStoppedEarly = null;     // the last preview's stopped_early, or null if it was complete
 
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
   document.getElementById('schedule-close').addEventListener('click', close);
-  document.getElementById('schedule-dry-run').addEventListener('click', () => startRun(true));
   document.getElementById('schedule-run').addEventListener('click', onRealRunClick);
   mountAutoRun();
 
@@ -241,8 +244,8 @@ function renderLastRun(run) {
   const text = document.createElement('span');
   const parts = [
     `Generated ${shortTime(run.generated_utc, 'UTC')} UTC`,
-    // "selected", not "booked": on a dry run nothing was booked at all, and
-    // on a real run the badge above is the authority on what actually landed.
+    // "selected", not "booked": the badge above is the authority on what
+    // actually landed on the calendar.
     `${run.observations.length} of ${run.considered || run.observations.length} candidate pass(es) selected`,
   ];
   if (run.already_scheduled?.length) {
@@ -320,7 +323,8 @@ function renderLastRun(run) {
   table.appendChild(tbody);
   box.appendChild(scrollableTable(
     table,
-    `${run.dry_run ? 'Planned' : 'Booked'} observations, ${run.observations.length} row(s)`));
+    `${run.booked_state === 'confirmed' ? 'Booked' : 'Planned'} observations, `
+    + `${run.observations.length} row(s)`));
 
   if (run.already_scheduled?.length) {
     // Kept visually apart rather than merged into the table above: the tool
@@ -336,8 +340,8 @@ function renderLastRun(run) {
   appendLogDisclosure(box);
 }
 
-/* What this run was, said before anything else, because "7 observations" means
-   two completely different things depending on it. */
+/* How this run ended, said before anything else: "7 observations" means
+   different things depending on whether they are on the calendar. */
 function runBadge(run) {
   const badge = document.createElement('span');
   badge.className = 'sched-run-trigger';
@@ -345,13 +349,8 @@ function runBadge(run) {
 
   if (run.status === 'error') {
     badge.classList.add('danger');
-    badge.textContent = run.dry_run ? 'DRY RUN FAILED' : 'RUN FAILED';
-  } else if (run.booked_state === 'mock') {
-    // Deliberately not styled as a booking: nothing was started and nothing
-    // reached SatNOGS, whichever button was pressed.
-    badge.textContent = `SIMULATED · ${run.planned ?? run.observations.length} PLANNED`;
-  } else if (run.dry_run) {
-    badge.textContent = `DRY RUN · ${run.planned ?? run.observations.length} PLANNED`;
+    badge.textContent = run.booked_state === 'unconfirmed'
+      ? 'RUN INTERRUPTED · CHECK SATNOGS' : 'RUN FAILED';
   } else if (run.booked_state === 'confirmed') {
     badge.classList.add('danger');
     badge.textContent = `BOOKED ${run.booked} of ${run.planned}`;
@@ -478,16 +477,15 @@ function onRealRunClick() {
     btn.classList.add('is-armed');
     btn.textContent = 'BOOK FOR REAL?';
     setRunHint(
-      'This runs the scheduler again from scratch and books what it selects. '
-      + 'It recomputes, so the result can differ from the preview above. '
-      + 'Click again within 5s to confirm.',
+      'This runs satnogs-auto-scheduler for the station now and books real '
+      + 'observations for every pass it selects. Click again within 5s to confirm.',
     );
     clearTimeout(armedRealRunTimer);
     armedRealRunTimer = setTimeout(disarmRealRun, 5000);
     return;
   }
   disarmRealRun();
-  startRun(false);
+  startRun();
 }
 
 function disarmRealRun() {
@@ -499,15 +497,13 @@ function disarmRealRun() {
   refreshRunGate();
 }
 
-async function startRun(dryRun) {
-  const btn = document.getElementById(dryRun ? 'schedule-dry-run' : 'schedule-run');
-  const other = document.getElementById(dryRun ? 'schedule-run' : 'schedule-dry-run');
+async function startRun() {
+  const btn = document.getElementById('schedule-run');
   const label = btn.textContent;
   btn.disabled = true;
-  other.disabled = true;
-  btn.textContent = dryRun ? 'DRY RUN…' : 'BOOKING…';
+  btn.textContent = 'BOOKING…';
   try {
-    const started = await api.runSchedule(dryRun);
+    const started = await api.runSchedule();
     if (started?.status === 'running') {
       // Nothing was started - a run was already in flight (the auto-run
       // timer, or another tab). Polling from here would wait for THAT run and
@@ -562,13 +558,11 @@ function setRunHint(text) {
   hint.hidden = !text;
 }
 
-/* Both buttons are gated on BOTH tokens, and the hint has to say why DRY RUN
-   is included - otherwise a disabled DRY RUN button reads as a bug. */
+/* RUN NOW is gated on BOTH tokens, and the hint says which one is missing -
+   otherwise a disabled button reads as a bug. */
 function refreshRunGate() {
-  const dry = document.getElementById('schedule-dry-run');
   const real = document.getElementById('schedule-run');
   const ready = dbTokenSet && networkTokenSet;
-  dry.disabled = !ready;
   real.disabled = !ready;
   if (ready) {
     if (!armedRealRun) setRunHint('');
@@ -579,8 +573,7 @@ function refreshRunGate() {
   if (!networkTokenSet) missing.push('SatNOGS Network');
   setRunHint(
     `Set the ${missing.join(' and ')} token${missing.length > 1 ? 's' : ''} in ⚙ first. `
-    + 'satnogs-auto-scheduler checks its whole configuration before it looks at '
-    + 'the dry-run flag, so DRY RUN needs both of them too.',
+    + 'satnogs-auto-scheduler needs both of them to run.',
   );
 }
 
@@ -1134,6 +1127,15 @@ async function loadConfig() {
     const maxTotalInput = document.getElementById('campaign-max-total');
     maxTotalInput.value = cfg.campaign_max_total || 150;
     document.getElementById('campaign-max-total-value').textContent = maxTotalInput.value;
+    campaignLoop = !!cfg.campaign_loop_until_exhausted;
+    document.getElementById('campaign-loop').checked = campaignLoop;
+    const maxPerInput = document.getElementById('campaign-max-per-station');
+    maxPerInput.value = cfg.campaign_max_per_station || 2;
+    document.getElementById('campaign-max-per-station-value').textContent = maxPerInput.value;
+    const autoBox = document.getElementById('campaign-auto-commit');
+    autoBox.checked = !!cfg.campaign_auto_commit_enabled;
+    document.getElementById('campaign-auto-warn').hidden = !autoBox.checked;
+    paintCampaignReach();
     networkTokenSet = !!cfg.network_token_set;
     dbTokenSet = !!cfg.db_token_set;
     updateCampaignGate();
@@ -1147,8 +1149,8 @@ async function loadConfig() {
 /* --- auto run -------------------------------------------------------------
 
    The timer that runs the station scheduler without anyone present. It ships
-   disabled AND dry-run-only: two deliberate switches between a fresh install
-   and anything booking unattended, mirroring campaign_auto_commit_enabled. */
+   disabled, and once enabled every run it fires books real observations -
+   there is no dry-run-only mode. */
 function mountAutoRun() {
   document.getElementById('schedule-auto-enabled')
     .addEventListener('change', () => { autoDirty = true; paintAutoRun(); });
@@ -1156,10 +1158,6 @@ function mountAutoRun() {
     .addEventListener('click', () => setAutoMode('times'));
   document.getElementById('schedule-auto-mode-interval')
     .addEventListener('click', () => setAutoMode('interval'));
-  document.getElementById('schedule-auto-dry')
-    .addEventListener('click', () => setAutoBooking(true));
-  document.getElementById('schedule-auto-book')
-    .addEventListener('click', () => setAutoBooking(false));
   document.getElementById('schedule-auto-time-add')
     .addEventListener('click', addAutoTime);
   document.getElementById('schedule-auto-time-input')
@@ -1209,20 +1207,12 @@ function renderAutoRun(cfg, { keepEdits = false } = {}) {
 function pendingAutoRunEdits() {
   return {
     auto_run_mode: autoRunCfg?.auto_run_mode,
-    auto_run_dry_run: autoRunCfg?.auto_run_dry_run,
   };
 }
 
 function setAutoMode(mode) {
   if (!autoRunCfg) return;
   autoRunCfg = { ...autoRunCfg, auto_run_mode: mode };
-  autoDirty = true;
-  paintAutoRun();
-}
-
-function setAutoBooking(dryOnly) {
-  if (!autoRunCfg) return;
-  autoRunCfg = { ...autoRunCfg, auto_run_dry_run: dryOnly };
   autoDirty = true;
   paintAutoRun();
 }
@@ -1239,10 +1229,6 @@ function paintAutoRun() {
   document.getElementById('schedule-auto-times-block').hidden = mode !== 'times';
   document.getElementById('schedule-auto-interval-block').hidden = mode !== 'interval';
 
-  const dryOnly = cfg.auto_run_dry_run !== false;
-  document.getElementById('schedule-auto-dry').classList.toggle('is-active', dryOnly);
-  document.getElementById('schedule-auto-book').classList.toggle('is-active', !dryOnly);
-
   renderTimeChips();
 
   // The station publishes its own minimum culmination; -m REPLACES it rather
@@ -1258,7 +1244,7 @@ function paintAutoRun() {
     + 'higher of the two and this value is ignored.';
 
   const status = document.getElementById('schedule-auto-status');
-  if (!dryOnly && document.getElementById('schedule-auto-enabled').checked) {
+  if (document.getElementById('schedule-auto-enabled').checked) {
     status.textContent = 'Unattended runs will BOOK real observations.';
     status.classList.add('sched-status-danger');
   } else {
@@ -1331,7 +1317,6 @@ async function saveAutoRun() {
         document.getElementById('schedule-auto-interval').value,
         autoRunCfg?.auto_run_interval_min ?? 180,
       ),
-      auto_run_dry_run: autoRunCfg?.auto_run_dry_run !== false,
       schedule_hours: numberOr(
         document.getElementById('schedule-opt-hours').value,
         autoRunCfg?.schedule_hours ?? 24,
@@ -1373,8 +1358,8 @@ let runWarningsByNorad = new Map();
 function noteRunWarnings(run) {
   runWarningsByNorad = new Map();
   for (const notice of run?.notices || []) {
-    // The messages name their satellite as "NORAD 12345" or "12345 was not
-    // considered: ..." - both produced by this backend, both start with the id.
+    // The messages name their satellite as "NORAD 12345 ..." - produced by
+    // this backend, and the id is the first number in them.
     const match = /(?:NORAD\s+)?(\d{4,6})\b/.exec(notice.message || '');
     if (!match) continue;
     const norad = Number(match[1]);
@@ -1640,12 +1625,23 @@ function setMode(mode) {
 function mountCampaign() {
   document.getElementById('campaign-preview-btn').addEventListener('click', runCampaignPreview);
   document.getElementById('campaign-commit-btn').addEventListener('click', confirmCampaign);
+  document.getElementById('campaign-oneclick-btn').addEventListener('click', runCampaignOneClick);
+  document.getElementById('campaign-auto-commit').addEventListener('change', saveCampaignAutoCommit);
   document.getElementById('campaign-cfg-save').addEventListener('click', saveCampaignConfig);
   document.getElementById('campaign-verify-btn').addEventListener('click', verifyCampaign);
+  document.getElementById('campaign-max-per-station').addEventListener('input', (e) => {
+    document.getElementById('campaign-max-per-station-value').textContent = e.target.value;
+    campaignConfigDirty = true;
+    paintCampaignReach();
+  });
   document.getElementById('campaign-max-total').addEventListener('input', (e) => {
     document.getElementById('campaign-max-total-value').textContent = e.target.value;
+    paintCampaignReach();
     campaignConfigDirty = true;
     updateCampaignGate();
+  });
+  document.getElementById('campaign-loop').addEventListener('change', () => {
+    campaignConfigDirty = true;
   });
 }
 
@@ -1654,6 +1650,10 @@ function updateCampaignGate() {
   const previewBtn = document.getElementById('campaign-preview-btn');
   hint.hidden = networkTokenSet;
   previewBtn.disabled = !networkTokenSet;
+  // One-click previews and then books, so it needs the token at least as much
+  // as PREVIEW does. It was left enabled, and would fail minutes into a run.
+  const oneClick = document.getElementById('campaign-oneclick-btn');
+  if (oneClick) oneClick.disabled = !networkTokenSet;
   if (campaignConfigDirty) invalidateCampaignPreview();
 }
 
@@ -1666,11 +1666,19 @@ async function saveCampaignConfig() {
   const btn = document.getElementById('campaign-cfg-save');
   const status = document.getElementById('campaign-cfg-status');
   const input = document.getElementById('campaign-max-total');
+  const perInput = document.getElementById('campaign-max-per-station');
   const val = input.value.trim();
+  const perVal = perInput.value.trim();
   btn.disabled = true;
   status.textContent = 'saving…';
   try {
-    await api.saveScheduleConfig({ campaign_max_total: val ? parseInt(val, 10) : 0 });
+    const loop = document.getElementById('campaign-loop').checked;
+    await api.saveScheduleConfig({
+      campaign_max_total: val ? parseInt(val, 10) : 0,
+      campaign_max_per_station: perVal ? parseInt(perVal, 10) : 2,
+      campaign_loop_until_exhausted: loop,
+    });
+    campaignLoop = loop;
     campaignConfigDirty = false;
     status.textContent = 'saved';
   } catch (err) {
@@ -1703,7 +1711,7 @@ async function runCampaignPreview() {
         'A campaign run (preview or submit) is already in progress — wait for it '
         + 'to finish, then try again.'));
       announceCampaign('A campaign run is already in progress.');
-      return;
+      return 'busy';
     }
     const deadline = Date.now() + CAMPAIGN_POLL_TIMEOUT_MS;
     let finished = false;
@@ -1721,11 +1729,14 @@ async function runCampaignPreview() {
         'Still computing after 20 minutes — it may still finish. Nothing has been '
         + 'booked. Reopen this panel later to check, or use PREVIEW again once it has.'));
       announceCampaign('Preview still computing after 20 minutes. Nothing booked.');
+      return 'timeout';
     }
+    return 'ready';
   } catch (err) {
     console.error('[schedule] campaign preview', err);
     box.replaceChildren(alertNote(`Could not compute preview: ${err}`, 'error'));
     announceCampaign(`Preview failed: ${err}`);
+    return 'error';
   } finally {
     btn.disabled = false;
     btn.textContent = 'PREVIEW';
@@ -1804,6 +1815,29 @@ function renderCampaignPreview(preview) {
   // What CONFIRM actually submits — exactly what was just shown, not a
   // recompute at click time, so what's confirmed is what was reviewed.
   campaignPreviewItems = items;
+  lastPreviewStoppedEarly = preview.stopped_early || null;
+  if (lastPreviewStoppedEarly) {
+    // Above the table, not in the collapsed report: a plan cut short by the
+    // read limit looks exactly like a small network otherwise, and it is the
+    // fact that changes what the operator should do next.
+    const se = lastPreviewStoppedEarly;
+    box.prepend(alertNote(
+      `Incomplete plan — SatNOGS's read limit stopped this preview at station `
+      + `${se.station_id}${se.station_name ? ` (${se.station_name})` : ''}, with `
+      + `${se.unread_stations ?? 'some'} candidate station(s) never read. The plan `
+      + 'below covers only the stations it reached. Adding a Network token raises '
+      + 'the limit; otherwise try again in an hour.'));
+  }
+  // Stations the run could use: those it booked, plus those it had in hand
+  // but left out only because the booking budget ran out first. Stations
+  // skipped for antenna range, no pass, conflicts, or never read are NOT
+  // evidence of capacity and must not inflate the ceiling.
+  const budgetSkipped = (preview.skipped || []).filter(
+    (sk) => typeof sk.reason === 'string'
+      && (sk.reason.startsWith('had a free pass') || sk.reason.startsWith('not reached')),
+  ).length;
+  lastPreviewCapableStations = new Set(items.map((it) => it.station_id)).size + budgetSkipped;
+  paintCampaignReach();
   campaignConfigDirty = false;
   document.getElementById('campaign-commit-btn').hidden = items.length === 0;
 }
@@ -1929,10 +1963,28 @@ async function confirmCampaign() {
   const ok = window.confirm(
     `Book ${campaignPreviewItems.length} observation(s) on ${stationCount} community `
     + 'station(s) via SatNOGS Network?\n\n'
+    + (campaignLoop
+      ? 'Loop is ON: after this batch the campaign is recomputed and the next '
+        + 'batch submitted, again and again until no bookings are left — the '
+        + 'total can be well above this number.\n\n'
+      : '')
     + 'These are other operators\' ground stations. Accepted bookings cannot be '
     + 'undone from this dashboard.',
   );
   if (!ok) return;
+  await submitPreviewedItems();
+}
+
+/* The submit half of CONFIRM & SUBMIT, with no prompt of its own.
+
+   Split out so the one-click path can reuse it verbatim instead of growing a
+   second copy of the poll-and-report logic. The prompt lives in the caller,
+   because the two callers ask at different moments: the two-step flow asks
+   after the operator has read the plan, one-click asks before it exists. */
+async function submitPreviewedItems() {
+  if (!campaignPreviewItems || !campaignPreviewItems.length) return;
+  const btn = document.getElementById('campaign-commit-btn');
+  const box = document.getElementById('campaign-preview-result');
 
   btn.disabled = true;
   btn.textContent = 'SUBMITTING…';
@@ -1953,7 +2005,8 @@ async function confirmCampaign() {
       announceCampaign('Not submitted: a campaign run is already in progress.');
       return;
     }
-    const deadline = Date.now() + CAMPAIGN_POLL_TIMEOUT_MS;
+    const timeoutMs = campaignLoop ? CAMPAIGN_LOOP_POLL_TIMEOUT_MS : CAMPAIGN_POLL_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
     let last = null;
     while (Date.now() < deadline) {
       await sleep(POLL_MS);
@@ -1966,10 +2019,10 @@ async function confirmCampaign() {
       invalidateCampaignPreview();
     } else {
       box.prepend(alertNote(
-        'Still submitting after 20 minutes — some bookings may already have been '
+        `Still submitting after ${timeoutMs / 60_000} minutes — some bookings may already have been `
         + 'accepted. Do not resubmit: reopen this panel later to check the result '
         + 'and history first.'));
-      announceCampaign('Still submitting after 20 minutes. Check history before resubmitting.');
+      announceCampaign(`Still submitting after ${timeoutMs / 60_000} minutes. Check history before resubmitting.`);
     }
   } catch (err) {
     console.error('[schedule] campaign commit', err);
@@ -1980,6 +2033,205 @@ async function confirmCampaign() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'CONFIRM & SUBMIT';
+  }
+}
+
+/* The arithmetic the two sliders imply, shown next to them.
+
+   Raising "max bookings / run" on its own does nothing once it exceeds
+   (stations that can hear the transmitter) x (passes / station) - the plan
+   just stops at the lower number. That ceiling is invisible in the UI, and
+   without it an operator who wants 600 reasonably assumes the total slider is
+   the control for that. It is not; passes/station is. */
+function paintCampaignReach() {
+  const hint = document.getElementById('campaign-reach-hint');
+  if (!hint) return;
+  const total = parseInt(document.getElementById('campaign-max-total').value, 10) || 0;
+  const per = parseInt(document.getElementById('campaign-max-per-station').value, 10) || 1;
+  const stationsNeeded = Math.ceil(total / per);
+  // considered_stations from the last preview is the only real measurement of
+  // the network we have here; before one exists we can only state the demand.
+  const reach = lastPreviewCapableStations;
+  let text = `${total} bookings at ${per} per station needs ${stationsNeeded} station(s).`;
+  if (lastPreviewStoppedEarly) {
+    // The last preview never finished reading, so its count describes the read
+    // budget, not the network. Blaming the network here sends the operator to
+    // raise passes/station - depth on the same stations - when breadth is what
+    // was actually missing.
+    text += ' The last preview was cut short by the read limit, so it cannot '
+      + 'say how many stations are usable.';
+    hint.textContent = text;
+    return;
+  }
+  if (reach != null) {
+    const ceiling = reach * per;
+    text += ceiling < total
+      ? ` Last preview found ${reach} usable — so this run tops out at ${ceiling}.`
+      : ` Last preview found ${reach} usable, enough for this.`;
+  }
+  hint.textContent = text;
+}
+
+/* One press: compute the plan, then submit it.
+
+   The two-step PREVIEW / CONFIRM flow is still there and is still the right
+   one when the plan needs reading. This exists because the preview takes
+   minutes - it walks every candidate station's calendar - and requiring
+   someone to come back afterwards to press a second button is the actual
+   friction, not the clicking.
+
+   It still asks once, and it asks BEFORE the wait rather than after, naming
+   the two numbers that bound what can happen. That ordering is deliberate: a
+   prompt at the end, minutes later, is one an operator has stopped paying
+   attention to. What it cannot name is the exact count, because that does not
+   exist until the preview has run - so it names the ceiling instead and the
+   result is reported when it lands. */
+async function runCampaignOneClick() {
+  const btn = document.getElementById('campaign-oneclick-btn');
+  const box = document.getElementById('campaign-preview-result');
+
+  // THE NUMBERS IN THE PROMPT MUST BE THE NUMBERS USED. The prompt reads the
+  // sliders, but the backend plans from the SAVED config - POST /preview
+  // carries no body. So with unsaved slider moves the prompt could say "up to
+  // 20, at most 1 per station" while the run booked 600: a consent prompt that
+  // misstates the thing being consented to. Refusing while there are unsaved
+  // changes makes slider and saved config the same thing at the moment of
+  // asking.
+  if (campaignConfigDirty) {
+    box.prepend(alertNote(
+      'The booking caps have unsaved changes. Press SAVE first — one-click books '
+      + 'using the SAVED caps, so the numbers it asks you to confirm must be the '
+      + 'saved ones. Nothing was started.'));
+    announceCampaign('One-click not started: save the caps first.');
+    return;
+  }
+  const total = parseInt(document.getElementById('campaign-max-total').value, 10) || 0;
+  const per = parseInt(document.getElementById('campaign-max-per-station').value, 10) || 1;
+
+  // With looping on, the commit does not stop at `total`: it recomputes and
+  // submits again, round after round, until nothing is left to book - capped
+  // per station across ALL rounds, not per round. So `total` is only the first
+  // round, and a prompt that named it as the ceiling would understate what gets
+  // booked, which is the exact failure this prompt was rewritten to prevent.
+  // campaignLoop is the SAVED setting - the refusal above guarantees there is
+  // no unsaved toggle - so it is what the backend will actually do.
+  const ok = window.confirm(
+    (campaignLoop
+      ? `Book observations on community stations via SatNOGS Network, looping `
+        + `until nothing is left: up to ${total} per round, at most ${per} per `
+        + 'station across all rounds?\n\n'
+        + `Loop is ON — the total can be well above ${total}. It stops when a round `
+        + 'finds nothing left, when SatNOGS accepts nothing, or at the round limit.\n\n'
+      : `Book up to ${total} observation(s), at most ${per} per station, on community `
+        + 'stations via SatNOGS Network?\n\n')
+    + 'This computes the plan and then SUBMITS IT AUTOMATICALLY — you will not be '
+    + 'asked again. These are other operators\' ground stations, and accepted '
+    + 'bookings cannot be undone from this dashboard.\n\n'
+    + 'Use PREVIEW instead if you want to read the plan first.',
+  );
+  if (!ok) return;
+
+  btn.disabled = true;
+  btn.textContent = 'PLANNING…';
+  try {
+    const outcome = await runCampaignPreview();
+    if (outcome !== 'ready') {
+      // runCampaignPreview has already written why into the result box. What
+      // must NOT happen is the old fall-through, which reported a busy
+      // backend, a timeout or an error as "the preview found no free passes".
+      announceCampaign(`One-click stopped: the preview ${outcome === 'busy'
+        ? 'could not start because another campaign run is in progress'
+        : outcome === 'timeout' ? 'did not finish in time' : 'failed'}. Nothing was submitted.`);
+      return;
+    }
+    if (!campaignPreviewItems || !campaignPreviewItems.length) {
+      box.prepend(note(
+        'Nothing to book — the preview completed and found no free passes. '
+        + 'Nothing was submitted.'));
+      announceCampaign('One-click finished: nothing to book.');
+      return;
+    }
+
+    // Belt and braces on the same promise: whatever produced this plan (a
+    // second tab, a save from another operator, a config the backend clamped
+    // differently), it is not submitted if it exceeds what was just agreed to.
+    const perStation = new Map();
+    for (const it of campaignPreviewItems) {
+      perStation.set(it.station_id, (perStation.get(it.station_id) || 0) + 1);
+    }
+    const deepest = Math.max(...perStation.values());
+    if (campaignPreviewItems.length > total || deepest > per) {
+      box.prepend(alertNote(
+        `Not submitted — the plan (${campaignPreviewItems.length} booking(s), up to `
+        + `${deepest} on one station) exceeds what you confirmed (${total}, at most `
+        + `${per} per station). The caps were likely changed elsewhere. Review the `
+        + 'plan below and use CONFIRM & SUBMIT if it is what you want.', 'error'));
+      announceCampaign('One-click stopped: the plan exceeded the confirmed caps. Nothing submitted.');
+      return;
+    }
+
+    // "Book worldwide" is not what a run cut short by the read limit
+    // delivers. Submit that automatically and the operator believes the
+    // network is covered when a random part of it was never looked at.
+    if (lastPreviewStoppedEarly) {
+      box.prepend(alertNote(
+        'Not submitted automatically — this plan is incomplete (see above). '
+        + 'Review it and use CONFIRM & SUBMIT to book what it found, or try again '
+        + 'later for a complete plan.'));
+      announceCampaign('One-click stopped: incomplete plan held for review. Nothing submitted.');
+      return;
+    }
+
+    const stations = perStation.size;
+    btn.textContent = `SUBMITTING ${campaignPreviewItems.length}…`;
+    announceCampaign(
+      `Plan ready: ${campaignPreviewItems.length} booking(s) on ${stations} station(s). Submitting.`);
+    await submitPreviewedItems();
+  } catch (err) {
+    console.error('[schedule] one-click campaign', err);
+    box.prepend(alertNote(`One-click run failed: ${err}`, 'error'));
+    announceCampaign(`One-click run failed: ${err}`);
+  } finally {
+    btn.textContent = 'BOOK WORLDWIDE — ONE CLICK';
+    // Re-derive rather than blindly re-enable: without a token it must stay off.
+    btn.disabled = !networkTokenSet;
+  }
+}
+
+/* The unattended switch. Saved immediately rather than behind the SAVE button
+   next to the sliders, because a checkbox that looks set but is not saved is
+   exactly the wrong failure mode for "book without asking" - and because the
+   two belong to different decisions. */
+async function saveCampaignAutoCommit() {
+  const box = document.getElementById('campaign-auto-commit');
+  const status = document.getElementById('campaign-auto-status');
+  const warn = document.getElementById('campaign-auto-warn');
+  const want = box.checked;
+
+  if (want) {
+    const ok = window.confirm(
+      'Let the campaign book automatically, with nobody watching?\n\n'
+      + 'Every cycle will submit real bookings to other operators\' stations. No '
+      + 'plan is shown to anyone first, and nothing asks for confirmation.',
+    );
+    if (!ok) { box.checked = false; return; }
+  }
+
+  box.disabled = true;
+  status.textContent = 'saving…';
+  try {
+    await api.saveScheduleConfig({ campaign_auto_commit_enabled: want });
+    status.textContent = want ? 'automatic booking ON' : 'automatic booking off';
+    warn.hidden = !want;
+  } catch (err) {
+    // Put the control back to what the backend still believes, so the UI never
+    // claims a setting that did not land.
+    box.checked = !want;
+    warn.hidden = !box.checked;
+    status.textContent = `failed: ${err}`;
+  } finally {
+    box.disabled = false;
+    setTimeout(() => { status.textContent = ''; }, 4000);
   }
 }
 
@@ -2038,6 +2290,12 @@ function renderCampaignLastRun(run) {
     const ofText = document.createElement('span');
     ofText.textContent = `of ${submitted} submitted`;
     meta.append(okStat, badStat, ofText);
+    if ((run.rounds ?? 1) > 1 || campaignLoop) {
+      const roundsText = document.createElement('span');
+      roundsText.textContent = `in ${run.rounds ?? 1} round(s)`
+        + (run.stopped_reason ? ` · stopped: ${run.stopped_reason}` : '');
+      meta.appendChild(roundsText);
+    }
     announceCampaign(
       `Submit finished: ${accepted} booked, ${rejected} rejected, of ${submitted} submitted.`);
   }
@@ -2068,7 +2326,36 @@ function renderCampaignLastRun(run) {
    whitespace is what makes this pattern match real data at all. */
 const CAMPAIGN_ERROR_RE = /^(.*?)\s+norad-transmitter\s+(\S+):\s*HTTP\s+(\d+)\s*([\s\S]*)$/;
 
+/* The current per-item line, which leads with the station because "HTTP 409"
+   alone did not say which of 77 stations refused:
+     station <id> <start> transmitter <uuid>: HTTP <status> <body>
+     station <id> <start> transmitter <uuid>: OUTCOME UNKNOWN - <why>
+   The start still contains a space (format_api_datetime), so this anchors on
+   " transmitter " exactly as the old pattern anchored on " norad-transmitter ".
+   CAMPAIGN_ERROR_RE above is kept: run history persists the lines earlier runs
+   wrote, and those are still in the old shape. */
+const CAMPAIGN_ERROR_V2_RE =
+  /^station\s+(\S+)\s+(.*?)\s+transmitter\s+(\S+):\s*(?:HTTP\s+(\d+)\s*([\s\S]*)|OUTCOME UNKNOWN\b[\s\S]*)$/;
+
+// Never folded in with rejections. A rejection is known not to have booked; an
+// unknown outcome may have, and the one thing an operator must not do with it
+// is the thing a rejection invites - try again.
+const UNKNOWN_REASON = 'OUTCOME UNKNOWN · may be booked — cross-check, do NOT resubmit';
+
 function parseCampaignError(raw) {
+  if (/^OUTCOME UNKNOWN\b/.test(raw)) {
+    return { reason: UNKNOWN_REASON, detail: raw };
+  }
+  const v2 = CAMPAIGN_ERROR_V2_RE.exec(raw);
+  if (v2) {
+    const [, station, start, , status, body] = v2;
+    const where = `station ${station}, ${rejectionTime(start)}`;
+    if (status === undefined) {
+      return { reason: UNKNOWN_REASON, detail: `${where} — outcome unknown` };
+    }
+    const reason = extractRejectionReason(body) || `HTTP ${status}`;
+    return { reason: `HTTP ${status} · ${reason}`, detail: `${where} — ${reason}` };
+  }
   const m = CAMPAIGN_ERROR_RE.exec(raw);
   if (!m) return { reason: raw, detail: raw };
   const [, start, , status, body] = m;
@@ -2219,7 +2506,7 @@ function renderCampaignHistory(history) {
   const table = document.createElement('table');
   table.className = 'sched-table';
   const thead = document.createElement('thead');
-  thead.innerHTML = '<tr><th>Time UTC</th><th>Trigger</th><th>Booked</th><th>Rejected</th><th>Status</th></tr>';
+  thead.innerHTML = '<tr><th>Time UTC</th><th>Trigger</th><th>Booked</th><th>Rejected</th><th>Rounds</th><th>Status</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const run of history.slice().reverse()) {
@@ -2239,11 +2526,13 @@ function renderCampaignHistory(history) {
     const tdRejected = document.createElement('td');
     tdRejected.textContent = String(run.rejected ?? 0);
     if ((run.rejected ?? 0) > 0) tdRejected.className = 'sched-cell-bad';
+    const tdRounds = document.createElement('td');
+    tdRounds.textContent = String(run.rounds ?? 1);
     const tdStatus = document.createElement('td');
     tdStatus.textContent = run.status || '—';
     if (run.status === 'error') tdStatus.className = 'sched-cell-bad';
 
-    tr.append(tdTime, tdTrigger, tdBooked, tdRejected, tdStatus);
+    tr.append(tdTime, tdTrigger, tdBooked, tdRejected, tdRounds, tdStatus);
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);

@@ -141,16 +141,10 @@ class Settings(BaseSettings):
     # lets us pre-seed logging so severity survives the tool's own
     # format="%(message)s". "script" uses the installed console script instead.
     schedule_launcher: str = "module"
-    # None (default) means "follow the global mock flag". Set explicitly to run
-    # the REAL satnogs-auto-scheduler while every other component stays
-    # simulated - the same escape hatch campaign_mock provides, and needed for
-    # the same reason: GS_MOCK=0 would also open a live connection to the
-    # station's rotctld, which is the one thing this station's setup
-    # deliberately avoids (and right now the SPID rotator is powered off).
-    #
-    # Note this switch decides whether a run SPAWNS the tool. It does not
-    # decide whether that run books: that is `dry_run`, per request.
-    schedule_mock: bool | None = None
+    # There is deliberately no schedule_mock. The Station Schedule always runs
+    # the real satnogs-auto-scheduler and every run books, whatever GS_MOCK
+    # says - GS_MOCK only simulates the rotator and cameras. A leftover
+    # GS_SCHEDULE_MOCK in an environment is ignored (extra="ignore").
 
     # --- network campaign -------------------------------------------------
     # Daily, not more often: SatNOGS itself won't accept a booking more than
@@ -164,11 +158,22 @@ class Settings(BaseSettings):
     # that could look like spamming the community's shared stations from one
     # run, without hardcoding today's exact station count.
     campaign_max_total: int = 150
+    # Which transmitter the campaign records. KNACKSAT-2 has TWO active ones -
+    # 400.630 MHz telemetry and a 145.825 MHz V/V digipeater - and they reach
+    # largely disjoint station sets (155 vs 144, overlapping on only 67).
+    # Left unpinned, pick_transmitter ranks on (is_transponder, -baud); both of
+    # these are non-transponder at 9600 baud, so the key TIES and sort
+    # stability hands the win to whichever the DB happens to list first - the
+    # digipeater. The mission wants telemetry, so say so explicitly.
+    #
+    # Paired with default_norad: change them together. Set to None to restore
+    # the automatic per-station pick.
+    campaign_transmitter_uuid: str | None = "UatCXtfDnoBPeVBGHgj4Bc"
     # None (default) means "follow the global mock flag". Set explicitly to
-    # run Network Campaign against real SatNOGS Network while every other
-    # component (rotator, camera, the Station Schedule tab) stays mocked -
-    # e.g. a dev box that must not open a second live connection to a
-    # station's real rotctld.
+    # run Network Campaign against real SatNOGS Network while the rotator and
+    # cameras stay mocked - e.g. a dev box that must not open a second live
+    # connection to a station's real rotctld. (The Station Schedule has no
+    # mock mode at all.)
     campaign_mock: bool | None = None
 
     # --- derived ------------------------------------------------------------

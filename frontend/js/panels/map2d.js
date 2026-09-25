@@ -23,18 +23,72 @@ import { store } from '../core/store.js';
 const cssVar = (name, fallback) =>
   getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 
+/* Two tiers of coastline, finest first.
+
+   Natural Earth 110m — the file committed to this repo — is 127 features and
+   about 5,100 coordinate pairs for the entire world. At the width this panel
+   gets on the wall that is a caricature: Indonesia is a handful of blobs, and
+   the Gulf of Thailand, which is the water this station actually looks out
+   over, is one straight line. 50m is 1,420 features and 60,669 pairs — twelve
+   times the geometry — and it is the difference between a map and a logo.
+
+   The 50m file is fetched by tools/fetch_vendor.sh rather than committed, for
+   the same reason the Blue Marble imagery is: 1.6 MB of coordinates does not
+   belong in git when the repo already carries a usable 237 KB tier. And it is
+   a fallback, not a failure — a clone that skipped the script draws the 110m
+   outline and SAYS SO in the panel heading, exactly as the globe names the
+   surface it is on. An absence nobody can see is the trap this codebase keeps
+   writing itself notes about.
+
+   Not 10m. That tier is ~446,000 coordinate pairs and this canvas redraws its
+   land on every tick — at 1 Hz, forever, on a display left running for
+   months. 50m is the last rung that stays free. */
+const LAND_TIERS = [
+  ['assets/ne_50m_land.json', 'Natural Earth 50m'],
+  ['assets/ne_110m_land.json', 'Natural Earth 110m'],
+];
+
 let land = null;
+let landTier = null;
 let landPending = null;
 
 async function loadLand() {
   if (land) return land;
   if (!landPending) {
-    landPending = fetch('assets/ne_110m_land.json')
-      .then((r) => r.json())
-      .then((geo) => { land = geo; return land; })
-      .catch((err) => { console.warn('[map2d] coastlines unavailable:', err); return null; });
+    landPending = (async () => {
+      for (const [url, label] of LAND_TIERS) {
+        try {
+          const r = await fetch(url);
+          if (!r.ok) continue;                 // not there: try the coarser tier
+          land = await r.json();
+          landTier = label;
+          return land;
+        } catch (err) {
+          console.warn('[map2d] coastline tier', url, 'unavailable:', err);
+        }
+      }
+      console.warn('[map2d] coastlines unavailable: no tier loaded');
+      return null;
+    })();
   }
   return landPending;
+}
+
+/* Same contract as the globe's hint: the heading says which data is on screen,
+   so a question about how the map looks is answered where someone standing at
+   the rack can read it, without opening a console. */
+function setMapHint() {
+  const el = document.getElementById('map-hint');
+  if (!el) return;
+  if (!landTier) {
+    el.textContent = 'no coastlines';
+    el.title = 'Neither coastline tier loaded — run tools/fetch_vendor.sh.';
+    return;
+  }
+  el.textContent = landTier === 'Natural Earth 50m' ? '50m coast' : '110m coast';
+  el.title = landTier === 'Natural Earth 50m'
+    ? 'Natural Earth 50m (public domain), from assets/ne_50m_land.json.'
+    : 'Natural Earth 110m, the committed fallback — run tools/fetch_vendor.sh for 50m.';
 }
 
 /** Ring longitudes that jump more than 180 degrees wrap the map edge. */
@@ -53,7 +107,7 @@ export class Map2D {
     // a reflow every tick. `--night` is translucent already, so it is used as-is.
     this.paper = cssVar('--panel', '#ffffff');
     this.night = cssVar('--night', 'rgba(16, 34, 44, .18)');
-    loadLand().then(() => this.draw());
+    loadLand().then(() => { setMapHint(); this.draw(); });
   }
 
   // --- projection --------------------------------------------------------

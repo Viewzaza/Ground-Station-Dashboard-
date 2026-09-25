@@ -278,6 +278,33 @@ def test_a_zero_or_negative_interval_is_never_rather_than_always(interval_min):
     )
 
 
+def test_saving_an_interval_schedule_counts_from_the_save():
+    """SAVE on an overdue interval must not fire a run within the millisecond.
+
+    Every run books real observations. Without this, re-enabling an interval
+    after a pause, or saving any setting while its last run was over an
+    interval ago, booked immediately - the same trap times mode already
+    guards against with `not_before`.
+    """
+    now = utc(2026, 9, 23, 5, 7)
+    saved = now - timedelta(seconds=1)
+    last_run = now - timedelta(hours=9)
+
+    due = next_fire(mode="interval", times=[], interval_min=30, tz=BANGKOK,
+                    now=now, last_run=last_run, not_before=saved)
+
+    assert due == saved + timedelta(minutes=30), (
+        f"the interval restarts from the settings change, not from a run nine "
+        f"hours ago that makes it look overdue: expected "
+        f"{saved + timedelta(minutes=30)}, got {due}"
+    )
+
+    # A save long ago changes nothing: an overdue interval still fires once, now.
+    stale_save = now - timedelta(hours=8)
+    assert next_fire(mode="interval", times=[], interval_min=30, tz=BANGKOK,
+                     now=now, last_run=last_run, not_before=stale_save) == now
+
+
 # --- mode="times": the ordinary day -----------------------------------------
 def test_the_next_slot_today_is_read_in_the_configured_zone():
     # 09:00 in Bangkok, which is 02:00 UTC. The 18:00 local slot is next.

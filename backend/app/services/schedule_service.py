@@ -56,11 +56,11 @@ _CONFIG_FIELDS: dict[str, tuple] = {
     "campaign_auto_commit_enabled": (bool, False),
     "campaign_max_per_station": (int, True),
     "campaign_max_total": (int, True),
+    "campaign_loop_until_exhausted": (bool, False),
     "auto_run_enabled": (bool, False),
     "auto_run_mode": (str, False),
     "auto_run_times": (normalize_times, False),
     "auto_run_interval_min": (int, True),
-    "auto_run_dry_run": (bool, False),
     "schedule_hours": (float, True),
     "min_culmination_deg": (float, False),
     "only_priority": (bool, False),
@@ -71,6 +71,16 @@ _CONFIG_FIELDS: dict[str, tuple] = {
 
 _DEFAULT_LIST_SLUG = "default"
 _DEFAULT_LIST_NAME = "Default"
+
+# Written into schedule_config.json once the one-time migration below has run.
+# Every Station Schedule run books now - there is no dry run and no simulation -
+# so a config from before that change has to be read with care, exactly once.
+_REAL_ONLY_MARKER = "schedule_real_only"
+
+# A stored result that did not come from a run that could book: the canned
+# simulated result the removed mock mode wrote, and dry-run results. Either
+# one on the board reads as a booking that never happened.
+_NOT_REAL_BOOKED_STATES = ("mock", "dry_run")
 
 
 def _slugify(name: str) -> str:
@@ -100,6 +110,8 @@ class ScheduleService:
         self.priority_lists_dir.mkdir(parents=True, exist_ok=True)
 
         self._config = self._load_config()
+        self._migrate_to_real_only()
+        self._purge_not_real_result()
         self._manifest = self._load_or_migrate_manifest()
         # Must happen before the first run can be triggered: a legacy
         # 4-column file handed to the official scheduler parses to NOTHING,
@@ -140,6 +152,73 @@ class ScheduleService:
         tmp.write_text(json.dumps(self._config, indent=2), encoding="utf-8")
         tmp.replace(self.config_file)
 
+    def _migrate_to_real_only(self) -> None:
+        """One-time: read a config from before dry runs were removed.
+
+        `auto_run_dry_run` used to default to True, so an enabled auto-run with
+        the key absent or True was only ever PLANNING. Every fire books now.
+        Carrying such a config over as-is would turn a timer the operator set
+        up to preview into one that books real observations unattended, with
+        nobody having asked for that - so it is switched off instead, and says
+        so. Only an explicit `False` (the operator had already chosen BOOK FOR
+        REAL) keeps running.
+
+        The marker makes this a one-shot: a config written by this code never
+        has the key, and must not be mistaken for a dry-run-only one on every
+        restart.
+        """
+        if self._config.get(_REAL_ONLY_MARKER):
+            return
+        was_dry_run = self._config.get("auto_run_dry_run")
+        if self._config.get("auto_run_enabled") and was_dry_run is not False:
+            self._config["auto_run_enabled"] = False
+            log.warning(
+                "Station Schedule auto-run was set to dry runs only. Dry runs no "
+                "longer exist - every run books real observations - so auto-run "
+                "has been switched OFF. Re-enable it in the Station Schedule "
+                "panel if unattended booking is what you want."
+            )
+        self._config.pop("auto_run_dry_run", None)
+        self._config[_REAL_ONLY_MARKER] = True
+        if not self.config_file.is_file():
+            return  # a fresh install: nothing to migrate, and no file to create
+        try:
+            self._write_config()
+        except OSError as exc:
+            # Never fatal: the in-memory config is already migrated, and the
+            # whole backend failing to boot over it would be far worse.
+            log.warning("could not save the migrated %s: %s", self.config_file, exc)
+
+    @staticmethod
+    def _is_not_real(result: dict) -> bool:
+        return (
+            result.get("booked_state") in _NOT_REAL_BOOKED_STATES
+            or result.get("dry_run") is True
+            or result.get("cli_version") == "mock"
+        )
+
+    def _purge_not_real_result(self) -> None:
+        """Delete a stored simulated or dry-run result, so it leaves the board."""
+        if not self.result_path.is_file():
+            return
+        try:
+            stored = json.loads(self.result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(stored, dict) or not self._is_not_real(stored):
+            return
+        log.warning(
+            "removing %s: it records a %s run that booked nothing, and the "
+            "Station Schedule now only shows real runs",
+            self.result_path.name,
+            "simulated" if stored.get("booked_state") == "mock" else "dry",
+        )
+        try:
+            self.result_path.unlink(missing_ok=True)
+        except OSError as exc:
+            # get_last_run() refuses to show it either way.
+            log.warning("could not remove %s: %s", self.result_path, exc)
+
     def _effective_station_id(self) -> int:
         return self._config.get("station_id") or self.s.station_id
 
@@ -162,13 +241,13 @@ class ScheduleService:
     def campaign_max_total(self) -> int:
         return int(self._config.get("campaign_max_total") or self.s.campaign_max_total)
 
-    def auto_run_enabled(self) -> bool:
-        return bool(self._config.get("auto_run_enabled", False))
+    def campaign_loop_until_exhausted(self) -> bool:
+        """Off by default: one commit is one batch of at most max_total."""
+        return bool(self._config.get("campaign_loop_until_exhausted", False))
 
-    def auto_run_dry_run(self) -> bool:
-        """Defaults to True: a fresh install must not book unattended."""
-        value = self._config.get("auto_run_dry_run")
-        return True if value is None else bool(value)
+    def auto_run_enabled(self) -> bool:
+        """Defaults to False: a fresh install must not book unattended."""
+        return bool(self._config.get("auto_run_enabled", False))
 
     def _auto_run_interval_min(self) -> int:
         # GS_SCHEDULE_POLL_S is only a seed for a fresh config; once the
@@ -253,6 +332,7 @@ class ScheduleService:
                 "campaign_auto_commit_enabled": self.campaign_auto_commit_enabled(),
                 "campaign_max_per_station": self.campaign_max_per_station(),
                 "campaign_max_total": self.campaign_max_total(),
+                "campaign_loop_until_exhausted": self.campaign_loop_until_exhausted(),
                 # --- station auto run ---
                 "auto_run_enabled": self.auto_run_enabled(),
                 "auto_run_mode": self._config.get("auto_run_mode") or "times",
@@ -262,7 +342,6 @@ class ScheduleService:
                 # then save, booking twice a day by accident.
                 "auto_run_times": self._cfg("auto_run_times", ["06:00", "18:00"]),
                 "auto_run_interval_min": self._auto_run_interval_min(),
-                "auto_run_dry_run": self.auto_run_dry_run(),
                 "auto_run_last_fire_utc": self._config.get("auto_run_last_fire_utc"),
                 "auto_run_next_utc": next_run.isoformat() if next_run else None,
                 # --- run flags ---
@@ -276,8 +355,17 @@ class ScheduleService:
                 "cli_version": self.cli_version,
             }
 
-    async def save_config(self, **fields) -> dict:
+    async def save_config(self, *, now: datetime | None = None, **fields) -> dict:
         """Apply only the keys actually passed.
+
+        `now` is keyword-only and separate from **fields on purpose: fields is
+        validated against _CONFIG_FIELDS and an unknown key raises, so a clock
+        smuggled in there would be rejected. It exists because the
+        auto_run_changed_utc stamp below used to read the wall clock directly,
+        which made this method impossible to test at a fixed date - two tests
+        asserting against 2026-09-21 fixtures passed when they were written and
+        began failing permanently once real time moved past them. Production
+        passes nothing and gets datetime.now, exactly as before.
 
         `None` is no longer how a caller says "leave unchanged" - simply not
         passing the key is, which is what the route's
@@ -305,8 +393,8 @@ class ScheduleService:
             # Without this, adding a 12:30 time at 12:40 lands inside the
             # 30-minute catch-up grace and fires a REAL booking run seconds
             # after SAVE, for a slot the operator meant to start tomorrow.
-            self._config["auto_run_changed_utc"] = datetime.now(
-                timezone.utc
+            self._config["auto_run_changed_utc"] = (
+                now or datetime.now(timezone.utc)
             ).isoformat()
             await asyncio.to_thread(self._write_config)
         # Wake the auto-run loop so a change to the timer takes effect now
@@ -349,21 +437,8 @@ class ScheduleService:
             # future settings field might hold.
         )
 
-    def schedule_mock(self) -> bool:
-        """Whether a run is simulated rather than actually spawning the tool.
-
-        Falls back to the global GS_MOCK, but can be set on its own so the
-        scheduler talks to real SatNOGS while the rotator and cameras stay
-        simulated. See Settings.schedule_mock for why that matters here.
-        """
-        if self.s.schedule_mock is not None:
-            return bool(self.s.schedule_mock)
-        return bool(self.s.mock)
-
     def _probe_cli_version(self) -> str:
         """Ask the installed scheduler what it is, once, at startup."""
-        if self.schedule_mock():
-            return "mock"
         try:
             proc = subprocess.run(
                 [sys.executable, "-c",
@@ -390,71 +465,6 @@ class ScheduleService:
         reported = (proc.stdout or proc.stderr).strip()
         return reported.splitlines()[0] if reported else ""
 
-    def _mock_result(self, dry_run: bool = True, trigger: str = "manual") -> dict:
-        """A small canned plan, so GS_MOCK=1 never touches the live SatNOGS APIs.
-
-        Honours `dry_run` so DRY RUN and RUN NOW do visibly different things on
-        a dev box - otherwise the one control that decides whether real
-        observations get booked is the one control never exercised in dev.
-
-        Includes one canned notice so the "ok_with_warnings" UI path is
-        exercised by default in dev, not only against a real run.
-        """
-        now = datetime.now(timezone.utc).isoformat()
-        return {
-            "status": "ok_with_warnings",
-            "station": self._effective_station_id(),
-            "generated_utc": now,
-            "considered": 2,
-            "rejected_conflict": 0,
-            "rejected_capped": 0,
-            "notices": [
-                {"severity": "warning",
-                 "message": (
-                     "Simulated run — the scheduler was not started and nothing "
-                     "was booked. Set GS_SCHEDULE_MOCK=0 to run the real tool "
-                     "(GS_MOCK can stay 1, so the rotator and cameras stay "
-                     "simulated)."
-                 )},
-                {"severity": "warning",
-                 "message": "12345 was not considered: SatNOGS DB has no TLE for it"},
-            ],
-            "observations": [
-                {
-                    "start": now, "end": now, "duration_s": 300,
-                    "norad_cat_id": self.s.default_norad, "satellite": "KNACKSAT-2",
-                    "max_elevation_deg": 45.0, "aos_azimuth_deg": 10.0,
-                    "los_azimuth_deg": 190.0, "transmitter_uuid": "mock-transmitter",
-                    "downlink_hz": 400_630_000, "mode": "GFSK", "observed_here": 3,
-                    "score": 2.0, "is_mission": True,
-                },
-            ],
-            "dry_run": dry_run,
-            "trigger": trigger,
-            "planned": 1,
-            # Never a non-zero booked count: a simulated run returns before
-            # anything is spawned, so nothing reaches SatNOGS however dry_run
-            # is set. Reporting "BOOKED 1 of 1" here told the operator an
-            # observation existed that did not - on a stack left mocked by
-            # accident, the most misleading thing this panel could say.
-            #
-            # The two buttons still differ, because they really do mean
-            # different things: a dry run genuinely IS a dry run even when
-            # simulated, whereas a simulated RUN NOW is a booking that was
-            # asked for and never attempted, which needs its own word.
-            "booked": 0,
-            "booked_state": "dry_run" if dry_run else "mock",
-            "already_scheduled": [],
-            "efficiency": {"selected": 1, "considered": 2, "scheduled_s": 300,
-                           "total_s": 3600, "percent": 8.333},
-            "exit_code": 0,
-            "killed_by": "",
-            "run_duration_s": 0.0,
-            "log_tail": ["Simulated run: the scheduler was never started and "
-                         "nothing was booked."],
-            "cli_version": self.cli_version,
-        }
-
     def is_running(self) -> bool:
         return self._running
 
@@ -466,15 +476,13 @@ class ScheduleService:
         self,
         hours: float | None = None,
         *,
-        dry_run: bool = True,
         trigger: str = "manual",
     ) -> dict:
-        """Plan, and unless `dry_run`, actually book.
+        """Plan and book. There is no dry run and no simulated run.
 
-        `dry_run` defaults to True here even though the HTTP layer requires it
-        explicitly. Two different callers reach this method - the route and the
-        auto-run loop - and a default of False would mean any future third
-        caller books real observations by omission.
+        Two callers reach this - the route and the auto-run loop - and both
+        book real observations. What stops a run is the offline, not-installed
+        and token guards in `_execute_run`, never a flag.
         """
         if self._running:
             return {"status": "running"}
@@ -484,10 +492,29 @@ class ScheduleService:
             self._running = True
         self._progress = "starting"
         try:
-            result = await self._execute_run(hours, dry_run=dry_run, trigger=trigger)
+            result = await self._execute_run(hours, trigger=trigger)
+        except asyncio.CancelledError:
+            # A backend restart mid-run - on this stack any source save, via
+            # uvicorn --reload. The child has been told to stop (see
+            # autoscheduler_cli.run), but a booking POST may already have
+            # landed, so this is recorded rather than lost: without it the
+            # board keeps showing the previous run, and the natural next move
+            # - running again - can double-book.
+            interrupted = self._failure_result(
+                "The run was interrupted by a backend restart before it finished. "
+                "Some observations may have been booked - check "
+                "network.satnogs.org before running again.",
+                trigger=trigger,
+            )
+            interrupted["booked_state"] = "unconfirmed"
+            try:
+                self._write_result(interrupted)
+            except OSError:
+                log.warning("could not record the interrupted run", exc_info=True)
+            raise
         except Exception as exc:  # noqa: BLE001 - every failure must be reportable
             log.exception("schedule run failed")
-            result = self._failure_result(str(exc), dry_run=dry_run, trigger=trigger)
+            result = self._failure_result(str(exc), trigger=trigger)
         finally:
             self._running = False
             self._progress = ""
@@ -506,19 +533,15 @@ class ScheduleService:
 
     @staticmethod
     def _state_detail(result: dict) -> str:
-        """What the header chip says. A dry run must never read as a booking."""
+        """What the header chip says."""
         planned = result.get("planned", len(result.get("observations", [])))
-        if result.get("dry_run"):
-            return f"dry run: {planned} planned"
         booked = result.get("booked", 0)
-        if result.get("booked_state") == "mock":
-            return f"simulated: {planned} planned, nothing booked"
         if result.get("booked_state") == "confirmed":
             return f"booked {booked}"
         return f"planned {planned}, {booked} booked ({result.get('booked_state', 'unknown')})"
 
     def _failure_result(
-        self, error: str, *, dry_run: bool, trigger: str, notices: list | None = None
+        self, error: str, *, trigger: str, notices: list | None = None
     ) -> dict:
         return {
             "status": "error",
@@ -530,11 +553,10 @@ class ScheduleService:
             "rejected_capped": 0,
             "observations": [],
             "notices": notices or [{"severity": "error", "message": error}],
-            "dry_run": dry_run,
             "trigger": trigger,
             "planned": 0,
             "booked": 0,
-            "booked_state": "dry_run" if dry_run else "failed",
+            "booked_state": "failed",
             "already_scheduled": [],
             "efficiency": None,
             "exit_code": None,
@@ -544,10 +566,7 @@ class ScheduleService:
             "cli_version": self.cli_version,
         }
 
-    async def _execute_run(self, hours, *, dry_run: bool, trigger: str) -> dict:
-        if self.schedule_mock():
-            return self._mock_result(dry_run=dry_run, trigger=trigger)
-
+    async def _execute_run(self, hours, *, trigger: str) -> dict:
         # GS_OFFLINE means "serve fixtures instead of hitting the internet",
         # and every other SatNOGS-touching call in this service honours it.
         # The child process cannot: the tool has no offline mode and would go
@@ -560,21 +579,28 @@ class ScheduleService:
                 "flag means this dashboard must not reach the internet, and "
                 "satnogs-auto-scheduler has no offline mode - it would book "
                 "against the live SatNOGS API. Clear GS_OFFLINE to run it.",
-                dry_run=dry_run,
+                trigger=trigger,
+            )
+
+        # The startup probe already knows. Spawning anyway only buys a
+        # ModuleNotFoundError traceback in place of a sentence.
+        if self.cli_version.startswith("NOT INSTALLED"):
+            return self._failure_result(
+                "satnogs-auto-scheduler is not installed in this backend image, so "
+                "the run was not started and nothing was booked. Rebuild the "
+                "backend image and recreate the container.",
                 trigger=trigger,
             )
 
         # Both tokens, always - satnogs-auto-scheduler validates its whole
-        # configuration before it looks at --dryrun, so a dry run needs the
-        # Network token too. Catching it here turns an opaque child exit(1)
-        # into a sentence.
+        # configuration before it does anything else. Catching it here turns
+        # an opaque child exit(1) into a sentence.
         problems = autoscheduler_cli.validate_tokens(
             self._effective_db_token(), self._effective_network_token()
         )
         if problems:
             return self._failure_result(
                 problems[0],
-                dry_run=dry_run,
                 trigger=trigger,
                 notices=[{"severity": "error", "message": p} for p in problems],
             )
@@ -585,13 +611,51 @@ class ScheduleService:
         )
         await asyncio.to_thread(self._rotate_log)
 
-        cfg = self._build_run_config(hours, dry_run)
+        cfg = self._build_run_config(hours)
+        screened = await asyncio.to_thread(self._screen_tool_tles_sync, cfg)
         outcome = await autoscheduler_cli.run(
             cfg, on_line=self._note_progress, log_path=self.log_path
         )
-        return await self._build_result(
-            outcome, entries, notices, dry_run=dry_run, trigger=trigger
+        if autoscheduler_cli.crashed_in_prediction(outcome):
+            # The tool refreshes its own TLE cache once a day, at the start of
+            # a run - after the screen above - and a refresh can bring a TLE
+            # back that SGP4 cannot propagate. Its pass prediction then dies
+            # before anything is booked. Screen the fresh cache and go again,
+            # once, and only if the screen actually removed something: any
+            # other crash is reported as it is.
+            again = await asyncio.to_thread(self._screen_tool_tles_sync, cfg)
+            if again:
+                screened += again
+                log.warning(
+                    "satnogs-auto-scheduler crashed in pass prediction on a TLE "
+                    "it had just downloaded; retrying once without %s",
+                    ", ".join(s["norad_cat_id"] for s in again),
+                )
+                self._progress = "retrying without an unpropagatable TLE"
+                await asyncio.to_thread(self._rotate_log)
+                outcome = await autoscheduler_cli.run(
+                    cfg, on_line=self._note_progress, log_path=self.log_path
+                )
+        notice = autoscheduler_cli.screened_notice(
+            screened, [entry.norad_cat_id for entry in entries]
         )
+        if notice is not None:
+            notices = [*notices, notice]
+            outcome.parsed.notices = autoscheduler_cli.without_screened_tle_warnings(
+                outcome.parsed.notices, screened
+            )
+        return await self._build_result(outcome, entries, notices, trigger=trigger)
+
+    def _screen_tool_tles_sync(self, cfg) -> list[dict]:
+        """See autoscheduler_cli.screen_tool_tles. Never allowed to stop a run."""
+        start = autoscheduler_cli.start_time(cfg)
+        try:
+            return autoscheduler_cli.screen_tool_tles(
+                self.cache_dir, start, start + timedelta(hours=float(cfg.hours))
+            )
+        except Exception:  # noqa: BLE001 - a screen that fails leaves the run as it was
+            log.warning("could not screen the scheduler's TLE cache", exc_info=True)
+            return []
 
     def _note_progress(self, line: str) -> None:
         _level, _logger, message = autoscheduler_cli.split_prefix(line)
@@ -604,14 +668,13 @@ class ScheduleService:
         if self.log_path.is_file():
             self.log_path.replace(self.log_path.with_suffix(".log.prev"))
 
-    def _build_run_config(self, hours, dry_run: bool) -> autoscheduler_cli.RunConfig:
+    def _build_run_config(self, hours) -> autoscheduler_cli.RunConfig:
         return autoscheduler_cli.RunConfig(
             station_id=self._effective_station_id(),
             db_token=self._effective_db_token(),
             network_token=self._effective_network_token(),
             cache_dir=str(self.cache_dir),
             priorities_path=str(self.run_priorities_file),
-            dry_run=dry_run,
             hours=float(hours if hours is not None else self._cfg("schedule_hours", self.s.schedule_hours)),
             min_culmination_deg=float(self._cfg("min_culmination_deg", 3.0)),
             max_observation_minutes=int(self._cfg("max_observation_minutes", 30)),
@@ -679,25 +742,27 @@ class ScheduleService:
         return resolved, notices
 
     async def _build_result(
-        self, outcome, entries, notices: list[dict], *, dry_run: bool, trigger: str
+        self, outcome, entries, notices: list[dict], *, trigger: str
     ) -> dict:
         parsed = outcome.parsed
         all_notices = list(notices) + list(parsed.notices)
-        all_notices += autoscheduler_cli.missing_priority_notices(
-            [entry.norad_cat_id for entry in entries], parsed
-        )
+        failed = outcome.failure is not None and not parsed.planned
+        if not failed:
+            # Only a run that got as far as selecting passes can say a priority
+            # entry produced none. After a crash every entry would be listed,
+            # each blaming its transmitter for a failure it had no part in.
+            all_notices += autoscheduler_cli.missing_priority_notices(
+                [entry.norad_cat_id for entry in entries], parsed
+            )
         if outcome.failure is not None:
             all_notices.insert(0, {"severity": "error", "message": outcome.failure[1]})
 
         observations = await asyncio.to_thread(self._enrich_rows_sync, parsed.planned)
         already = [self._row_payload(row, {}) for row in parsed.already_scheduled]
 
-        booked, booked_state, recon_notices = await self._reconcile(
-            parsed, outcome, dry_run=dry_run
-        )
+        booked, booked_state, recon_notices = await self._reconcile(parsed, outcome)
         all_notices += recon_notices
 
-        failed = outcome.failure is not None and not parsed.planned
         return {
             "status": "error" if failed else ("ok_with_warnings" if all_notices else "ok"),
             "error": outcome.failure[1] if failed else None,
@@ -711,7 +776,6 @@ class ScheduleService:
             "rejected_capped": 0,
             "observations": observations,
             "notices": all_notices,
-            "dry_run": dry_run,
             "trigger": trigger,
             "planned": len(parsed.planned),
             "booked": booked,
@@ -770,18 +834,15 @@ class ScheduleService:
     # SatNOGS rounding.
     _RECONCILE_TOLERANCE_S = 90
 
-    async def _reconcile(self, parsed, outcome, *, dry_run: bool) -> tuple[int, str, list]:
+    async def _reconcile(self, parsed, outcome) -> tuple[int, str, list]:
         """Ask SatNOGS what is actually on the calendar.
 
         The transcript alone cannot answer this honestly. "Scheduled N passes!"
         is logged at DEBUG, and if the run was killed during the booking POST -
         which carries no timeout of its own - observations may exist
-        server-side for a run we believe failed. So after any non-dry run we
-        go and look.
+        server-side for a run we believe failed. So after every run we go and
+        look.
         """
-        if dry_run:
-            return 0, "dry_run", []
-
         # Only failures that happen BEFORE the tool could post anything are
         # safe to report as "nothing booked" without looking. A booking-stage
         # failure is NOT one of them: upstream reacts to a rejected batch by
@@ -797,7 +858,21 @@ class ScheduleService:
         ):
             return 0, "failed", []
         if not parsed.planned:
-            return 0, "confirmed", []
+            if parsed.attempted_booking or parsed.booked_log:
+                # The tool reached its booking step, but its table could not be
+                # read back. Saying "nothing booked" here would invite a second
+                # run on top of bookings that may well exist.
+                return (parsed.booked_log or 0), "unconfirmed", [{
+                    "severity": "warning",
+                    "message": (
+                        "satnogs-auto-scheduler reached its booking step, but its "
+                        "summary table could not be read, so what it booked is "
+                        "unknown. Check network.satnogs.org before running again."
+                    ),
+                }]
+            # A crash or a network error with no table is a failed run - it
+            # used to read "confirmed", 0 booked, which is not the same thing.
+            return 0, ("failed" if outcome.failure is not None else "confirmed"), []
 
         # SatNOGS's read API trails its write API by a moment.
         await asyncio.sleep(5)
@@ -900,9 +975,10 @@ class ScheduleService:
         """
         if not self.log_path.is_file():
             # No transcript file. Either nothing has run, or the run that did
-            # never spawned a child - GS_MOCK=1. Fall back to whatever the
-            # stored result kept, rather than telling the operator no run has
-            # happened when the table above plainly shows one.
+            # never spawned a child - it was refused by the offline, not-
+            # installed or token guard. Fall back to whatever the stored result
+            # kept, rather than telling the operator no run has happened when
+            # the panel above plainly shows one.
             tail = self.get_last_run().get("log_tail") or []
             if tail:
                 return "\n".join(tail)
@@ -918,10 +994,15 @@ class ScheduleService:
         if not self.result_path.is_file():
             return {"status": "never_run"}
         try:
-            return json.loads(self.result_path.read_text(encoding="utf-8"))
+            stored = json.loads(self.result_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             log.warning("could not read %s: %s", self.result_path, exc)
             return {"status": "never_run"}
+        # Normally purged at startup; this covers a purge that could not
+        # delete the file. A booking that never happened is never shown.
+        if isinstance(stored, dict) and self._is_not_real(stored):
+            return {"status": "never_run"}
+        return stored
 
     # --- priority lists ------------------------------------------------------
     def _load_or_migrate_manifest(self) -> dict:

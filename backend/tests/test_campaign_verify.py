@@ -75,6 +75,9 @@ def service(tmp_path, monkeypatch):
         def _effective_station_id(self):
             return 5024
 
+        def campaign_loop_until_exhausted(self):
+            return False
+
     svc = CampaignService(settings, StubSchedule())
     return svc
 

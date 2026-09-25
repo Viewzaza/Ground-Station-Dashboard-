@@ -50,22 +50,22 @@ async def last_run(request: Request) -> dict:
     next_run = service.next_auto_run()
     payload["auto_run_next_utc"] = next_run.isoformat() if next_run else None
     payload["auto_run_enabled"] = service.auto_run_enabled()
-    payload["auto_run_dry_run"] = service.auto_run_dry_run()
     return payload
 
 
 @router.post("/schedule/run")
 async def run(request: Request, body: ScheduleRunRequest) -> dict:
-    """Start a run. `dry_run` is required - see ScheduleRunRequest.
+    """Start a run that books real observations. `book: true` is required -
+    see ScheduleRunRequest. There is no dry run.
 
     Still fire-and-forget: a cold run can take minutes, so the caller polls
     GET /schedule rather than holding a request open.
     """
     service = _service(request)
     if service.is_running():
-        return {"status": "running", "dry_run": body.dry_run}
-    asyncio.create_task(service.run_plan(dry_run=body.dry_run, trigger="manual"))
-    return {"status": "started", "dry_run": body.dry_run}
+        return {"status": "running"}
+    asyncio.create_task(service.run_plan(trigger="manual"))
+    return {"status": "started"}
 
 
 @router.get("/schedule/log", response_class=PlainTextResponse)

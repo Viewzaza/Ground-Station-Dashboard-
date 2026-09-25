@@ -941,8 +941,8 @@ button.sched-prio-tx.is-editing { color: var(--track); }
   background: var(--bad); color: var(--panel); border-color: var(--bad);
 }
 
-/* Why the buttons are disabled. Carries real information — that a DRY RUN
-   also needs both tokens — so it is not muted into invisibility. */
+/* Why RUN NOW is disabled, or what arming it will do. Carries real
+   information — which token is missing — so it is not muted into invisibility. */
 .sched-run-hint { margin: 4px 0 0; max-width: 62ch; }
 .sched-run-hint[hidden] { display: none; }
 
@@ -951,8 +951,8 @@ button.sched-prio-tx.is-editing { color: var(--track); }
 
 .sched-badge-row { margin: 0 0 6px; display: flex; align-items: center; gap: 6px; }
 
-/* The booking states. Neutral is a dry run; anything that touched the real
-   calendar is marked. */
+/* The booking states. Every run touches the real calendar, so every one of
+   them is marked. */
 .sched-run-trigger.danger {
   color: var(--bad);
   border-color: color-mix(in srgb, var(--bad) 55%, var(--panel));
@@ -969,11 +969,6 @@ button.sched-prio-tx.is-editing { color: var(--track); }
 .sched-auto-add[hidden] { display: none; }
 .sched-auto-add input[type="time"],
 .sched-auto-add input[type="number"] { width: 8em; }
-
-.sched-auto-row {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 0;
-}
-.sched-auto-label { font-size: 11px; color: var(--ink-3); }
 
 /* Times as removable chips rather than a comma-separated text field: the set
    is small, and a chip makes "18:00 is in the list" unambiguous. */
@@ -1029,3 +1024,47 @@ button.sched-prio-tx.is-editing { color: var(--track); }
    that textContent would delete outright, breaking the list picker for the
    rest of the session. */
 .sched-armed-label { color: var(--bad); font-weight: 600; }
+
+/* --- one-click worldwide booking, and the unattended switch ----------------
+
+   Both of these spend other people's antenna time, so they are styled to the
+   same --bad register as .sched-campaign-warnbar rather than as ordinary
+   controls. The one-click button is deliberately the loudest thing in this
+   panel: it is the only control here that goes from nothing to submitted
+   without a second look at the plan. */
+.sched-campaign-oneclick {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule-soft);
+}
+.sched-oneclick-btn {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+/* Disabled is not decoration here - it is the signal that a plan/submit cycle
+   is in flight and that pressing again would do nothing. */
+.sched-oneclick-btn:disabled { opacity: 0.6; cursor: progress; }
+.sched-campaign-oneclick .hint { flex: 1 1 200px; min-width: 0; }
+
+.sched-campaign-auto {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rule-soft);
+}
+.sched-auto-toggle {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+/* The label reads as a sentence, so it must not inherit the uppercase, muted
+   treatment .sched-campaign-row gives its other labels. */
+.sched-campaign-auto label { font-size: 11px; color: var(--ink-2); text-transform: none; }
+.sched-auto-toggle input[type="checkbox"] { accent-color: var(--bad); }
+#campaign-reach-hint { font-variant-numeric: tabular-nums; }
