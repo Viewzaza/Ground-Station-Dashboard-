@@ -208,7 +208,7 @@ def build_campaign(
             calendar.add(start, end)
 
         booked_here = 0
-        for p, end in sorted(gated, key=lambda pair: pair[0].aos):
+        for p, end in _by_elevation_spread(gated):
             if booked_here >= max_per_station or len(preview.items) >= max_total:
                 break
             if calendar.conflicts(p.aos, end):
@@ -231,6 +231,50 @@ def build_campaign(
             break
 
     return preview
+
+
+def _by_elevation_spread(gated: list) -> list:
+    """Order a station's qualifying passes so the first few span the widest
+    range of maximum elevation.
+
+    This used to be `sorted(..., key=aos)` — chronological — and the per-station
+    cap then took whichever passes happened to come first in the window. A
+    station seeing 12, 75, 20, 8 and 45 degrees over two days would be asked for
+    the 12 and the 75, or the 12 and the 20, entirely according to what time
+    they fell at. The best pass over that station was a coin toss.
+
+    Elevation is the whole difference between a recording and a decode: it sets
+    the range, the slant path through the atmosphere and how long the satellite
+    is up. So the highest pass is always taken first — if a station is only
+    asked for two things, one of them should be the best it can do.
+
+    After that the pick is the pass whose elevation is FURTHEST from everything
+    already chosen, which is farthest-point sampling on one axis. For two picks
+    that is the highest and the lowest; for three, the highest, the lowest and
+    whatever sits in the gap. That is deliberate rather than just "take the top
+    N": a set of five 70-degree passes all say the same thing about the link,
+    while 70 and 15 degrees say where it starts to fail. The operator asked to
+    cover the range of elevations, and this is that, at no extra cost to anybody
+    — it reorders the same number of bookings rather than adding any.
+
+    Nothing low is booked that the station's owner has not already agreed to:
+    `min_culmination` is their own published figure and is gated on above, so
+    every candidate reaching here is a pass they consider worth running.
+
+    Deterministic: `remaining` is pre-sorted by elevation and `max()` returns
+    the first maximal element, so equal-distance ties always break toward the
+    higher pass and two runs over the same window agree.
+    """
+    remaining = sorted(gated, key=lambda pair: pair[0].max_el, reverse=True)
+    if not remaining:
+        return []
+    chosen = [remaining.pop(0)]
+    while remaining:
+        nxt = max(remaining, key=lambda pair: min(
+            abs(pair[0].max_el - c[0].max_el) for c in chosen))
+        remaining.remove(nxt)
+        chosen.append(nxt)
+    return chosen
 
 
 def _campaign_preview_payload(preview: CampaignPreview) -> dict:
