@@ -105,6 +105,7 @@ def build_campaign(
     max_per_station: int,
     max_total: int,
     recent_attempts: dict[int, list[tuple[datetime, datetime]]] | None = None,
+    start_offset: int = 0,
 ) -> CampaignPreview:
     """Work out which stations should be asked to record `mission_norad`,
     and when, within the next ~48 hours.
@@ -119,6 +120,15 @@ def build_campaign(
     the very next preview can otherwise recompute the identical "available"
     slot it just submitted - our own write history is ground truth sooner
     than their read view catches up to it.
+
+    `start_offset` rotates where the catalogue walk begins. Without it every
+    run that is cut short - by `max_total`, or by the read budget - covers the
+    SAME prefix of stations, because `all_stations()` preserves the API's
+    id-ascending order and is itself cached for an hour. Clicking again does
+    not reach further into the catalogue; it re-reads the stations already
+    done and stops in the same place. The tail is then unreachable by any
+    number of clicks, which is a very different thing from "slow to cover".
+    Rotating the start turns repeated clicks into progressive coverage.
     """
     window_start = now + timedelta(minutes=WINDOW_START_MARGIN_MIN)
     window_end = now + timedelta(minutes=WINDOW_END_MARGIN_MIN)
@@ -135,6 +145,9 @@ def build_campaign(
 
     stations = network.all_stations()
     preview.considered_stations = len(stations)
+    if stations and start_offset:
+        cut = start_offset % len(stations)
+        stations = stations[cut:] + stations[:cut]
 
     for station in stations:
         if exclude_station_id is not None and station.id == exclude_station_id:
@@ -164,6 +177,15 @@ def build_campaign(
         # `min_horizon`, so a satellite that never clears this station's
         # horizon yields nothing here and the station is skipped below. The
         # culmination gate is the station's own published figure too.
+        # Deliberately NOT short-circuited on the catalogue's
+        # `future_observations == 0`. It looks free - the catalogue is already
+        # in hand, an empty calendar cannot conflict, and it saves a request
+        # per station against the scarcest budget in the run - but the field is
+        # served from `network-stations-all`, cached for an hour. Trusting a
+        # zero means trusting that nobody booked that station in the last
+        # hour, and being wrong means booking on top of them. That is the exact
+        # harm the rate-limit stop below exists to prevent, bought for about 7%
+        # of the requests. The calendar is read for real.
         passes = predictor.passes_for(mission_norad, window_start, window_end, station.min_horizon)
         gated = []
         for p in passes:
@@ -209,7 +231,9 @@ def build_campaign(
 
         booked_here = 0
         for p, end in _by_elevation_spread(gated):
-            if booked_here >= max_per_station or len(preview.items) >= max_total:
+            if booked_here >= max_per_station:
+                break
+            if max_total and len(preview.items) >= max_total:
                 break
             if calendar.conflicts(p.aos, end):
                 continue
@@ -227,9 +251,21 @@ def build_campaign(
                 "reason": "every qualifying pass conflicts with an existing booking",
             })
 
-        if len(preview.items) >= max_total:
-            break
-
+        # NOTE: no outer break on max_total.
+        #
+        # It used to end the STATION walk, which made it an undeclared cap on
+        # breadth: at the shipped 150 items and 2 per station the run stopped
+        # after 75 stations, out of 200-300 that can hear the spacecraft, and
+        # it bound long before the read budget did. Raising max_per_station
+        # made it worse - 3 per station meant 50 stations - so the one knob an
+        # operator would reach for to "cover more" did the opposite.
+        #
+        # Breadth and depth are now separate. max_per_station is the courtesy
+        # limit on any one station's schedule and still stops the inner loop;
+        # max_total is a backstop on total items and no longer stops the walk,
+        # so a run keeps visiting stations and simply stops adding to a full
+        # basket. What actually ends a sweep is the read budget - and that is
+        # the right thing to end it, because it is the real constraint.
     return preview
 
 
