@@ -141,6 +141,69 @@ def test_a_server_lost_mid_fallback_is_not_asked_about_every_item():
     assert not any("HTTP None" in e for e in result.errors)
 
 
+def overlap_409(station):
+    r = resp(409)
+    r._content = (f'"One or more observations of station {station} overlap '
+                  'with the already scheduled ones."').encode()
+    return r
+
+
+def plan(per_station):
+    return [{"ground_station": station, "transmitter_uuid": "TX",
+             "start": f"2026-09-26 0{n}:00:00", "end": f"2026-09-26 0{n}:10:00"}
+            for station, count in per_station.items() for n in range(count)]
+
+
+def booking_client(server):
+    client = NetworkClient(settings("t"), cache=object())
+    client.session = server
+    return client
+
+
+def test_a_server_lost_while_isolating_a_station_counts_every_item_left_unsent():
+    """A 409 isolates station 101; SatNOGS then goes away on its first item.
+    The items still waiting to be re-batched were never sent either, and the
+    error has to say so - "the last 2" would hide the other 3."""
+    class Server:
+        headers = {}
+        posts = 0
+
+        def request(self, method, url, json=None, **_kw):
+            Server.posts += 1
+            if len(json) > 1:
+                return overlap_409(101)
+            raise refused()
+
+    result = booking_client(Server()).schedule(plan({101: 2, 102: 2, 103: 1}), execute=True)
+
+    assert Server.posts == 1 + MAX_RETRIES, "nothing more after the connection failed"
+    assert result.accepted == 0
+    assert any("last 5 item(s)" in e and "not sent" in e for e in result.errors), result.errors
+
+
+def test_a_server_lost_before_the_rebatch_does_not_claim_nothing_was_booked():
+    """Station 101's items were accepted one at a time before SatNOGS went
+    away, so "Nothing was booked" would be false."""
+    class Server:
+        headers = {}
+        batches = 0
+
+        def request(self, method, url, json=None, **_kw):
+            if len(json) > 1:
+                Server.batches += 1
+                if Server.batches == 1:
+                    return overlap_409(101)
+                raise refused()
+            return resp(201)
+
+    result = booking_client(Server()).schedule(plan({101: 2, 102: 2, 103: 1}), execute=True)
+
+    assert result.accepted == 2
+    (error,) = result.errors
+    assert "could not reach SatNOGS" in error and "remaining 3 item(s)" in error
+    assert "Nothing was booked" not in error
+
+
 # --- reads: one budget per credential -----------------------------------------
 
 def settings(token, base="https://network.example/api"):

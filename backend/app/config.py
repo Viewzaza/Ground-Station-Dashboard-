@@ -17,6 +17,11 @@ def _csv_ints(raw: str) -> list[int]:
     return [int(p) for p in (x.strip() for x in raw.split(",")) if p]
 
 
+# The Network Campaign's downlink policies - see campaign_transmitter_uuid.
+# schemas.ScheduleConfigUpdate spells the same three out as a Literal.
+CAMPAIGN_TRANSMITTER_POLICIES = ("pinned", "preferred", "any")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GS_", extra="ignore")
 
@@ -160,15 +165,45 @@ class Settings(BaseSettings):
     campaign_max_total: int = 150
     # Which transmitter the campaign records. KNACKSAT-2 has TWO active ones -
     # 400.630 MHz telemetry and a 145.825 MHz V/V digipeater - and they reach
-    # largely disjoint station sets (155 vs 144, overlapping on only 67).
-    # Left unpinned, pick_transmitter ranks on (is_transponder, -baud); both of
-    # these are non-transponder at 9600 baud, so the key TIES and sort
-    # stability hands the win to whichever the DB happens to list first - the
-    # digipeater. The mission wants telemetry, so say so explicitly.
+    # largely disjoint station sets: of 343 schedulable stations 160 hear
+    # telemetry and 149 the digipeater, but only 68 hear both. Pinning
+    # telemetry alone therefore caps a campaign at the ~145 of those with a
+    # qualifying pass in the window, however high the booking caps go.
+    #
+    # So this is the PRIMARY, and campaign_transmitter_policy decides what
+    # happens on a station that cannot hear it:
+    #   "preferred" (default) - book telemetry wherever it is audible and fall
+    #       back, in order, to campaign_fallback_transmitter_uuids elsewhere.
+    #       Measured offline on the cached catalogue: 145 -> 222 reachable
+    #       stations. Telemetry still wins on the 68 that hear both.
+    #   "pinned" - telemetry only, the old behaviour.
+    #   "any" - no preference at all: pick_transmitter's own per-station pick.
+    #       Its rank key (is_transponder, -baud) TIES for these two (both
+    #       non-transponder, 9600 baud), so sort stability hands the win to
+    #       whichever the DB lists first - the digipeater - even on stations
+    #       that hear telemetry. That is why "preferred" is not the same thing.
+    # The fallback is the weaker booking and the UI marks it as such: the
+    # cached transmitter stats show the digipeater at 11% good observations
+    # (of 1732) against 40% for telemetry (of 24350) - it only transmits when
+    # it is relaying something. It is still better than no booking on a
+    # station that cannot hear 400 MHz at all.
     #
     # Paired with default_norad: change them together. Set to None to restore
-    # the automatic per-station pick.
+    # the automatic per-station pick regardless of the policy.
     campaign_transmitter_uuid: str | None = "UatCXtfDnoBPeVBGHgj4Bc"
+    # "pinned" | "preferred" | "any" - see above. Only SEEDS the setting: the
+    # operator's choice in the campaign panel (schedule_config.json) wins.
+    campaign_transmitter_policy: str = "preferred"
+    # CSV, in preference order, used only under the "preferred" policy. A CSV
+    # string rather than list[str] for the same reason as pinned_norad:
+    # pydantic-settings would otherwise demand JSON in the environment.
+    campaign_fallback_transmitter_uuids: str = "JR28wAEjmpuDQ4FrPWAiwf"
+    # How long station calendars read by a preview may be reused by the
+    # commit that follows it (and by every round of a looped commit). 15 min
+    # covers the operator reading a preview and clicking commit; the server's
+    # own overlap check (HTTP 409 on anything overlapping an existing
+    # observation) is the safety net for whatever others book in between.
+    campaign_calendar_ttl_s: int = 900
     # None (default) means "follow the global mock flag". Set explicitly to
     # run Network Campaign against real SatNOGS Network while the rotator and
     # cameras stay mocked - e.g. a dev box that must not open a second live
@@ -180,6 +215,17 @@ class Settings(BaseSettings):
     @property
     def pinned_norad_ids(self) -> list[int]:
         return _csv_ints(self.pinned_norad)
+
+    @property
+    def campaign_fallback_uuids(self) -> list[str]:
+        # Order is the preference order, so duplicates are dropped by keeping
+        # the first occurrence rather than through a set.
+        out: list[str] = []
+        for part in self.campaign_fallback_transmitter_uuids.split(","):
+            uuid = part.strip()
+            if uuid and uuid not in out:
+                out.append(uuid)
+        return out
 
     @property
     def grafana_panel_ids(self) -> list[int]:

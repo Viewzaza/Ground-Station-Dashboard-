@@ -48,9 +48,20 @@ let settingsOpen = false;
 let networkTokenSet = false;
 let campaignPreviewItems = null;   // the exact items last previewed, so CONFIRM submits what was shown
 let campaignLoop = false;          // campaign_loop_until_exhausted, as last loaded/saved
+// campaign_transmitter_policy, as last loaded/saved. 'pinned' until a config
+// says otherwise: a backend that predates the setting pins the telemetry, and
+// the prompts must not promise a fallback it will not use.
+let campaignPolicy = 'pinned';
 let campaignConfigDirty = false;   // invalidates a stale preview if config changes after it
 let lastPreviewCapableStations = null;  // stations the last preview found usable, for the reach hint
 let lastPreviewStoppedEarly = null;     // the last preview's stopped_early, or null if it was complete
+let lastPreviewParams = null;           // the inputs the last preview was built from (preview.params)
+let lastPreviewAt = null;               // generated_utc (ms) of the preview the three above describe
+// One-click and MAX COVERAGE share one in-flight flag. updateCampaignGate()
+// re-derives both buttons from the token alone, and it runs on every
+// max-total slider move and every loadConfig() - so without this, touching a
+// slider or opening ⚙ mid-run re-enabled a button whose run was still going.
+let campaignOneClickBusy = false;
 
 export function mountSchedule() {
   document.getElementById('schedule-toggle').addEventListener('click', open);
@@ -110,7 +121,7 @@ async function open() {
   panel().hidden = false;
   await Promise.all([
     loadLastRun(), loadPriorities(), loadConfig(), loadPriorityLists(),
-    loadCampaignLastRun(), loadCampaignHistory(),
+    loadCampaignLastRun(), loadCampaignHistory(), loadCampaignPreviewStats(),
   ]);
 }
 
@@ -1132,6 +1143,18 @@ async function loadConfig() {
     const maxPerInput = document.getElementById('campaign-max-per-station');
     maxPerInput.value = cfg.campaign_max_per_station || 2;
     document.getElementById('campaign-max-per-station-value').textContent = maxPerInput.value;
+    campaignPolicy = CAMPAIGN_POLICY_TEXT[cfg.campaign_transmitter_policy]
+      ? cfg.campaign_transmitter_policy : 'pinned';
+    document.getElementById('campaign-tx-policy').value = campaignPolicy;
+    // Every campaign control now shows the SAVED value, so nothing on screen
+    // is unsaved any more. This used to be cleared by renderCampaignPreview
+    // instead, which let a finished preview wipe the guard while the sliders
+    // still held unsaved moves - one-click would then prompt with numbers the
+    // backend was not going to use. Cleared before updateCampaignGate() below
+    // on purpose: the controls are back on the saved values a preview is built
+    // from, so a shown preview is no staler than it was, and CONFIRM still
+    // sends exactly the rows it shows.
+    campaignConfigDirty = false;
     const autoBox = document.getElementById('campaign-auto-commit');
     autoBox.checked = !!cfg.campaign_auto_commit_enabled;
     document.getElementById('campaign-auto-warn').hidden = !autoBox.checked;
@@ -1622,10 +1645,144 @@ function setMode(mode) {
 
 // --- network campaign ---------------------------------------------------------
 
+/* What each downlink policy books, in the words the consent prompts use. Also
+   the set of values this UI accepts from the config: anything else is treated
+   as "unknown" rather than guessed at. The digipeater's weaker record is said
+   out loud because it is the price of the extra stations - an operator who
+   picks "most stations" should know some of them are the less productive kind. */
+const CAMPAIGN_POLICY_TEXT = {
+  preferred: 'telemetry (400.630 MHz) first, and the 145.825 MHz digipeater on '
+    + 'stations that cannot hear telemetry (the digipeater has a much lower '
+    + 'historical success rate)',
+  pinned: 'telemetry only (400.630 MHz)',
+  any: 'any KNACKSAT-2 downlink each station can hear, picked per station',
+};
+// How far a policy reaches, for "did the backend plan wider than agreed?".
+const CAMPAIGN_POLICY_RANK = { pinned: 0, preferred: 1, any: 2 };
+
+/* MAX COVERAGE's settings. 3 per station x ~222 reachable stations is ~651
+   possible bookings (offline measurement), so 600 is what one build can
+   actually fill rather than a number the network cannot reach; loop tops up
+   whatever a round leaves. Frozen: the prompt quotes these and the post-preview
+   holds compare against them, so nothing may change them in between. */
+const MAX_COVERAGE = Object.freeze({ policy: 'preferred', per: 3, total: 600, loop: true });
+
+/* The policy a preview was actually built with, read back from its params
+   rather than from our own select. null when the preview predates params (an
+   old one on disk) - "unknown", never a guess. A 'preferred' config whose
+   fallback list is empty reads back as 'pinned', which is what it did. */
+function policyFromParams(params) {
+  if (!params || !('transmitter_uuid' in params)) return null;
+  if (!params.transmitter_uuid) return 'any';
+  const fallbacks = params.fallback_transmitter_uuids;
+  return Array.isArray(fallbacks) && fallbacks.length ? 'preferred' : 'pinned';
+}
+
+/* A short, scannable name for a transmitter: "telemetry 400.630",
+   "digipeater 145.825 (fallback)".
+
+   The payload carries each transmitter's SatNOGS DB description - for
+   KNACKSAT-2 "Mode U - FSK9k6 - AX.25 G3RUH -TLM" and "Mode V/V - FSK9k6 -
+   Digipeater - AX.25 G3RUH" - which names the kind but not the frequency. The
+   frequencies are looked up by uuid instead: this tab only ever targets
+   KNACKSAT-2 (see its Target line), so its two uuids are the whole set.
+   Anything unrecognised degrades to its description, then to a uuid prefix,
+   never to a blank cell. */
+const KNOWN_TX_MHZ = {
+  UatCXtfDnoBPeVBGHgj4Bc: '400.630',
+  JR28wAEjmpuDQ4FrPWAiwf: '145.825',
+};
+
+function txKind(description) {
+  const desc = String(description || '');
+  if (/digipeat/i.test(desc)) return 'digipeater';
+  if (/\bTLM\b|telemetry/i.test(desc)) return 'telemetry';
+  return '';
+}
+
+function txShortLabel(uuid, description, fallback = false) {
+  const desc = String(description || '').trim();
+  const kind = txKind(desc);
+  const mhz = KNOWN_TX_MHZ[uuid] || '';
+  let label = kind ? [kind, mhz].filter(Boolean).join(' ') : (mhz ? `${mhz} MHz` : '');
+  if (!label) {
+    if (desc) label = desc.length > 28 ? `${desc.slice(0, 28)}…` : desc;
+    else label = uuid ? `${String(uuid).slice(0, 6)}…` : 'unknown';
+  }
+  return fallback ? `${label} (fallback)` : label;
+}
+
+/* " (K on the digipeater fallback)", for the sentences that say how many
+   bookings a plan holds. Empty for a payload that predates per-item
+   `fallback`: "0 on the fallback" would claim something it never measured. */
+function fallbackPhrase(items) {
+  if (!items.some((it) => typeof it.fallback === 'boolean')) return '';
+  const fb = items.filter((it) => it.fallback);
+  if (!fb.length) return ' (none on a fallback downlink)';
+  const kinds = new Set(fb.map((it) => txKind(it.transmitter_description)));
+  const kind = kinds.size === 1 ? [...kinds][0] : '';
+  return ` (${fb.length} on ${kind ? `the ${kind} fallback` : 'a fallback downlink'})`;
+}
+
+/* "jobs 220 / observations 2": which read path served each calendar. jobs is
+   the unthrottled anonymous feed; observations is the budgeted fallback, so a
+   large second number is the early sign of a run heading for the read limit. */
+function formatCalendarSources(sources) {
+  if (!sources || typeof sources !== 'object') return '';
+  const order = ['jobs', 'observations'];
+  const rank = (k) => (order.includes(k) ? order.indexOf(k) : order.length);
+  return Object.keys(sources)
+    .filter((k) => Number(sources[k]) > 0)
+    .sort((a, b) => rank(a) - rank(b))
+    .map((k) => `${k} ${sources[k]}`)
+    .join(' / ');
+}
+
+/* One labelled row of compact count chips (elevation bands, transmitters).
+   Chips rather than a sentence: six band counts in prose is unreadable, and
+   the point of the row is to see at a glance which band is thin. */
+function chipRow(label, chips) {
+  const row = document.createElement('p');
+  row.className = 'sched-chip-row';
+  const lead = document.createElement('span');
+  lead.className = 'sched-chip-row-label';
+  lead.textContent = label;
+  row.appendChild(lead);
+  for (const { text, cls, title } of chips) {
+    const chip = document.createElement('span');
+    chip.className = `sched-count-chip${cls ? ` ${cls}` : ''}`;
+    chip.textContent = text;
+    if (title) chip.title = title;
+    row.appendChild(chip);
+  }
+  return row;
+}
+
+function bandChips(bandCounts) {
+  return bandCounts.map((b) => ({
+    text: `${b.band}° ${b.count}`,
+    cls: b.count ? '' : 'zero',
+    title: `${b.count} booking(s) peaking at ${b.band}° elevation`,
+  }));
+}
+
+function transmitterChips(rows) {
+  return rows.map((t) => ({
+    text: `${txShortLabel(t.uuid, t.description, t.fallback)} · `
+      + `${t.bookings ?? 0} on ${t.stations ?? 0} station(s)`,
+    cls: t.fallback ? 'fallback' : '',
+    title: t.description || t.uuid || '',
+  }));
+}
+
 function mountCampaign() {
   document.getElementById('campaign-preview-btn').addEventListener('click', runCampaignPreview);
   document.getElementById('campaign-commit-btn').addEventListener('click', confirmCampaign);
-  document.getElementById('campaign-oneclick-btn').addEventListener('click', runCampaignOneClick);
+  // Wrapped, not passed directly: runCampaignOneClick takes an options object
+  // now, and a bare listener would hand it the click event as those options.
+  document.getElementById('campaign-oneclick-btn')
+    .addEventListener('click', () => runCampaignOneClick());
+  document.getElementById('campaign-max-coverage').addEventListener('click', runCampaignMaxCoverage);
   document.getElementById('campaign-auto-commit').addEventListener('change', saveCampaignAutoCommit);
   document.getElementById('campaign-cfg-save').addEventListener('click', saveCampaignConfig);
   document.getElementById('campaign-verify-btn').addEventListener('click', verifyCampaign);
@@ -1643,6 +1800,14 @@ function mountCampaign() {
   document.getElementById('campaign-loop').addEventListener('change', () => {
     campaignConfigDirty = true;
   });
+  // A different policy is a different plan - other stations, other
+  // transmitters - so a shown preview no longer describes what the saved
+  // setting would book, and CONFIRM must not stay offered on it.
+  document.getElementById('campaign-tx-policy').addEventListener('change', () => {
+    campaignConfigDirty = true;
+    paintCampaignReach();
+    updateCampaignGate();
+  });
 }
 
 function updateCampaignGate() {
@@ -1652,9 +1817,15 @@ function updateCampaignGate() {
   previewBtn.disabled = !networkTokenSet;
   // One-click previews and then books, so it needs the token at least as much
   // as PREVIEW does. It was left enabled, and would fail minutes into a run.
-  const oneClick = document.getElementById('campaign-oneclick-btn');
-  if (oneClick) oneClick.disabled = !networkTokenSet;
+  setOneClickButtonsDisabled(!networkTokenSet || campaignOneClickBusy);
   if (campaignConfigDirty) invalidateCampaignPreview();
+}
+
+function setOneClickButtonsDisabled(disabled) {
+  for (const id of ['campaign-oneclick-btn', 'campaign-max-coverage']) {
+    const b = document.getElementById(id);
+    if (b) b.disabled = disabled;
+  }
 }
 
 function invalidateCampaignPreview() {
@@ -1662,27 +1833,49 @@ function invalidateCampaignPreview() {
   document.getElementById('campaign-commit-btn').hidden = true;
 }
 
+/* The campaign settings exactly as SAVE would send them. A blank total is 0,
+   the backend's "clear back to the default" sentinel; a blank per-station
+   falls back to 2, as it always has. */
+function readCampaignControls() {
+  const val = document.getElementById('campaign-max-total').value.trim();
+  const perVal = document.getElementById('campaign-max-per-station').value.trim();
+  return {
+    total: val ? parseInt(val, 10) : 0,
+    per: perVal ? parseInt(perVal, 10) : 2,
+    loop: document.getElementById('campaign-loop').checked,
+    policy: document.getElementById('campaign-tx-policy').value,
+  };
+}
+
+/* Returns whether the save landed, so MAX COVERAGE can refuse to go on with
+   settings the backend never accepted. The SAVE button ignores the result -
+   its status line already says. */
 async function saveCampaignConfig() {
   const btn = document.getElementById('campaign-cfg-save');
   const status = document.getElementById('campaign-cfg-status');
-  const input = document.getElementById('campaign-max-total');
-  const perInput = document.getElementById('campaign-max-per-station');
-  const val = input.value.trim();
-  const perVal = perInput.value.trim();
+  const sent = readCampaignControls();
   btn.disabled = true;
   status.textContent = 'saving…';
   try {
-    const loop = document.getElementById('campaign-loop').checked;
     await api.saveScheduleConfig({
-      campaign_max_total: val ? parseInt(val, 10) : 0,
-      campaign_max_per_station: perVal ? parseInt(perVal, 10) : 2,
-      campaign_loop_until_exhausted: loop,
+      campaign_max_total: sent.total,
+      campaign_max_per_station: sent.per,
+      campaign_loop_until_exhausted: sent.loop,
+      campaign_transmitter_policy: sent.policy,
     });
-    campaignLoop = loop;
-    campaignConfigDirty = false;
+    campaignLoop = sent.loop;
+    campaignPolicy = sent.policy;
+    // Only "clean" if the controls still show what was sent. A slider moved
+    // while the request was in flight is unsaved, and clearing the flag
+    // regardless would let one-click - or MAX COVERAGE, which hands straight
+    // over after this save - prompt with numbers the backend never got.
+    const now = readCampaignControls();
+    if (Object.keys(sent).every((k) => sent[k] === now[k])) campaignConfigDirty = false;
     status.textContent = 'saved';
+    return { ok: true };
   } catch (err) {
     status.textContent = `failed: ${err}`;
+    return { ok: false, error: String(err) };
   } finally {
     btn.disabled = false;
     setTimeout(() => { status.textContent = ''; }, 3000);
@@ -1760,13 +1953,43 @@ function renderCampaignPreview(preview) {
     + `${items.length} observation(s) would be booked`;
   box.appendChild(meta);
 
+  // How far this plan reached and what it cost to find out. Every field is
+  // optional: a preview written by an older backend has none of them, and a
+  // missing count is left out rather than printed as a confident 0.
+  const stats = [];
+  if (Number.isFinite(preview.stations_reachable)) {
+    stats.push(`${preview.stations_reachable} station(s) reachable`);
+  }
+  if (Number.isFinite(preview.stations_booked)) {
+    stats.push(`${preview.stations_booked} in the plan`);
+  }
+  if (Number.isFinite(preview.calendars_read) || Number.isFinite(preview.calendars_cached)) {
+    const sources = formatCalendarSources(preview.calendar_sources);
+    stats.push(`calendars: ${preview.calendars_read ?? 0} read`
+      + (sources ? ` (${sources})` : '')
+      + (Number.isFinite(preview.calendars_cached) ? `, ${preview.calendars_cached} cached` : ''));
+  }
+  if (stats.length) {
+    const line = document.createElement('p');
+    line.className = 'muted sched-meta';
+    line.textContent = stats.join(' · ');
+    box.appendChild(line);
+  }
+  if (Array.isArray(preview.band_counts) && preview.band_counts.length) {
+    box.appendChild(chipRow('Peak elevation', bandChips(preview.band_counts)));
+  }
+  if (Array.isArray(preview.transmitters) && preview.transmitters.length) {
+    box.appendChild(chipRow('Downlink', transmitterChips(preview.transmitters)));
+  }
+
   // Spelled out immediately above the table the operator is about to approve:
   // nothing here is booked yet, and this is exactly what CONFIRM would send.
   if (items.length) {
     const standby = document.createElement('p');
     standby.className = 'sched-preview-standby';
     standby.textContent = `Nothing has been submitted. CONFIRM & SUBMIT would book `
-      + `${items.length} observation(s) across ${stationCount} community station(s).`;
+      + `${items.length} observation(s) across ${stationCount} community station(s)`
+      + `${fallbackPhrase(items)}.`;
     box.appendChild(standby);
   }
 
@@ -1776,9 +1999,11 @@ function renderCampaignPreview(preview) {
     const thead = document.createElement('thead');
     // The station ID is its own column, not a fallback for a missing name:
     // it is the identifier network.satnogs.org itself uses, so it is what an
-    // operator reconciles this table against.
+    // operator reconciles this table against. Downlink is per row because
+    // the two KNACKSAT-2 transmitters are not equally productive, and which
+    // stations are getting the weaker one is part of what is being approved.
     thead.innerHTML = '<tr><th>ID</th><th>Station</th><th>Start UTC</th>'
-      + '<th>End UTC</th><th>Max El</th></tr>';
+      + '<th>End UTC</th><th>Max El</th><th>Downlink</th></tr>';
     table.appendChild(thead);
     const tbody = document.createElement('tbody');
     // Every candidate is shown, not just the first N - CONFIRM & SUBMIT
@@ -1797,6 +2022,13 @@ function renderCampaignPreview(preview) {
         td.textContent = text;
         tr.appendChild(td);
       }
+      const tdTx = document.createElement('td');
+      tdTx.className = 'sched-tx-cell';
+      tdTx.textContent = txShortLabel(
+        item.transmitter_uuid, item.transmitter_description, !!item.fallback);
+      if (item.transmitter_description) tdTx.title = item.transmitter_description;
+      tr.appendChild(tdTx);
+      if (item.fallback) tr.classList.add('is-fallback');
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -1808,14 +2040,17 @@ function renderCampaignPreview(preview) {
   }
 
   announceCampaign(items.length
-    ? `Preview ready: ${items.length} observation(s) across ${stationCount} station(s) `
-      + 'would be booked. Nothing submitted yet.'
+    ? `Preview ready: ${items.length} observation(s) across ${stationCount} station(s)`
+      + `${fallbackPhrase(items)} would be booked. Nothing submitted yet.`
     : 'Preview ready: no observations would be booked.');
 
   // What CONFIRM actually submits — exactly what was just shown, not a
   // recompute at click time, so what's confirmed is what was reviewed.
   campaignPreviewItems = items;
   lastPreviewStoppedEarly = preview.stopped_early || null;
+  lastPreviewParams = preview.params || null;
+  const renderedAt = Date.parse(preview.generated_utc);
+  lastPreviewAt = Number.isFinite(renderedAt) ? renderedAt : lastPreviewAt;
   if (lastPreviewStoppedEarly) {
     // Above the table, not in the collapsed report: a plan cut short by the
     // read limit looks exactly like a small network otherwise, and it is the
@@ -1828,18 +2063,57 @@ function renderCampaignPreview(preview) {
       + 'below covers only the stations it reached. Adding a Network token raises '
       + 'the limit; otherwise try again in an hour.'));
   }
-  // Stations the run could use: those it booked, plus those it had in hand
-  // but left out only because the booking budget ran out first. Stations
-  // skipped for antenna range, no pass, conflicts, or never read are NOT
-  // evidence of capacity and must not inflate the ceiling.
+  lastPreviewCapableStations = previewCapableStations(preview, items);
+  paintCampaignReach();
+  // campaignConfigDirty is deliberately NOT cleared here. A preview is built
+  // from the SAVED config, so finishing one says nothing about sliders moved
+  // and never saved - clearing it let one-click prompt with those unsaved
+  // numbers. Only a save or a load (which rewrites the controls) clears it.
+  document.getElementById('campaign-commit-btn').hidden = items.length === 0;
+}
+
+/* Stations the run could use, for the reach hint and the consent prompts.
+
+   The backend now counts this itself (stations_reachable: a campaign
+   transmitter in range and at least one qualifying pass). The fallback below
+   is the old inference from skip-reason prefixes - those it booked, plus those
+   it had in hand but left out only because the booking budget ran out first;
+   stations skipped for antenna range, no pass, conflicts, or never read are
+   NOT evidence of capacity - kept only for previews written before the field
+   existed. */
+function previewCapableStations(preview, items) {
+  if (Number.isFinite(preview.stations_reachable)) return preview.stations_reachable;
   const budgetSkipped = (preview.skipped || []).filter(
     (sk) => typeof sk.reason === 'string'
       && (sk.reason.startsWith('had a free pass') || sk.reason.startsWith('not reached')),
   ).length;
-  lastPreviewCapableStations = new Set(items.map((it) => it.station_id)).size + budgetSkipped;
-  paintCampaignReach();
-  campaignConfigDirty = false;
-  document.getElementById('campaign-commit-btn').hidden = items.length === 0;
+  return new Set(items.map((it) => it.station_id)).size + budgetSkipped;
+}
+
+/* Seeds the reach hint and the consent prompts' station count from the last
+   preview on disk (the auto timer writes one every cycle), so a fresh page can
+   say "up to about N stations" before anyone runs PREVIEW. Numbers only: its
+   rows are never shown or made submittable from here - CONFIRM only ever
+   sends a preview rendered in this session. Only a file NEWER than what this
+   page already knows is taken (the timer may have run since), so it can never
+   roll a just-rendered preview's numbers back. Previews without
+   stations_reachable are ignored: the old inference needs the whole skip
+   list to be trustworthy, and a stale file is no place to start guessing. */
+async function loadCampaignPreviewStats() {
+  try {
+    const preview = await api.campaignPreview();
+    if (preview?.status !== 'ok' || !Number.isFinite(preview.stations_reachable)) return;
+    const at = Date.parse(preview.generated_utc);
+    if (!Number.isFinite(at)) return;
+    if (lastPreviewAt !== null && at <= lastPreviewAt) return;
+    lastPreviewAt = at;
+    lastPreviewCapableStations = preview.stations_reachable;
+    lastPreviewStoppedEarly = preview.stopped_early || null;
+    lastPreviewParams = preview.params || null;
+    paintCampaignReach();
+  } catch (err) {
+    console.error('[schedule] campaign preview stats', err);
+  }
 }
 
 /* The read-back. One live call per station in the last run's accepted set,
@@ -1962,11 +2236,12 @@ async function confirmCampaign() {
   const stationCount = new Set(campaignPreviewItems.map((it) => it.station_id)).size;
   const ok = window.confirm(
     `Book ${campaignPreviewItems.length} observation(s) on ${stationCount} community `
-    + 'station(s) via SatNOGS Network?\n\n'
+    + `station(s)${fallbackPhrase(campaignPreviewItems)} via SatNOGS Network?\n\n`
     + (campaignLoop
       ? 'Loop is ON: after this batch the campaign is recomputed and the next '
         + 'batch submitted, again and again until no bookings are left — the '
-        + 'total can be well above this number.\n\n'
+        + 'total can be well above this number. Later batches use the saved '
+        + `downlink setting: ${CAMPAIGN_POLICY_TEXT[campaignPolicy]}.\n\n`
       : '')
     + 'These are other operators\' ground stations. Accepted bookings cannot be '
     + 'undone from this dashboard.',
@@ -2049,10 +2324,22 @@ function paintCampaignReach() {
   const total = parseInt(document.getElementById('campaign-max-total').value, 10) || 0;
   const per = parseInt(document.getElementById('campaign-max-per-station').value, 10) || 1;
   const stationsNeeded = Math.ceil(total / per);
-  // considered_stations from the last preview is the only real measurement of
-  // the network we have here; before one exists we can only state the demand.
+  // The last preview's stations_reachable is the only real measurement of the
+  // network we have here; before one exists we can only state the demand.
   const reach = lastPreviewCapableStations;
   let text = `${total} bookings at ${per} per station needs ${stationsNeeded} station(s).`;
+  // Reach is a property of the downlink setting as much as of the network:
+  // telemetry-only reaches ~145 stations where the digipeater fallback reaches
+  // ~222. Quoting one setting's count against the other would tell an
+  // operator who just switched to the fallback that 600 is out of reach.
+  const previewPolicy = policyFromParams(lastPreviewParams);
+  const shownPolicy = document.getElementById('campaign-tx-policy')?.value;
+  if (reach != null && previewPolicy && shownPolicy && previewPolicy !== shownPolicy) {
+    text += ` The last preview used a different downlink setting (${reach} usable `
+      + 'there), so it cannot say how far this one reaches — run PREVIEW.';
+    hint.textContent = text;
+    return;
+  }
   if (lastPreviewStoppedEarly) {
     // The last preview never finished reading, so its count describes the read
     // budget, not the network. Blaming the network here sends the operator to
@@ -2085,10 +2372,17 @@ function paintCampaignReach() {
    prompt at the end, minutes later, is one an operator has stopped paying
    attention to. What it cannot name is the exact count, because that does not
    exist until the preview has run - so it names the ceiling instead and the
-   result is reported when it lands. */
-async function runCampaignOneClick() {
-  const btn = document.getElementById('campaign-oneclick-btn');
+   result is reported when it lands.
+
+   `preset` is MAX COVERAGE handing over: it has already asked, with these
+   exact numbers, and saved them (see runCampaignMaxCoverage for why it asks
+   before saving), so this skips only the prompt. Every hold below still runs,
+   and the holds compare against the preset - the numbers that were agreed. */
+async function runCampaignOneClick({ preset = null } = {}) {
+  const btn = document.getElementById(preset ? 'campaign-max-coverage' : 'campaign-oneclick-btn');
+  const idleLabel = preset ? 'MAX COVERAGE' : 'BOOK WORLDWIDE — ONE CLICK';
   const box = document.getElementById('campaign-preview-result');
+  if (campaignOneClickBusy) return;
 
   // THE NUMBERS IN THE PROMPT MUST BE THE NUMBERS USED. The prompt reads the
   // sliders, but the backend plans from the SAVED config - POST /preview
@@ -2096,7 +2390,8 @@ async function runCampaignOneClick() {
   // 20, at most 1 per station" while the run booked 600: a consent prompt that
   // misstates the thing being consented to. Refusing while there are unsaved
   // changes makes slider and saved config the same thing at the moment of
-  // asking.
+  // asking. For a preset it also catches a slider moved while its save was in
+  // flight: the saved caps would then no longer be the ones on screen.
   if (campaignConfigDirty) {
     box.prepend(alertNote(
       'The booking caps have unsaved changes. Press SAVE first — one-click books '
@@ -2105,33 +2400,21 @@ async function runCampaignOneClick() {
     announceCampaign('One-click not started: save the caps first.');
     return;
   }
-  const total = parseInt(document.getElementById('campaign-max-total').value, 10) || 0;
-  const per = parseInt(document.getElementById('campaign-max-per-station').value, 10) || 1;
+  const total = preset
+    ? preset.total : parseInt(document.getElementById('campaign-max-total').value, 10) || 0;
+  const per = preset
+    ? preset.per : parseInt(document.getElementById('campaign-max-per-station').value, 10) || 1;
+  // campaignPolicy and campaignLoop are the SAVED settings - the refusal above
+  // guarantees nothing on screen differs - so they are what the backend will do.
+  const policy = preset ? preset.policy : campaignPolicy;
 
-  // With looping on, the commit does not stop at `total`: it recomputes and
-  // submits again, round after round, until nothing is left to book - capped
-  // per station across ALL rounds, not per round. So `total` is only the first
-  // round, and a prompt that named it as the ceiling would understate what gets
-  // booked, which is the exact failure this prompt was rewritten to prevent.
-  // campaignLoop is the SAVED setting - the refusal above guarantees there is
-  // no unsaved toggle - so it is what the backend will actually do.
-  const ok = window.confirm(
-    (campaignLoop
-      ? `Book observations on community stations via SatNOGS Network, looping `
-        + `until nothing is left: up to ${total} per round, at most ${per} per `
-        + 'station across all rounds?\n\n'
-        + `Loop is ON — the total can be well above ${total}. It stops when a round `
-        + 'finds nothing left, when SatNOGS accepts nothing, or at the round limit.\n\n'
-      : `Book up to ${total} observation(s), at most ${per} per station, on community `
-        + 'stations via SatNOGS Network?\n\n')
-    + 'This computes the plan and then SUBMITS IT AUTOMATICALLY — you will not be '
-    + 'asked again. These are other operators\' ground stations, and accepted '
-    + 'bookings cannot be undone from this dashboard.\n\n'
-    + 'Use PREVIEW instead if you want to read the plan first.',
-  );
-  if (!ok) return;
+  if (!preset) {
+    const ok = window.confirm(campaignConsentText({ total, per, loop: campaignLoop, policy }));
+    if (!ok) return;
+  }
 
-  btn.disabled = true;
+  campaignOneClickBusy = true;
+  setOneClickButtonsDisabled(true);
   btn.textContent = 'PLANNING…';
   try {
     const outcome = await runCampaignPreview();
@@ -2170,6 +2453,34 @@ async function runCampaignOneClick() {
       return;
     }
 
+    // The same promise, checked against what the backend says it was told
+    // (preview.params) rather than only against the rows. This is not
+    // redundant: a plan can fit the agreed caps while having been built from
+    // larger ones - someone saved 1000 elsewhere and this network happens to
+    // fill only 600 - and with loop ON every later round is rebuilt from those
+    // saved caps, not from what was agreed here. Likewise the downlink: rows
+    // on a fallback transmitter, or params wider than the agreed policy, mean
+    // the saved setting changed under us. A preview without params (an older
+    // backend) is checked on its rows alone, as before.
+    const params = lastPreviewParams;
+    const planPolicy = policyFromParams(params);
+    const capsWider = !!params
+      && (Number(params.max_total) > total || Number(params.max_per_station) > per);
+    const policyWider = (planPolicy && CAMPAIGN_POLICY_RANK[planPolicy] > CAMPAIGN_POLICY_RANK[policy])
+      || (policy === 'pinned' && campaignPreviewItems.some((it) => it.fallback));
+    if (capsWider || policyWider) {
+      box.prepend(alertNote(
+        'Not submitted — this plan was built from settings wider than the ones you '
+        + `confirmed (${total}, at most ${per} per station, ${CAMPAIGN_POLICY_TEXT[policy]}); `
+        + 'the backend planned with '
+        + `${params?.max_total ?? '?'}, at most ${params?.max_per_station ?? '?'} per station`
+        + `${planPolicy ? `, ${CAMPAIGN_POLICY_TEXT[planPolicy]}` : ''}. The saved settings were `
+        + 'likely changed elsewhere. Review the plan below and use CONFIRM & SUBMIT if it '
+        + 'is what you want.', 'error'));
+      announceCampaign('One-click stopped: the plan was built from wider settings than confirmed. Nothing submitted.');
+      return;
+    }
+
     // "Book worldwide" is not what a run cut short by the read limit
     // delivers. Submit that automatically and the operator believes the
     // network is covered when a random part of it was never looked at.
@@ -2182,20 +2493,155 @@ async function runCampaignOneClick() {
       return;
     }
 
+    // The exact numbers exist only now, minutes after the prompt, so this is
+    // where they are said - on the button and to screen readers - including
+    // how many landed on the weaker fallback downlink.
     const stations = perStation.size;
     btn.textContent = `SUBMITTING ${campaignPreviewItems.length}…`;
     announceCampaign(
-      `Plan ready: ${campaignPreviewItems.length} booking(s) on ${stations} station(s). Submitting.`);
+      `Plan ready: ${campaignPreviewItems.length} booking(s) on ${stations} station(s)`
+      + `${fallbackPhrase(campaignPreviewItems)}. Submitting.`);
     await submitPreviewedItems();
   } catch (err) {
     console.error('[schedule] one-click campaign', err);
     box.prepend(alertNote(`One-click run failed: ${err}`, 'error'));
     announceCampaign(`One-click run failed: ${err}`);
   } finally {
-    btn.textContent = 'BOOK WORLDWIDE — ONE CLICK';
+    btn.textContent = idleLabel;
+    campaignOneClickBusy = false;
     // Re-derive rather than blindly re-enable: without a token it must stay off.
-    btn.disabled = !networkTokenSet;
+    setOneClickButtonsDisabled(!networkTokenSet);
   }
+}
+
+/* "on up to about N community stations", for the consent prompts.
+
+   The honest bound depends on what is known. Without loop, one round books at
+   most `total` bookings, so at most `total` stations. With loop, later rounds
+   can reach stations a capped first round did not, so only the network's own
+   reach bounds it - which is known only from a preview built with the same
+   downlink setting (reach differs a lot between settings, see
+   paintCampaignReach). No such preview: say that the count is unknown rather
+   than print a number that is not an upper bound. */
+function stationBoundText(policy, total, loop) {
+  const reach = lastPreviewCapableStations;
+  const samePolicy = reach != null && policyFromParams(lastPreviewParams) === policy;
+  if (samePolicy) {
+    const n = loop ? reach : Math.min(reach, total);
+    return `up to about ${n} community station(s) (the last preview with this downlink `
+      + `setting found ${reach} it could use)`;
+  }
+  return loop
+    ? 'every community station it can reach with this downlink setting — how many '
+      + 'is only known once the plan is computed'
+    : `up to ${total} community station(s)`;
+}
+
+/* The one-click consent prompt, and MAX COVERAGE's (`preset`), which differs
+   in saying first that it overwrites the saved settings - and that the
+   unattended timer, if on, inherits them. The per-station wording says "in
+   the 48 h window, counting what is already booked" because that is what the
+   cap now means: a second run tops stations up, it does not add `per` more. */
+function campaignConsentText({ total, per, loop, policy, preset = false }) {
+  const perText = `at most ${per} per station in the 48 h window (counting KNACKSAT-2 `
+    + 'observations already booked on it)';
+  let text;
+  if (preset) {
+    const autoOn = !!document.getElementById('campaign-auto-commit')?.checked;
+    text = 'MAX COVERAGE — book KNACKSAT-2 on as many community stations as possible?\n\n'
+      + 'This first SAVES these campaign settings, replacing the current ones:\n'
+      + `  • Downlink: ${CAMPAIGN_POLICY_TEXT[policy]}\n`
+      + `  • Up to ${total} bookings per round, ${perText}\n`
+      + (loop
+        ? '  • Loop ON — after each round it recomputes and books again until nothing '
+          + `is left, so the total can be well above ${total}. It stops when a round `
+          + 'finds nothing left, when SatNOGS accepts nothing, or at the round limit.\n\n'
+        : '  • Loop off — one round only.\n\n')
+      + (autoOn
+        ? 'Automatic booking is ON: every later unattended cycle will book with '
+          + 'these settings too.\n\n'
+        : '');
+  } else {
+    // With looping on, the commit does not stop at `total`: it recomputes and
+    // submits again, round after round, until nothing is left to book - capped
+    // per station across ALL rounds, not per round. So `total` is only the
+    // first round, and a prompt that named it as the ceiling would understate
+    // what gets booked, which is the exact failure this prompt was rewritten
+    // to prevent.
+    text = (loop
+      ? `Book observations on community stations via SatNOGS Network, looping `
+        + `until nothing is left: up to ${total} per round, ${perText}, across all `
+        + 'rounds?\n\n'
+        + `Loop is ON — the total can be well above ${total}. It stops when a round `
+        + 'finds nothing left, when SatNOGS accepts nothing, or at the round limit.\n\n'
+      : `Book up to ${total} observation(s), ${perText}, on community stations via `
+        + 'SatNOGS Network?\n\n')
+      + `Downlink: ${CAMPAIGN_POLICY_TEXT[policy]}.\n\n`;
+  }
+  return text
+    + `It books real observations on ${stationBoundText(policy, total, loop)}. `
+    + 'It computes the plan and then SUBMITS IT AUTOMATICALLY — you will not be '
+    + 'asked again. These are other operators\' ground stations, and accepted '
+    + 'bookings cannot be undone from this dashboard.\n\n'
+    + 'Use PREVIEW instead if you want to read the plan first.';
+}
+
+/* MAX COVERAGE: the preset in MAX_COVERAGE, saved, then the ordinary one-click.
+
+   It asks BEFORE touching the saved settings, not after. Those settings are
+   also what the unattended timer books with, so a save followed by a declined
+   prompt would leave "600, loop on" armed for the next auto cycle - a booking
+   nobody agreed to. Asking first means a "no" changes nothing at all.
+
+   A failed save stops here, visibly: going on would ask the backend to plan
+   from whatever it still has saved, which is not what was just agreed to. */
+async function runCampaignMaxCoverage() {
+  if (campaignOneClickBusy) return;
+  const box = document.getElementById('campaign-preview-result');
+  const btn = document.getElementById('campaign-max-coverage');
+  const preset = MAX_COVERAGE;
+
+  const ok = window.confirm(campaignConsentText({ ...preset, preset: true }));
+  if (!ok) return;
+
+  // Held busy across the save too, so a second press (or the other button)
+  // cannot start a parallel run while the settings are still landing.
+  campaignOneClickBusy = true;
+  setOneClickButtonsDisabled(true);
+  btn.textContent = 'SAVING…';
+  let saved;
+  try {
+    applyCampaignControls(preset);
+    saved = await saveCampaignConfig();
+  } finally {
+    campaignOneClickBusy = false;
+    btn.textContent = 'MAX COVERAGE';
+    setOneClickButtonsDisabled(!networkTokenSet);
+  }
+  if (!saved?.ok) {
+    box.prepend(alertNote(
+      `MAX COVERAGE not started — its settings could not be saved (${saved?.error || 'unknown error'}). `
+      + 'Nothing was previewed or booked. The controls above show the MAX COVERAGE '
+      + 'values, NOT saved: press SAVE to retry, or reopen the panel to go back to '
+      + 'the saved ones.', 'error'));
+    announceCampaign('MAX COVERAGE not started: its settings could not be saved. Nothing booked.');
+    return;
+  }
+  await runCampaignOneClick({ preset });
+}
+
+/* Puts a preset on the controls exactly as if the operator had moved them:
+   dirty until saved, any shown preview invalidated, reach hint repainted. */
+function applyCampaignControls({ policy, per, total, loop }) {
+  document.getElementById('campaign-tx-policy').value = policy;
+  document.getElementById('campaign-max-per-station').value = per;
+  document.getElementById('campaign-max-per-station-value').textContent = String(per);
+  document.getElementById('campaign-max-total').value = total;
+  document.getElementById('campaign-max-total-value').textContent = String(total);
+  document.getElementById('campaign-loop').checked = loop;
+  campaignConfigDirty = true;
+  invalidateCampaignPreview();
+  paintCampaignReach();
 }
 
 /* The unattended switch. Saved immediately rather than behind the SAVE button
@@ -2255,6 +2701,7 @@ function renderCampaignLastRun(run) {
 
   const meta = document.createElement('p');
   meta.className = 'muted sched-meta';
+  let unknownNote = null;
 
   const trigger = document.createElement('span');
   trigger.className = `sched-run-trigger ${run.trigger === 'manual' ? 'manual' : ''}`.trim();
@@ -2273,7 +2720,11 @@ function renderCampaignLastRun(run) {
   } else {
     const submitted = run.submitted ?? 0;
     const accepted = run.accepted ?? 0;
-    const rejected = Math.max(0, submitted - accepted);
+    const uncertainItems = Array.isArray(run.uncertain_items) ? run.uncertain_items : [];
+    // Unknown outcomes are not rejections: they may well be booked. Counting
+    // them as "rejected" (as submitted - accepted alone did) invites exactly
+    // the resubmit that would double-book those stations.
+    const rejected = Math.max(0, submitted - accepted - uncertainItems.length);
 
     const label = document.createElement('span');
     label.textContent = 'Last submit:';
@@ -2287,19 +2738,63 @@ function renderCampaignLastRun(run) {
     const badStat = document.createElement('span');
     badStat.className = `sched-stat ${rejected > 0 ? 'bad' : 'zero'}`;
     badStat.textContent = `${rejected} rejected`;
+    meta.append(okStat, badStat);
+    if (uncertainItems.length) {
+      const unknownStat = document.createElement('span');
+      unknownStat.className = 'sched-stat warn';
+      unknownStat.textContent = `${uncertainItems.length} outcome unknown`;
+      meta.appendChild(unknownStat);
+    }
     const ofText = document.createElement('span');
-    ofText.textContent = `of ${submitted} submitted`;
-    meta.append(okStat, badStat, ofText);
-    if ((run.rounds ?? 1) > 1 || campaignLoop) {
+    ofText.textContent = `of ${submitted} submitted`
+      + (Number.isFinite(run.stations_booked) ? ` · on ${run.stations_booked} station(s)` : '');
+    meta.appendChild(ofText);
+    // stopped_reason is shown whenever there is one, not only for looped runs:
+    // a single-round commit (the auto timer with loop off) whose build was
+    // cut short by the read limit reports that here, and it is the one line
+    // explaining why the run booked less than the preview promised.
+    if ((run.rounds ?? 1) > 1 || campaignLoop || run.stopped_reason) {
       const roundsText = document.createElement('span');
       roundsText.textContent = `in ${run.rounds ?? 1} round(s)`
         + (run.stopped_reason ? ` · stopped: ${run.stopped_reason}` : '');
       meta.appendChild(roundsText);
     }
     announceCampaign(
-      `Submit finished: ${accepted} booked, ${rejected} rejected, of ${submitted} submitted.`);
+      `Submit finished: ${accepted} booked, ${rejected} rejected`
+      + (uncertainItems.length ? `, ${uncertainItems.length} with unknown outcome` : '')
+      + `, of ${submitted} submitted.`);
+
+    if (uncertainItems.length) {
+      // Same rule as UNKNOWN_REASON in the rejection report, said above it
+      // because it is the one outcome that must change what happens next.
+      // CROSS-CHECK below reads back only ACCEPTED bookings, so these stations
+      // are named for checking on SatNOGS directly.
+      const ids = [...new Set(uncertainItems.map((it) => it.station_id))];
+      const shown = ids.slice(0, 12).join(', ') + (ids.length > 12 ? `, … (${ids.length} stations)` : '');
+      unknownNote = alertNote(
+        `${uncertainItems.length} booking(s) have an UNKNOWN outcome — SatNOGS may have `
+        + 'accepted them. Do NOT resubmit them: check these stations\' schedules on '
+        + `SatNOGS first (station ${shown}). This run did not retry them either.`);
+    }
   }
   wrap.appendChild(meta);
+  if (unknownNote) wrap.appendChild(unknownNote);
+
+  if (run.status !== 'error') {
+    if (Array.isArray(run.accepted_by_transmitter) && run.accepted_by_transmitter.length) {
+      wrap.appendChild(chipRow('Booked by downlink', transmitterChips(run.accepted_by_transmitter)));
+    }
+    if (Array.isArray(run.accepted_band_counts) && run.accepted_band_counts.length) {
+      wrap.appendChild(chipRow('Booked by peak elevation', bandChips(run.accepted_band_counts)));
+    }
+    const sources = formatCalendarSources(run.calendar_sources);
+    if (sources) {
+      const src = document.createElement('p');
+      src.className = 'muted sched-meta';
+      src.textContent = `Calendar reads during this submit: ${sources}`;
+      wrap.appendChild(src);
+    }
+  }
 
   if (run.errors && run.errors.length) {
     wrap.appendChild(buildRejectionReport(run.errors));
@@ -2506,7 +3001,8 @@ function renderCampaignHistory(history) {
   const table = document.createElement('table');
   table.className = 'sched-table';
   const thead = document.createElement('thead');
-  thead.innerHTML = '<tr><th>Time UTC</th><th>Trigger</th><th>Booked</th><th>Rejected</th><th>Rounds</th><th>Status</th></tr>';
+  thead.innerHTML = '<tr><th>Time UTC</th><th>Trigger</th><th>Booked</th><th>Stations</th>'
+    + '<th>Rejected</th><th>Rounds</th><th>Status</th></tr>';
   table.appendChild(thead);
   const tbody = document.createElement('tbody');
   for (const run of history.slice().reverse()) {
@@ -2521,6 +3017,11 @@ function renderCampaignHistory(history) {
     tdTrigger.appendChild(tag);
     const tdBooked = document.createElement('td');
     tdBooked.textContent = String(run.accepted ?? 0);
+    // Breadth, next to depth: 600 booked on 220 stations and 600 on 120 are
+    // different campaigns. Runs recorded before the count existed show a dash,
+    // not a 0 they never measured.
+    const tdStations = document.createElement('td');
+    tdStations.textContent = Number.isFinite(run.stations_booked) ? String(run.stations_booked) : '—';
     // Only a non-zero rejection count earns the colour — a column of red
     // zeroes would make a run of clean submits look like a problem.
     const tdRejected = document.createElement('td');
@@ -2532,7 +3033,7 @@ function renderCampaignHistory(history) {
     tdStatus.textContent = run.status || '—';
     if (run.status === 'error') tdStatus.className = 'sched-cell-bad';
 
-    tr.append(tdTime, tdTrigger, tdBooked, tdRejected, tdRounds, tdStatus);
+    tr.append(tdTime, tdTrigger, tdBooked, tdStations, tdRejected, tdRounds, tdStatus);
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);

@@ -8,7 +8,16 @@ empty. The properties that matter:
 * the per-station cap holds across the whole loop, not per round, so looping
   reaches more stations instead of stacking passes onto the same ones;
 * a round where SatNOGS rejects everything ends the loop instead of hammering it;
-* with the setting off, a commit is still exactly one batch.
+* with the setting off, a commit is still exactly one batch;
+* station calendars are read ONCE per commit: a preview's reads are reused by
+  the commit that follows it and by every later round, until they age past
+  campaign_calendar_ttl_s or this process books onto those stations. Every
+  round re-reading every calendar is what used to spend the whole 240/hour
+  observation budget (682 pages for a 4-round commit that needed 175);
+* a build cut short by the read limit is reported as such, never as "no
+  bookings left";
+* the timer does not fire a cycle at startup when one ran recently - every
+  uvicorn --reload used to fire a full real preview.
 
 Nothing here touches the network.
 """
@@ -18,15 +27,21 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import inspect
+from collections import Counter
+
 import pytest
 
+from app import scheduler as scheduler_module
 from app.config import Settings
 from app.services import campaign_service as cs
 from app.services.campaign_service import CampaignService
 from app.vendor.autoscheduler.campaign import build_campaign
-from app.vendor.autoscheduler.network_client import ScheduleResult
+from app.vendor.autoscheduler.network_client import Booking, ScheduleResult
 
 MISSION = 67683
+TELEMETRY = "UatCXtfDnoBPeVBGHgj4Bc"
+DIGIPEATER = "JR28wAEjmpuDQ4FrPWAiwf"
 
 
 def item(station_id: int, n: int) -> dict:
@@ -42,6 +57,9 @@ class StubNetwork:
     def __init__(self, reject_all: bool = False):
         self.reject_all = reject_all
         self.batches: list[int] = []
+        # Calendar reads, in order, as build_campaign would make them.
+        self.reads: list[int] = []
+        self.calendar_sources: Counter = Counter()
 
     def schedule(self, items, execute=False):
         assert execute
@@ -50,9 +68,16 @@ class StubNetwork:
             return ScheduleResult(submitted=len(items), errors=["x: HTTP 400 no"] * len(items))
         return ScheduleResult(submitted=len(items), accepted=len(items), accepted_items=list(items))
 
+    def future_bookings(self, station_id, now=None):
+        self.reads.append(station_id)
+        self.calendar_sources["jobs"] += 1
+        return []
 
-def make_service(tmp_path, monkeypatch, *, loop: bool, network: StubNetwork):
-    settings = Settings(data_dir=tmp_path, mock=False, campaign_mock=False, default_norad=MISSION)
+
+def make_service(tmp_path, monkeypatch, *, loop: bool, network: StubNetwork,
+                 policy: str = "preferred", **settings_overrides):
+    settings = Settings(data_dir=tmp_path, mock=False, campaign_mock=False,
+                        default_norad=MISSION, **settings_overrides)
 
     class StubSchedule:
         cache_dir = tmp_path / "cache"
@@ -69,6 +94,15 @@ def make_service(tmp_path, monkeypatch, *, loop: bool, network: StubNetwork):
         def campaign_loop_until_exhausted(self):
             return loop
 
+        def campaign_transmitter_policy(self):
+            return policy
+
+        def campaign_max_per_station(self):
+            return 2
+
+        def campaign_max_total(self):
+            return 5
+
     monkeypatch.setattr(cs, "Cache", lambda *a, **k: None)
     monkeypatch.setattr(cs, "NetworkClient", lambda *a, **k: network)
     monkeypatch.setattr(cs, "DbClient", lambda *a, **k: None)
@@ -76,17 +110,64 @@ def make_service(tmp_path, monkeypatch, *, loop: bool, network: StubNetwork):
 
 
 def fake_builder(stations: int, per_station: int, max_total: int):
-    """Stands in for build_campaign: every station has `per_station` passes,
+    """Stands in for _build_items: every station has `per_station` passes,
     booked_counts removes the ones already taken, capped at max_total."""
-    def build(network, db, auto_settings, booked_counts=None):
+    def build(network, db, auto_settings, booked_counts=None, calendar_cache=None):
         out = []
         for sid in range(1, stations + 1):
             for n in range((booked_counts or {}).get(sid, 0), per_station):
                 if len(out) >= max_total:
-                    return out
+                    return {"items": out, "stopped_early": None}
                 out.append(item(sid, n))
-        return out
+        return {"items": out, "stopped_early": None}
     return build
+
+
+class FakeBuildCampaign:
+    """Stands in for build_campaign itself, honouring the calendar_cache
+    contract: a station's calendar comes from the cache when it is there, is
+    otherwise read with network.future_bookings() and stored into the cache.
+
+    Every station has two passes; booked_counts takes back the ones already
+    given, max_total caps a build. Records the kwargs of every call.
+    """
+
+    def __init__(self, stations: int = 4, max_total: int = 3):
+        self.stations = stations
+        self.max_total = max_total
+        self.calls: list[dict] = []
+
+    def __call__(self, network, db, **kwargs):
+        self.calls.append(kwargs)
+        cache = kwargs.get("calendar_cache")
+        booked = kwargs.get("booked_counts") or {}
+        occupied = kwargs.get("recent_attempts") or {}
+        out = []
+        for sid in range(1, self.stations + 1):
+            if cache is not None and sid in cache:
+                pass
+            else:
+                bookings = network.future_bookings(sid, now=kwargs["now"])
+                if cache is not None:
+                    cache[sid] = list(bookings)
+            for n in range(booked.get(sid, 0), 2):
+                row = item(sid, n)
+                taken = any(datetime.fromisoformat(row["start"]) == start
+                            for start, _end in occupied.get(sid, []))
+                if taken or len(out) >= self.max_total:
+                    continue
+                out.append(row)
+        return {"status": "ok", "items": out, "stopped_early": None,
+                "generated_utc": kwargs["now"].isoformat()}
+
+
+@pytest.fixture
+def fake_build_campaign(monkeypatch):
+    fake = FakeBuildCampaign()
+    monkeypatch.setattr(cs, "build_campaign", fake)
+    # The fake already returns the payload shape.
+    monkeypatch.setattr(cs, "_campaign_preview_payload", lambda payload: dict(payload))
+    return fake
 
 
 def test_loop_keeps_submitting_until_nothing_is_left(tmp_path, monkeypatch):
@@ -132,7 +213,7 @@ def test_loop_has_a_round_limit(tmp_path, monkeypatch):
     network = StubNetwork()
     svc = make_service(tmp_path, monkeypatch, loop=True, network=network)
     # A builder that never runs dry - only the backstop can end this.
-    monkeypatch.setattr(svc, "_build_items", lambda *a, **k: [item(1, 0)])
+    monkeypatch.setattr(svc, "_build_items", lambda *a, **k: {"items": [item(1, 0)]})
 
     result = svc._commit_sync(None, "manual")
 
@@ -145,9 +226,9 @@ def test_previewed_items_are_the_first_round(tmp_path, monkeypatch):
     svc = make_service(tmp_path, monkeypatch, loop=True, network=network)
     seen: list[dict] = []
 
-    def build(network, db, auto_settings, booked_counts=None):
+    def build(network, db, auto_settings, booked_counts=None, calendar_cache=None):
         seen.append(dict(booked_counts or {}))
-        return []
+        return {"items": []}
     monkeypatch.setattr(svc, "_build_items", build)
 
     result = svc._commit_sync([item(3, 0), item(3, 1), item(4, 0)], "manual")
@@ -185,3 +266,293 @@ def test_build_campaign_skips_stations_already_at_their_cap():
     assert "per-station cap" in reasons[1]
     # Station 1 was dropped before any further lookups; only station 2 got that far.
     assert touched == [id(stations[1].segments)]
+
+
+# --- the calendar cache ---------------------------------------------------------
+
+def test_a_preview_and_every_round_of_the_commit_after_it_read_each_calendar_once(
+        tmp_path, monkeypatch, fake_build_campaign):
+    """The whole point of the cache. The preview reads the four calendars; the
+    commit it feeds submits what was reviewed, then keeps looping - and none
+    of those rounds reads a calendar again."""
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=True, network=network)
+
+    preview = svc._preview_sync()
+    assert network.reads == [1, 2, 3, 4]
+
+    result = svc._commit_sync(preview["items"], "manual")
+
+    assert result["rounds"] >= 3, result
+    assert result["accepted"] == 8, "every station's two passes, over several rounds"
+    assert network.reads == [1, 2, 3, 4], (
+        f"rounds 2+ must plan from the calendars the preview read, got reads {network.reads}"
+    )
+    # Every round after the first handed build_campaign the same cache dict.
+    commit_caches = {id(call["calendar_cache"]) for call in fake_build_campaign.calls[1:]}
+    assert len(commit_caches) == 1
+    assert commit_caches == {id(fake_build_campaign.calls[0]["calendar_cache"])}
+
+
+def test_a_commit_that_builds_its_own_first_round_reads_once_too(
+        tmp_path, monkeypatch, fake_build_campaign):
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=True, network=network)
+
+    result = svc._commit_sync(None, "auto")
+
+    assert result["accepted"] == 8
+    assert network.reads == [1, 2, 3, 4]
+    assert result["calendar_sources"] == {"jobs": 4}, (
+        "the commit reports which feed its reads came from"
+    )
+
+
+def test_calendars_older_than_the_ttl_are_read_again(tmp_path, monkeypatch, fake_build_campaign):
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=network,
+                       campaign_calendar_ttl_s=900)
+    svc._preview_sync()
+    assert network.reads == [1, 2, 3, 4]
+
+    # Within the TTL a second preview is free...
+    svc._preview_sync()
+    assert network.reads == [1, 2, 3, 4]
+
+    # ...but once the reads are older than the TTL they are not trusted.
+    svc._calendar_cache_at -= timedelta(seconds=901)
+    svc._preview_sync()
+    assert network.reads == [1, 2, 3, 4, 1, 2, 3, 4]
+
+
+def test_the_cache_is_dropped_once_this_process_books_onto_those_stations(
+        tmp_path, monkeypatch, fake_build_campaign):
+    """cap_counts_existing only counts what is ON a calendar. Keep the
+    pre-booking calendars and a second click inside the TTL would see none of
+    the first click's bookings and stack another max_per_station on top."""
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=network)
+    preview = svc._preview_sync()
+
+    svc._commit_sync(preview["items"], "manual")
+    assert svc._calendar_cache == {}
+
+    svc._preview_sync()
+    assert network.reads == [1, 2, 3, 4, 1, 2, 3, 4], "the next preview reads fresh calendars"
+
+
+def test_calendar_cache_expiry_rules(tmp_path, monkeypatch):
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork(),
+                       campaign_calendar_ttl_s=900)
+    t0 = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+
+    first = svc._calendar_cache_for(t0)
+    first[1] = ["cached"]
+    assert svc._calendar_cache_for(t0 + timedelta(seconds=899)) is first
+    assert svc._calendar_cache_for(t0 + timedelta(seconds=900)) is not first, "expired at the TTL"
+
+    second = svc._calendar_cache_for(t0)
+    second[1] = ["cached"]
+    assert svc._calendar_cache_for(t0 - timedelta(seconds=1)) is not second, (
+        "a clock stepped backwards cannot vouch for the cache's age"
+    )
+
+
+def test_a_zero_ttl_still_shares_calendars_between_the_rounds_of_one_commit(
+        tmp_path, monkeypatch, fake_build_campaign):
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=True, network=network,
+                       campaign_calendar_ttl_s=0)
+    preview = svc._preview_sync()
+
+    result = svc._commit_sync(preview["items"], "manual")
+
+    assert result["rounds"] >= 3
+    # One set of reads for the preview, one for the commit's first rebuild -
+    # and nothing more, however many rounds follow.
+    assert network.reads == [1, 2, 3, 4, 1, 2, 3, 4]
+
+
+# --- builds cut short --------------------------------------------------------------
+
+def test_a_round_cut_short_by_the_read_limit_says_so(tmp_path, monkeypatch):
+    """A truncated rebuild used to end the run as "no bookings left", which
+    reads as "the network is full" when it only means "we stopped looking"."""
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=True, network=network)
+    builds = iter([
+        {"items": [item(5, 0)], "stopped_early": {
+            "reason": "SatNOGS is rate-limiting reads (next slot in 900s)",
+            "unread_stations": 37}},
+        {"items": [], "stopped_early": {
+            "reason": "SatNOGS is rate-limiting reads (next slot in 880s)",
+            "unread_stations": 36}},
+    ])
+    monkeypatch.setattr(svc, "_build_items", lambda *a, **k: next(builds))
+
+    result = svc._commit_sync([item(1, 0)], "manual")
+
+    assert network.batches == [1, 1]
+    reason = result["stopped_reason"]
+    assert not reason.startswith("no bookings left"), reason
+    assert reason.startswith("nothing more could be planned"), reason
+    assert "round 2's plan was cut short" in reason and "37 station(s) not read" in reason
+    assert "round 3's plan was cut short" in reason and "36 station(s) not read" in reason
+
+
+def test_a_first_build_cut_short_is_surfaced_with_looping_off(tmp_path, monkeypatch):
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=network)
+    monkeypatch.setattr(svc, "_build_items", lambda *a, **k: {
+        "items": [item(1, 0)],
+        "stopped_early": {"reason": "SatNOGS is rate-limiting reads", "unread_stations": 12}})
+
+    result = svc._commit_sync(None, "manual")
+
+    assert result["stopped_reason"] == (
+        "one batch per commit (looping is off); round 1's plan was cut short "
+        "(SatNOGS is rate-limiting reads; 12 station(s) not read)"
+    )
+
+
+def test_nothing_to_submit_is_not_called_a_rejection(tmp_path, monkeypatch):
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=True, network=network)
+    monkeypatch.setattr(svc, "_build_items", lambda *a, **k: {"items": []})
+
+    result = svc._commit_sync(None, "manual")
+
+    assert network.batches == []
+    assert result["stopped_reason"] == "no bookings to submit"
+
+
+# --- the service hands build_campaign what the contract says ------------------------
+
+def test_the_build_kwargs_are_ones_build_campaign_accepts(tmp_path, monkeypatch):
+    """Bound against the real signature, so a renamed or missing parameter on
+    either side fails here rather than as a TypeError in the first live preview."""
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork())
+    kwargs = svc._build_kwargs(datetime.now(timezone.utc), SimpleNamespace(buffer_s=30.0), {})
+
+    inspect.signature(build_campaign).bind(object(), object(), booked_counts=None, **kwargs)
+    assert kwargs["cap_counts_existing"] is True
+
+
+@pytest.mark.parametrize("policy, expected", [
+    ("pinned", (TELEMETRY, [])),
+    ("preferred", (TELEMETRY, [DIGIPEATER])),
+    ("any", (None, [])),
+])
+def test_the_transmitter_policy_maps_onto_build_campaign(tmp_path, monkeypatch,
+                                                          fake_build_campaign, policy, expected):
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork(), policy=policy)
+
+    svc._preview_sync()
+
+    (call,) = fake_build_campaign.calls
+    assert (call["transmitter_uuid"], call["fallback_transmitter_uuids"]) == expected
+    assert call["calendar_cache"] is svc._calendar_cache
+    assert call["cap_counts_existing"] is True
+
+
+def test_an_unset_primary_means_the_automatic_pick_whatever_the_policy(
+        tmp_path, monkeypatch, fake_build_campaign):
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork(),
+                       policy="preferred", campaign_transmitter_uuid=None)
+
+    svc._preview_sync()
+
+    (call,) = fake_build_campaign.calls
+    assert (call["transmitter_uuid"], call["fallback_transmitter_uuids"]) == (None, [])
+
+
+def test_the_fallback_list_never_repeats_the_primary(tmp_path, monkeypatch, fake_build_campaign):
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork(),
+                       campaign_fallback_transmitter_uuids=f"{TELEMETRY}, {DIGIPEATER},,{DIGIPEATER}")
+
+    svc._preview_sync()
+
+    assert fake_build_campaign.calls[0]["fallback_transmitter_uuids"] == [DIGIPEATER]
+
+
+def test_the_preview_reports_where_its_calendars_came_from(tmp_path, monkeypatch,
+                                                           fake_build_campaign):
+    network = StubNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=network)
+
+    preview = svc._preview_sync()
+
+    assert preview["calendar_sources"] == {"jobs": 4}
+
+
+# --- the timer after a restart ---------------------------------------------------------
+
+def _write_preview(svc, generated_utc):
+    svc._write_json(svc.preview_path, {"status": "ok", "generated_utc": generated_utc, "items": []})
+
+
+def test_the_first_cycle_waits_out_what_is_left_of_the_poll_period(tmp_path, monkeypatch):
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork(),
+                       campaign_poll_s=86400)
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+
+    assert svc.auto_cycle_delay_s(now) == 0.0, "never previewed: run now"
+
+    _write_preview(svc, (now - timedelta(hours=1)).isoformat())
+    assert svc.auto_cycle_delay_s(now) == pytest.approx(23 * 3600)
+
+    _write_preview(svc, (now - timedelta(hours=25)).isoformat())
+    assert svc.auto_cycle_delay_s(now) == 0.0, "overdue: run now"
+
+    _write_preview(svc, (now + timedelta(days=3)).isoformat())
+    assert svc.auto_cycle_delay_s(now) == 86400, "a future stamp delays at most one period"
+
+    _write_preview(svc, "not a timestamp")
+    assert svc.auto_cycle_delay_s(now) == 0.0
+
+    # A preview that errored still went out to SatNOGS; it counts.
+    svc._write_json(svc.preview_path, {"status": "error", "error": "x",
+                                       "generated_utc": (now - timedelta(hours=2)).isoformat()})
+    assert svc.auto_cycle_delay_s(now) == pytest.approx(22 * 3600)
+
+
+class _Stop(Exception):
+    pass
+
+
+async def _run_campaign_loop(monkeypatch, delay_s: float) -> list:
+    events: list = []
+
+    class StubCampaign:
+        def auto_cycle_delay_s(self):
+            return delay_s
+
+        async def run_auto_cycle(self):
+            events.append("cycle")
+
+    async def fake_sleep(seconds):
+        events.append(("sleep", seconds))
+        if "cycle" in events:
+            raise _Stop
+
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", fake_sleep)
+    owner = scheduler_module.Scheduler.__new__(scheduler_module.Scheduler)
+    owner.campaign_service = StubCampaign()
+    owner.s = SimpleNamespace(campaign_poll_s=86400)
+    with pytest.raises(_Stop):
+        await owner._campaign_loop()
+    return events
+
+
+async def test_a_restart_soon_after_a_preview_does_not_fire_a_cycle(monkeypatch):
+    """Every edit under backend/app restarts the live backend (uvicorn
+    --reload), and the loop used to open with a full real preview."""
+    events = await _run_campaign_loop(monkeypatch, delay_s=3600.0)
+
+    assert events == [("sleep", 3600.0), "cycle", ("sleep", 86400)]
+
+
+async def test_with_no_recent_preview_the_timer_still_starts_at_once(monkeypatch):
+    events = await _run_campaign_loop(monkeypatch, delay_s=0.0)
+
+    assert events == ["cycle", ("sleep", 86400)]

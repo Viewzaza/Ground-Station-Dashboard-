@@ -392,23 +392,44 @@
           <div class="sched-campaign-row">
             <span class="muted">Target: KNACKSAT-2 · NORAD 67683</span>
           </div>
+          <div class="sched-campaign-row">
+            <!-- The breadth knob, where passes/station below is the depth one.
+                 Telemetry alone reaches ~145 stations; adding the 145.825 MHz
+                 digipeater on the stations that cannot hear 400.630 MHz takes
+                 that to ~222 (offline measurement). Telemetry still wins on
+                 every station that hears both, because the digipeater's
+                 historical success rate is far lower - which is why the plan
+                 marks each fallback booking. Saved with SAVE like the caps. -->
+            <label for="campaign-tx-policy">Downlink</label>
+            <select id="campaign-tx-policy">
+              <option value="preferred">Telemetry first, digipeater fallback — most stations</option>
+              <option value="pinned">Telemetry only (400.630 MHz)</option>
+              <option value="any">Any KNACKSAT-2 downlink</option>
+            </select>
+          </div>
           <div class="sched-campaign-row sched-campaign-row-slider">
-            <!-- max was 150, which silently clamped any larger configured value
-                 back down on save. The reachable ceiling is bounded by the
-                 network, not by this control: the plan can never exceed
-                 (stations that can hear the pinned transmitter) x (passes per
-                 station), whatever this says. The reach hint below states that
-                 arithmetic against what the last preview actually found. -->
+            <!-- max was 150, then 600; each time the cap, not the network,
+                 was what stopped the plan. The reachable ceiling is bounded
+                 by the network, not by this control: the plan can never exceed
+                 (stations that can hear the chosen downlink(s)) x (passes per
+                 station), whatever this says - ~651 at 3 per station with the
+                 digipeater fallback. 1000 leaves headroom above that without
+                 inviting a number the backend (which refuses > 2000) would
+                 reject. The reach hint below states that arithmetic against
+                 what the last preview actually found. -->
             <label for="campaign-max-total">Max bookings / run</label>
-            <input id="campaign-max-total" type="range" min="1" max="600" step="1"
+            <input id="campaign-max-total" type="range" min="1" max="1000" step="1"
                    aria-describedby="campaign-max-total-value">
             <output id="campaign-max-total-value" for="campaign-max-total">150</output>
           </div>
           <div class="sched-campaign-row sched-campaign-row-slider">
             <!-- The real cost knob. Total alone cannot raise the plan past
-                 (capable stations x this), so reaching 600 needs 5 here, not a
-                 bigger total. Each increment asks every borrowed station for
-                 one more slot per 48 h window. -->
+                 (capable stations x this): telemetry-only needed 5 here to
+                 reach 600, the digipeater fallback gets there at 3. It counts
+                 KNACKSAT-2 observations already on a station in the 48 h
+                 window, so a second run tops stations up rather than adding
+                 this many again. Each increment asks every borrowed station
+                 for one more slot per window. -->
             <label for="campaign-max-per-station">Passes / station</label>
             <input id="campaign-max-per-station" type="range" min="1" max="8" step="1"
                    aria-describedby="campaign-max-per-station-value">
@@ -446,8 +467,16 @@
             <button class="btn btn-danger sched-oneclick-btn" id="campaign-oneclick-btn" type="button">
               BOOK WORLDWIDE — ONE CLICK
             </button>
+            <!-- A preset in front of the same flow, not a second booking path:
+                 it only changes the saved settings, then hands over to one-click
+                 so every hold one-click applies still applies. -->
+            <button class="btn btn-danger sched-oneclick-btn" id="campaign-max-coverage" type="button">
+              MAX COVERAGE
+            </button>
             <span id="campaign-oneclick-hint" class="hint">
               Previews, then submits the result automatically. Asks once, up front.
+              MAX COVERAGE first saves telemetry + digipeater fallback, 3 per
+              station, 600 per round, loop on.
             </span>
           </div>
 

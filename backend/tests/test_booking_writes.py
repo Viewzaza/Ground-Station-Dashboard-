@@ -218,3 +218,213 @@ def test_an_unreachable_server_books_nothing_and_says_so():
     assert server.rows == []
     assert result.uncertain_items == []
     assert any("Nothing was booked" in e for e in result.errors)
+
+
+# --- NetworkClient.schedule: a 409 costs one station, not the whole batch ------
+#
+# satnogs-network validates every item of a POST before it saves any, and the
+# overlap check (create_new_observation) refuses the batch with HTTP 409 naming
+# the FIRST station, in item order, whose item overlaps its calendar. So a 409
+# created nothing, and says where to look. The old rule answered any refusal
+# by sending every item on its own: the 2026-09-22 run had 37 of 150 refused,
+# all such 409s, and at 600 items one stale slot meant ~600 sequential POSTs.
+
+def overlap_409(station) -> requests.Response:
+    # DRF's Response(str(error), status=409): the body is a JSON string.
+    return response(409, f"One or more observations of station {station} overlap "
+                         "with the already scheduled ones.")
+
+
+class CalendarServer:
+    """Refuses overlaps the way satnogs-network does, and records every POST.
+
+    `taken` holds (station, start) pairs that overlap something already on
+    that station. The whole batch is checked before anything is saved; the
+    first item that hits one fails it with a 409 naming its station, and
+    nothing is created. `blame` can replace that choice, to model a server
+    that names some other station. `lost_reply(keys)` makes a POST create its
+    rows and then lose the answer.
+    """
+
+    def __init__(self, taken=(), *, blame=None, lost_reply=lambda keys: False) -> None:
+        self.taken = set(taken)
+        self.blame = blame
+        self.lost_reply = lost_reply
+        self.headers: dict[str, str] = {}
+        self.batches: list[list[tuple]] = []
+        self.rows: list[tuple] = []
+
+    def request(self, method, url, json=None, **_kwargs):
+        keys = [(item["ground_station"], item["start"]) for item in json or []]
+        self.batches.append(keys)
+        clash = next((gs for gs, start in keys if (gs, start) in self.taken), None)
+        if self.blame is not None and len(keys) > 1:
+            clash = self.blame(keys)
+        if clash is not None:
+            return overlap_409(clash)
+        self.rows.extend(keys)
+        if self.lost_reply(keys):
+            raise requests.exceptions.ReadTimeout("read timed out")
+        return response(201, json)
+
+    def sizes(self) -> list[int]:
+        return [len(batch) for batch in self.batches]
+
+    def duplicates(self) -> int:
+        return len(self.rows) - len(set(self.rows))
+
+
+def plan(per_station: dict[int, int]) -> list[dict]:
+    """`per_station[s]` items on station s, one hour apart."""
+    return [
+        {"ground_station": station, "transmitter_uuid": "TX-U",
+         "start": f"2026-09-26 0{n}:00:00", "end": f"2026-09-26 0{n}:10:00"}
+        for station, count in per_station.items() for n in range(count)
+    ]
+
+
+def key(item: dict) -> tuple:
+    return (item["ground_station"], item["start"])
+
+
+def test_a_409_isolates_the_named_station_and_rebatches_the_rest():
+    batch = plan({101: 2, 102: 2, 103: 2, 104: 2, 105: 2})
+    stale = batch[2]                       # station 102's first pass
+    server = CalendarServer(taken={key(stale)})
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    # All ten, then station 102's two alone, then the other eight together.
+    # The old rule: all ten, then every one of the ten alone.
+    assert server.sizes() == [10, 1, 1, 8]
+    assert server.batches[1:3] == [[key(batch[2])], [key(batch[3])]]
+    assert result.submitted == 10
+    assert result.accepted == 9
+    assert result.accepted_items == [item for item in batch if item is not stale], (
+        "the very dicts sent, in the order sent - CampaignService maps them back by identity"
+    )
+    (error,) = result.errors
+    assert "station 102" in error and "HTTP 409" in error
+    assert server.duplicates() == 0
+
+
+def test_each_further_409_prunes_one_more_station():
+    batch = plan({101: 1, 102: 2, 103: 1, 104: 2, 105: 1})
+    server = CalendarServer(taken={key(batch[1]), key(batch[5])})   # on 102 and 104
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    assert server.sizes() == [7, 1, 1, 5, 1, 1, 3]
+    assert result.accepted == 5
+    assert sorted(e.split()[1] for e in result.errors) == ["102", "104"]
+    assert server.duplicates() == 0
+
+
+def test_batch_attempts_are_bounded_by_the_number_of_stations():
+    """A server that refuses every batch, blaming whoever is first in it, costs
+    one batch per station - never an endless loop - and still books each item
+    exactly once."""
+    batch = plan({101: 2, 102: 2, 103: 2, 104: 2})
+    server = CalendarServer(blame=lambda keys: keys[0][0])
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    batch_attempts = [size for size in server.sizes() if size > 1]
+    assert len(batch_attempts) <= 4 + 1
+    assert result.accepted == 8
+    assert sorted(server.rows) == sorted(key(item) for item in batch)
+
+
+def test_a_409_naming_a_station_not_in_the_batch_is_sent_one_at_a_time():
+    batch = plan({101: 1, 102: 1, 103: 1})
+    server = CalendarServer(blame=lambda keys: 999)
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    assert server.sizes() == [3, 1, 1, 1], "the pre-existing one-at-a-time fallback"
+    assert result.accepted == 3
+
+
+def test_a_409_that_keeps_naming_a_removed_station_cannot_loop():
+    batch = plan({101: 1, 102: 2, 103: 1})
+    server = CalendarServer(blame=lambda keys: 101)
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    # 101 isolated once; the next 409 names a station no longer sent, so the
+    # rest go one at a time rather than round again.
+    assert server.sizes() == [4, 1, 3, 1, 1, 1]
+    assert result.accepted == 4
+    assert server.duplicates() == 0
+
+
+@pytest.mark.parametrize("body", [
+    {"non_field_errors": ["Observations of station 101 overlap"]},
+    "Error in DB API connection. Please try again!",
+], ids=["within-batch-overlap", "db-api"])
+def test_a_400_is_still_sent_one_at_a_time_even_when_it_names_a_station(body):
+    """Only the 409 prunes. The within-batch 400 reads much the same but means
+    two of OUR items collide."""
+    class Server(CalendarServer):
+        def request(self, method, url, json=None, **kw):
+            if len(json) > 1:
+                self.batches.append([key(item) for item in json])
+                return response(400, body)
+            return super().request(method, url, json=json, **kw)
+
+    server = Server()
+    result = client_on(server).schedule(plan({101: 2, 102: 1, 103: 1}), execute=True)
+
+    # Pruning would have shown as [4, 1, 1, 2, ...]: 101 alone, then 102+103.
+    assert server.sizes() == [4, 1, 1, 1, 1]
+    assert result.accepted == 4
+
+
+def test_a_409_that_names_no_station_is_sent_one_at_a_time():
+    """The scheduling-limit refusal is also a 409, with other words in it and
+    no station to isolate."""
+    class Server(CalendarServer):
+        def request(self, method, url, json=None, **kw):
+            if len(json) > 1:
+                self.batches.append([key(item) for item in json])
+                return response(409, "Scheduling limit reached for this satellite")
+            return super().request(method, url, json=json, **kw)
+
+    server = Server()
+    result = client_on(server).schedule(plan({101: 2, 102: 1, 103: 1}), execute=True)
+
+    assert server.sizes() == [4, 1, 1, 1, 1]
+    assert result.accepted == 4
+
+
+def test_an_unknown_single_during_a_prune_is_never_sent_again():
+    batch = plan({101: 2, 102: 2, 103: 1})
+    unsure = batch[1]                      # station 101's second pass
+    server = CalendarServer(taken={key(batch[0])},
+                            lost_reply=lambda keys: keys == [key(unsure)])
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    assert server.sizes() == [5, 1, 1, 3]
+    assert result.uncertain_items == [unsure]
+    lost_at = server.batches.index([key(unsure)])
+    assert not any(key(unsure) in sent for sent in server.batches[lost_at + 1:]), (
+        "an item that may have landed was sent again"
+    )
+    assert result.accepted == 3
+    assert server.duplicates() == 0
+
+
+def test_an_unknown_rebatch_is_never_sent_again():
+    batch = plan({101: 2, 102: 2, 103: 1})
+    server = CalendarServer(taken={key(batch[0])},
+                            lost_reply=lambda keys: len(keys) > 1)
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    assert server.sizes() == [5, 1, 1, 3], "nothing after the lost re-batch"
+    assert result.accepted_items == [batch[1]]
+    assert result.uncertain_items == batch[2:]
+    assert any("OUTCOME UNKNOWN for all 3" in e and "Do NOT resubmit" in e
+               for e in result.errors), result.errors
+    assert server.duplicates() == 0

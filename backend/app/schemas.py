@@ -205,12 +205,24 @@ class ScheduleConfigUpdate(BaseModel):
     # unchanged, pass explicitly to change it. Defaults False everywhere it
     # is read (CampaignService) so a fresh setup never auto-books.
     campaign_auto_commit_enabled: bool | None = None
-    campaign_max_per_station: int | None = None
-    campaign_max_total: int | None = None
+    # 0 is the panel's "clear back to the default" sentinel (see
+    # _CONFIG_FIELDS), so the floor is 0, not 1. The ceilings are sanity
+    # bounds, not tuning: a 48h window averages ~7 qualifying KNACKSAT-2
+    # passes per station (1033 over 145 stations, measured offline), and the
+    # whole reachable network (~222 stations with the digipeater fallback)
+    # plans ~650 bookings at 3 per station - so 12 and 2000 leave real
+    # headroom while refusing a typo like 60000 that would otherwise be sent
+    # to other people's stations as-is.
+    campaign_max_per_station: int | None = Field(default=None, ge=0, le=12)
+    campaign_max_total: int | None = Field(default=None, ge=0, le=2000)
     # A plain bool like campaign_auto_commit_enabled. On: a commit keeps
     # submitting fresh batches of up to campaign_max_total until nothing is
     # left to book, instead of stopping after the first.
     campaign_loop_until_exhausted: bool | None = None
+    # Which downlink(s) to book - see config.py's campaign_transmitter_uuid.
+    # A Literal, so a misspelt policy is a 422 rather than something the
+    # service has to fall back from.
+    campaign_transmitter_policy: Literal["pinned", "preferred", "any"] | None = None
 
     # --- station auto run ---------------------------------------------------
     # Ships off on a fresh install. Once it is on, every unattended run books
@@ -333,6 +345,12 @@ class CampaignItem(BaseModel):
     start: str
     end: str
     max_elevation_deg: float
+    # Optional with defaults so an older tab (or a preview cached on disk
+    # before these existed) still commits. Declared at all because the commit
+    # route rebuilds items through this model, and anything not declared is
+    # stripped - the run record would lose which bookings were the fallback.
+    transmitter_description: str = ""
+    fallback: bool = False
 
 
 class CampaignSkip(BaseModel):
@@ -341,7 +359,27 @@ class CampaignSkip(BaseModel):
     reason: str
 
 
+class CampaignBandCount(BaseModel):
+    # "90-75" ... "15-0", from campaign.py's ELEVATION_BAND_FLOORS.
+    band: str
+    count: int = 0
+
+
+class CampaignTransmitterSummary(BaseModel):
+    uuid: str
+    description: str = ""
+    fallback: bool = False
+    stations: int = 0
+    bookings: int = 0
+
+
+# The response models below are documentation: no route declares them as a
+# response_model, the payloads go out as the plain dicts CampaignService
+# builds. extra="allow" keeps them honest in the one direction that matters -
+# validating a real payload against them never fails over a field added later.
 class CampaignPreview(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     status: Literal["ok", "error", "running"] = "ok"
     generated_utc: str | None = None
     window_start: str | None = None
@@ -349,6 +387,17 @@ class CampaignPreview(BaseModel):
     considered_stations: int = 0
     items: list[CampaignItem] = Field(default_factory=list)
     skipped: list[CampaignSkip] = Field(default_factory=list)
+    calendars_read: int = 0
+    calendars_cached: int = 0
+    stopped_early: dict | None = None
+    stations_reachable: int = 0
+    stations_booked: int = 0
+    band_counts: list[CampaignBandCount] = Field(default_factory=list)
+    transmitters: list[CampaignTransmitterSummary] = Field(default_factory=list)
+    params: dict = Field(default_factory=dict)
+    # {"jobs": n, "observations": n} - which SatNOGS feed answered each
+    # calendar read. Only "observations" reads spend the token's budget.
+    calendar_sources: dict[str, int] = Field(default_factory=dict)
     error: str | None = None
 
 
@@ -359,6 +408,8 @@ class CampaignCommitRequest(BaseModel):
 
 
 class CampaignCommitResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     status: Literal["ok", "ok_with_warnings", "error", "running"]
     trigger: Literal["manual", "auto"] = "manual"
     generated_utc: str | None = None
@@ -368,6 +419,16 @@ class CampaignCommitResult(BaseModel):
     error: str | None = None
     rounds: int = 1
     stopped_reason: str | None = None
+    accepted_items: list[dict] = Field(default_factory=list)
+    stations_booked: int = 0
+    accepted_by_transmitter: list[CampaignTransmitterSummary] = Field(default_factory=list)
+    accepted_band_counts: list[CampaignBandCount] = Field(default_factory=list)
+    # Sent, but SatNOGS never gave a reliable answer: they may or may not be
+    # booked. Never resubmitted - cross-check the calendars first.
+    uncertain_items: list[dict] = Field(default_factory=list)
+    # Items never sent because SatNOGS became unreachable part-way through.
+    not_sent: int = 0
+    calendar_sources: dict[str, int] = Field(default_factory=dict)
 
 
 class CampaignHistoryEntry(BaseModel):
@@ -378,3 +439,4 @@ class CampaignHistoryEntry(BaseModel):
     accepted: int = 0
     rejected: int = 0
     rounds: int = 1
+    stations_booked: int = 0

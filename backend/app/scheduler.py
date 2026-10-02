@@ -229,7 +229,17 @@ class Scheduler:
         CampaignService.run_auto_cycle()'s own docstring for why the timer
         path is allowed to auto-commit at all while the UI's manual trigger
         never does.
+
+        It does not fire at startup if a preview ran within the last
+        campaign_poll_s: it sleeps out the remainder first. Running eagerly
+        meant every restart - including each uvicorn --reload after an edit
+        under backend/app - fired a full real preview, and with auto-commit
+        on, real bookings. See CampaignService.auto_cycle_delay_s().
         """
+        delay_s = self.campaign_service.auto_cycle_delay_s()
+        if delay_s > 0:
+            log.info("campaign timer: last preview is recent; first cycle in %.0f s", delay_s)
+            await asyncio.sleep(delay_s)
         while True:
             await self.campaign_service.run_auto_cycle()
             await asyncio.sleep(self.s.campaign_poll_s)

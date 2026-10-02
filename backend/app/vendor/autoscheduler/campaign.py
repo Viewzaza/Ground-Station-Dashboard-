@@ -19,10 +19,13 @@ single-station planner already uses, and the result is submitted through the
 public, token-authenticated POST /api/observations/ (a plain list) via
 NetworkClient.schedule() - unchanged, no new booking mechanism.
 
-Reading one station's calendar costs one throttled request, so a run over the
-whole catalogue is bounded by the Network API's read budget long before
-anything else. What that budget is, and what happens when it runs out, is in
-network_client.py's RateLimitedSession.
+Reading one station's calendar costs at least one request against a read
+budget, so a run over the whole catalogue is bounded by reads long before
+anything else. What those budgets are, which endpoint a calendar read uses,
+and what happens when a budget runs out, is in network_client.py
+(RateLimitedSession, NetworkClient.future_bookings). A caller that has read a
+calendar recently can hand it back in through `calendar_cache` so a second
+build - a looped commit's next round - costs no reads at all.
 
 Pass splitting is NOT replicated: SatNOGS' server splits long passes into
 short segments when its own authenticated web form submits them, but that
@@ -84,6 +87,13 @@ class CampaignItem:
     start: datetime
     end: datetime
     max_elevation_deg: float
+    transmitter_description: str = ""
+    # True when this station could not hear the campaign's primary transmitter
+    # and was given one of its fallbacks instead. Carried per item because the
+    # two KNACKSAT-2 downlinks are not equally productive (see config.py's
+    # campaign_transmitter_uuid note), so the operator has to be able to see
+    # which bookings are the weaker kind before committing them.
+    is_fallback: bool = False
 
 
 @dataclass
@@ -98,6 +108,17 @@ class CampaignPreview:
     # Station calendars actually fetched. Now that calendars are read lazily,
     # during selection, this is far below considered_stations on a normal run.
     calendars_read: int = 0
+    # Calendars served from the caller's calendar_cache instead of a read.
+    # Counted apart from calendars_read so "reads spent" stays an honest
+    # number: a looped commit's later rounds are all cache hits.
+    calendars_cached: int = 0
+    # Stations that survived phase 1 - a campaign transmitter in antenna range
+    # and at least one qualifying pass - i.e. the most this build could ever
+    # have booked on. The UI used to infer it from skip-reason prefixes.
+    stations_reachable: int = 0
+    # The selection inputs this build actually used, so the UI can check a plan
+    # against what the backend was told rather than against its own sliders.
+    params: dict = field(default_factory=dict)
     # Set when SatNOGS's read limit stopped the run before every candidate
     # could be read: {"station_id", "station_name", "reason", "unread_stations"}.
     # None means the plan is complete. The operator must be told which, because
@@ -117,6 +138,9 @@ def build_campaign(
     recent_attempts: dict[int, list[tuple[datetime, datetime]]] | None = None,
     buffer_s: float = DEFAULT_BUFFER_S,
     booked_counts: dict[int, int] | None = None,
+    fallback_transmitter_uuids: list[str] | None = None,
+    calendar_cache: dict[int, list] | None = None,
+    cap_counts_existing: bool = True,
 ) -> CampaignPreview:
     """Work out which stations should be asked to record `mission_norad`,
     and when, within the next ~48 hours.
@@ -137,11 +161,47 @@ def build_campaign(
     CampaignService._commit_sync). They count against `max_per_station`, so
     looping round after round fills more stations rather than stacking more
     passes onto the ones the first round already reached.
+
+    `fallback_transmitter_uuids` only means something alongside a
+    `transmitter_uuid`: each station records the FIRST of
+    [transmitter_uuid, *fallback_transmitter_uuids] it can hear, so the
+    primary wins wherever both are audible. With no transmitter_uuid the
+    fallbacks are ignored and pick_transmitter chooses, as before.
+
+    `calendar_cache` (station_id -> bookings) is consulted before reading a
+    station's calendar and filled by every successful read. Whether an entry
+    is still fresh enough to trust is the CALLER's decision - this function
+    has no clock of its own to judge it by.
+
+    `cap_counts_existing` makes max_per_station mean "observations of this
+    satellite on the station within the window", counting what its calendar
+    already holds, rather than "added by this build". See load_calendar.
     """
     window_start = now + timedelta(minutes=WINDOW_START_MARGIN_MIN)
     window_end = now + timedelta(minutes=WINDOW_END_MARGIN_MIN)
     hard_end = now + timedelta(minutes=WINDOW_HARD_END_MIN)
-    preview = CampaignPreview(generated_utc=now, window_start=window_start, window_end=window_end)
+
+    # The order a station tries transmitters in. Duplicates, and the primary
+    # repeated as its own fallback, are dropped so "has fallbacks" below means
+    # a genuinely different downlink is on offer.
+    tx_order: list[str] = []
+    if transmitter_uuid:
+        for uuid in [transmitter_uuid, *(fallback_transmitter_uuids or [])]:
+            if uuid and uuid not in tx_order:
+                tx_order.append(uuid)
+
+    preview = CampaignPreview(
+        generated_utc=now, window_start=window_start, window_end=window_end,
+        params={
+            "max_per_station": max_per_station,
+            "max_total": max_total,
+            "transmitter_uuid": transmitter_uuid,
+            # What was actually applied, not what was passed: fallbacks are
+            # meaningless without a primary, so they are reported as none.
+            "fallback_transmitter_uuids": tx_order[1:],
+            "cap_counts_existing": cap_counts_existing,
+        },
+    )
 
     tle = db.tles().get(mission_norad)
     if tle is None:
@@ -189,27 +249,42 @@ def build_campaign(
             continue
 
         candidates = db.transmitters_for_station(station.segments).get(mission_norad, [])
-        if transmitter_uuid:
-            # A pinned transmitter is a hard filter here, not the preference
-            # pick_transmitter treats it as. This campaign records one specific
-            # downlink; a station that cannot hear it has nothing to contribute,
-            # and pick_transmitter's fallback would quietly book a DIFFERENT
-            # transmitter on it instead - for KNACKSAT-2 that is 77 stations
-            # recording the digipeater when telemetry was asked for.
-            candidates = [tx for tx in candidates if tx.uuid == transmitter_uuid]
-            if not candidates:
+        if tx_order:
+            # The campaign's transmitters are a hard, ORDERED filter here, not
+            # the single preference pick_transmitter treats a uuid as. A
+            # station that hears none of them has nothing to contribute, and
+            # pick_transmitter's own fallback would quietly book whatever else
+            # it can hear - a downlink nobody chose. Among the listed ones the
+            # first audible wins, so on the 68 stations that hear both
+            # KNACKSAT-2 downlinks the telemetry is recorded, not the
+            # digipeater that DB order would otherwise hand pick_transmitter.
+            #
+            # pick_transmitter is deliberately not called with a uuid the
+            # station lacks: it logs a "priority file pins transmitter"
+            # warning for that, which is false here and would repeat for
+            # every fallback station (~77) on every build.
+            audible = {}
+            for candidate in candidates:
+                audible.setdefault(candidate.uuid, candidate)
+            tx = next((audible[uuid] for uuid in tx_order if uuid in audible), None)
+            if tx is None:
                 preview.skipped.append({
                     "station_id": station.id, "station_name": station.name,
-                    "reason": "the pinned transmitter is not in the station's antenna range",
+                    "reason": (
+                        "none of the campaign's transmitters is in the station's antenna range"
+                        if len(tx_order) > 1 else
+                        "the pinned transmitter is not in the station's antenna range"
+                    ),
                 })
                 continue
-        tx = pick_transmitter(candidates, transmitter_uuid) if candidates else None
-        if tx is None:
-            preview.skipped.append({
-                "station_id": station.id, "station_name": station.name,
-                "reason": "no transmitter for this satellite is in the station's antenna range",
-            })
-            continue
+        else:
+            tx = pick_transmitter(candidates, None) if candidates else None
+            if tx is None:
+                preview.skipped.append({
+                    "station_id": station.id, "station_name": station.name,
+                    "reason": "no transmitter for this satellite is in the station's antenna range",
+                })
+                continue
 
         predictor = Predictor(station.lat, station.lng, station.altitude_m)
         stale = predictor.load_tles({mission_norad: tle}, now=now)
@@ -258,11 +333,16 @@ def build_campaign(
             station=station, tx=tx, calendar=None,
             passes=sorted(gated, key=lambda pair: pair[0].aos),
             allowance=allowance,
+            booked_earlier=(booked_counts or {}).get(station.id, 0),
+            # "Fallback" is relative to a chosen primary. With none (the auto
+            # path) there is nothing to fall back FROM, so nothing is one.
+            is_fallback=bool(transmitter_uuid) and tx.uuid != transmitter_uuid,
         ))
 
     # Every non-excluded station had its geometry examined, so this is now
     # both the honest number and the whole network.
     preview.considered_stations = examined
+    preview.stations_reachable = len(work)
 
     def load_calendar(entry: "_StationWork") -> None:
         """Fetch one station's calendar and drop the passes it rules out.
@@ -273,22 +353,37 @@ def build_campaign(
         raises _CalendarUnreadable: that one station is left out and the run
         carries on with everyone else.
         """
-        try:
-            bookings = network.future_bookings(entry.station.id, now=now)
-        except RateLimitedError:
-            raise
-        except Exception as exc:   # a slow/unavailable station must not abort the whole campaign
-            # Fail CLOSED. A station whose existing schedule we cannot read is a
-            # station we must not schedule on: reading it as an empty calendar
-            # makes every pass look free and books blind over whatever it had
-            # already agreed to record. Observed in the wild: serial reads, an
-            # HTTP 429 part way through, and 86 stations in one run went down
-            # that empty-calendar path at once. Calendars are read lazily now,
-            # so this raises rather than `continue`s; _select_spread marks the
-            # station unreadable and gives it this reason.
-            log.warning("could not read existing bookings for station %d: %s",
-                        entry.station.id, exc)
-            raise _CalendarUnreadable(str(exc)) from exc
+        station_id = entry.station.id
+        if calendar_cache is not None and station_id in calendar_cache:
+            # A hit costs no request at all. That is the whole point: a looped
+            # commit rebuilds the plan every round, and re-reading every
+            # calendar each time is what used to spend the read budget - the
+            # loop, not any single build, was what ran it out. What we booked
+            # ourselves since the cached read is not missing from the picture:
+            # recent_attempts is overlaid below on every build.
+            bookings = calendar_cache[station_id]
+            preview.calendars_cached += 1
+        else:
+            try:
+                bookings = network.future_bookings(station_id, now=now)
+            except RateLimitedError:
+                raise
+            except Exception as exc:   # a slow/unavailable station must not abort the whole campaign
+                # Fail CLOSED. A station whose existing schedule we cannot read is a
+                # station we must not schedule on: reading it as an empty calendar
+                # makes every pass look free and books blind over whatever it had
+                # already agreed to record. Observed in the wild: serial reads, an
+                # HTTP 429 part way through, and 86 stations in one run went down
+                # that empty-calendar path at once. Calendars are read lazily now,
+                # so this raises rather than `continue`s; _select_spread marks the
+                # station unreadable and gives it this reason. Nothing is cached
+                # for it either, so the next build asks again.
+                log.warning("could not read existing bookings for station %d: %s",
+                            station_id, exc)
+                raise _CalendarUnreadable(str(exc)) from exc
+            preview.calendars_read += 1
+            if calendar_cache is not None:
+                calendar_cache[station_id] = list(bookings)
         # buffer_s was hardcoded to 0.0 here, which threw away the rotator-reset
         # margin (DEFAULT_BUFFER_S, 30 s) that the single-station planner honours
         # via selector.select(). Two observations that merely touch are not
@@ -296,7 +391,32 @@ def build_campaign(
         calendar = Calendar(buffer_s=buffer_s)
         for booking in bookings:
             calendar.add(booking.start, booking.end)
-        for start, end in (recent_attempts or {}).get(entry.station.id, []):
+        if cap_counts_existing:
+            # max_per_station is "observations of this satellite per station
+            # in the 48 h window", not "per click". Counting only what THIS
+            # build adds meant every second click, and every auto-timer run,
+            # stacked another full max_per_station onto each station on top of
+            # what the last one had booked; counting what is already there
+            # makes a repeat run top up instead. Only this satellite counts -
+            # the owner's other work is a conflict, not a share of our cap -
+            # and only inside [window_start, hard_end], because a cached
+            # calendar can still list observations that have since ended.
+            #
+            # recent_attempts is NOT counted: it holds everything we tried,
+            # refusals included, so counting it would under-book on the word
+            # of our own failed requests. It stays a conflict overlay only.
+            # booked_counts (a looped commit's earlier rounds) is already
+            # subtracted from the allowance in phase 1; with a calendar cache
+            # read before the commit's first round the two are disjoint. A
+            # fresh re-read mid-loop could see round 1's bookings in both
+            # places - that errs towards booking fewer, never more.
+            entry.existing_mission = sum(
+                1 for booking in bookings
+                if booking.norad_cat_id == mission_norad
+                and booking.start < hard_end and booking.end > window_start
+            )
+            entry.allowance -= entry.existing_mission
+        for start, end in (recent_attempts or {}).get(station_id, []):
             calendar.add(start, end)
         entry.calendar = calendar
         # Carried WITH the trimmed end, never p.los: see VENDORED.md note 13.
@@ -334,6 +454,17 @@ ELEVATION_BAND_FLOORS = (75.0, 60.0, 45.0, 30.0, 15.0, 0.0)
 # that the histogram still flattens across a network whose stations have very
 # different best-available geometry, and narrow enough that no station ever
 # trades a good pass for a horizon-scraper.
+#
+# It binds a station's FIRST pick in a build only. The bound exists so that a
+# station's only booking is never a grazer; once the station has its good
+# pass, holding its 2nd and 3rd picks to the same bound is what starved the
+# low bands, against the operator's stated aim of an even spread over 90..0.
+# Measured offline on a cached copy of the live catalogue (telemetry first,
+# digipeater fallback, 3 per station, 600 bookings, empty calendars): the pool
+# held 166 passes in the 15..0 band but only 11 were within 20 degrees of
+# their own station's best, so with every pick bounded the plan's bands came
+# out 166/144/106/87/72/25, high to low. Bounding only the first pick, the
+# same pool and timestamp give 101/100/103/100/100/96.
 MAX_ELEVATION_SACRIFICE_DEG = 20.0
 
 
@@ -342,6 +473,27 @@ def _band_of(max_el: float) -> int:
         if max_el >= floor:
             return index
     return len(ELEVATION_BAND_FLOORS) - 1
+
+
+# "90-75", "75-60", ... "15-0": one label per ELEVATION_BAND_FLOORS entry, the
+# band's ceiling (the previous floor, or zenith) down to its floor. Derived
+# rather than written out so the labels cannot drift from the bands.
+ELEVATION_BAND_LABELS = tuple(
+    f"{ceiling:g}-{floor:g}"
+    for ceiling, floor in zip((90.0, *ELEVATION_BAND_FLOORS[:-1]), ELEVATION_BAND_FLOORS)
+)
+
+
+def band_counts_payload(elevations) -> list[dict]:
+    """[{"band": "90-75", "count": n}, ...] over max elevations, every band
+    listed high to low even when empty, so a thin band shows as a zero rather
+    than disappearing. Public so the commit result can label accepted bookings
+    with exactly the bands the preview used."""
+    counts = [0] * len(ELEVATION_BAND_FLOORS)
+    for max_el in elevations:
+        counts[_band_of(float(max_el))] += 1
+    return [{"band": label, "count": count}
+            for label, count in zip(ELEVATION_BAND_LABELS, counts)]
 
 
 class _CalendarUnreadable(Exception):
@@ -365,8 +517,17 @@ class _StationWork:
     passes: list
     # How many more bookings this station may take in THIS build: the per-station
     # cap minus what a looped commit has already given it in earlier rounds
-    # (booked_counts). Selection never gives a station more than this.
+    # (booked_counts) and, once its calendar is loaded with cap_counts_existing,
+    # minus the observations of this satellite already on it in the window.
+    # Selection never gives a station more than this.
     allowance: int
+    # booked_counts for this station, kept only to explain a capped station.
+    booked_earlier: int = 0
+    # Observations of this satellite its calendar already held in the window;
+    # set by load_calendar when cap_counts_existing is on.
+    existing_mission: int = 0
+    # Its transmitter is a fallback rather than the campaign's primary.
+    is_fallback: bool = False
 
 
 def _select_spread(
@@ -391,7 +552,8 @@ def _select_spread(
     2. ELEVATION SECOND. Within a round, each station contributes the pass
        from whichever band is currently least represented in the plan, so the
        90..0 range fills evenly instead of the plan becoming all high-elevation
-       passes from well-placed stations.
+       passes from well-placed stations. A station's first pick is held within
+       MAX_ELEVATION_SACRIFICE_DEG of its own best; later picks are not.
 
     The station order is rotated per RUN, not just per round, and that detail
     is load-bearing. Rotating only by round number looks fair but is not: when
@@ -424,10 +586,12 @@ def _select_spread(
     # Calendars are read lazily: `remaining` gains a station only once its
     # calendar has been loaded and its conflicting passes removed. That keeps
     # reads close to the number of stations actually visited - roughly the
-    # number booked - instead of one per station on the network.
+    # number booked, plus any found already at their cap - instead of one per
+    # station on the network.
     remaining: dict[int, list] = {}
     unusable: set[int] = set()          # read, and every pass conflicted
     unreadable: dict[int, str] = {}     # read attempted and failed (not a throttle)
+    capped: set[int] = set()            # read, and its calendar already fills its cap
     picks: dict[int, int] = {}          # bookings given to each station in this build
     band_counts = {index: 0 for index in range(len(ELEVATION_BAND_FLOORS))}
     stop_reading = False
@@ -446,7 +610,7 @@ def _select_spread(
         nonlocal stop_reading
         if index in remaining:
             return True
-        if index in unusable or index in unreadable or stop_reading:
+        if index in unusable or index in unreadable or index in capped or stop_reading:
             return False
         entry = work[index]
         if load_calendar is not None:
@@ -468,10 +632,17 @@ def _select_spread(
             except _CalendarUnreadable as exc:
                 unreadable[index] = str(exc)
                 return False
-            preview.calendars_read += 1
+            # calendars_read / calendars_cached are counted by the loader,
+            # which is the only thing that knows whether a request was sent.
         if entry.calendar is None:
             # No loader means nothing is known to be booked there yet.
             entry.calendar = Calendar(buffer_s=0.0)
+        if entry.allowance <= 0:
+            # Its calendar already holds its whole share of this satellite
+            # (cap_counts_existing). Checked before the passes: a station at
+            # its cap is at its cap whether or not a pass is still free.
+            capped.add(index)
+            return False
         if not entry.passes:
             unusable.add(index)
             return False
@@ -501,15 +672,20 @@ def _select_spread(
             if not available:
                 continue
 
-            # Least-represented band first, but only among passes worth having.
-            # Restricting to within MAX_ELEVATION_SACRIFICE_DEG of this
-            # station's own best is what stops band balancing paying an
-            # unbounded price in elevation; see the constant's note.
-            best_el = max(p.max_el for p, _end in available)
-            worth_having = [
-                pair for pair in available
-                if pair[0].max_el >= best_el - MAX_ELEVATION_SACRIFICE_DEG
-            ]
+            # Least-represented band first. For the station's first pick in
+            # this build, only among passes within MAX_ELEVATION_SACRIFICE_DEG
+            # of its own best: that is what stops band balancing paying an
+            # unbounded price in elevation for the one booking a station may
+            # end up with. Its later picks may fill whatever band is thinnest;
+            # see the constant's note.
+            if picks.get(index, 0) == 0:
+                best_el = max(p.max_el for p, _end in available)
+                worth_having = [
+                    pair for pair in available
+                    if pair[0].max_el >= best_el - MAX_ELEVATION_SACRIFICE_DEG
+                ]
+            else:
+                worth_having = available
             chosen = min(
                 worth_having,
                 key=lambda pair: (band_counts[_band_of(pair[0].max_el)],
@@ -525,6 +701,8 @@ def _select_spread(
                 station_id=entry.station.id, station_name=entry.station.name,
                 transmitter_uuid=entry.tx.uuid, start=best.aos, end=end,
                 max_elevation_deg=best.max_el,
+                transmitter_description=getattr(entry.tx, "description", "") or "",
+                is_fallback=entry.is_fallback,
             ))
             entry.calendar.add(best.aos, end)
             picks[index] = picks.get(index, 0) + 1
@@ -550,7 +728,7 @@ def _select_spread(
         preview.stopped_early["unread_stations"] = sum(
             1 for index in range(len(work))
             if index not in remaining and index not in unusable
-            and index not in unreadable
+            and index not in unreadable and index not in capped
         )
     booked_ids = {item.station_id for item in preview.items}
     for index, entry in enumerate(work):
@@ -559,12 +737,17 @@ def _select_spread(
         # No "had a free pass but lost on budget" case any more. A calendar is
         # loaded only for a station about to be picked, its passes are already
         # filtered against that calendar, so its first pick cannot conflict -
-        # every loaded station books at least once. Budget casualties are
-        # therefore all stations that were never read. (Mutation testing found
-        # the old branch unreachable: rewording it changed nothing any test,
-        # or any run, could observe.)
+        # every loaded station with allowance left books at least once. Budget
+        # casualties are therefore all stations that were never read.
+        # (Mutation testing found the old branch unreachable: rewording it
+        # changed nothing any test, or any run, could observe.)
         if index in unreadable:
             reason = f"could not read this station's existing bookings ({unreadable[index]})"
+        elif index in capped:
+            reason = (f"already has {entry.existing_mission} observation(s) of this satellite "
+                      f"booked in the window (per-station cap {max_per_station})")
+            if entry.booked_earlier:
+                reason += f", plus {entry.booked_earlier} from earlier rounds of this commit"
         elif index in unusable:
             reason = "every qualifying pass conflicts with an existing booking"
         elif preview.stopped_early is not None:
@@ -577,10 +760,38 @@ def _select_spread(
         })
 
 
+def _transmitters_payload(items: list[CampaignItem], primary: str | None,
+                          fallbacks: list[str]) -> list[dict]:
+    """Per-transmitter station and booking counts over the plan, primary
+    first, then the fallbacks in the order they were offered - the order the
+    operator reads "how much of this is the weaker downlink" in. Anything
+    else (the auto path) follows, busiest first."""
+    rows: dict[str, dict] = {}
+    stations: dict[str, set] = {}
+    for item in items:
+        row = rows.setdefault(item.transmitter_uuid, {
+            "uuid": item.transmitter_uuid,
+            "description": item.transmitter_description,
+            "fallback": item.is_fallback,
+            "stations": 0,
+            "bookings": 0,
+        })
+        row["bookings"] += 1
+        stations.setdefault(item.transmitter_uuid, set()).add(item.station_id)
+    for uuid, row in rows.items():
+        row["stations"] = len(stations[uuid])
+    order = [uuid for uuid in [primary, *fallbacks] if uuid]
+    return sorted(rows.values(), key=lambda row: (
+        order.index(row["uuid"]) if row["uuid"] in order else len(order),
+        -row["bookings"], row["uuid"],
+    ))
+
+
 def _campaign_preview_payload(preview: CampaignPreview) -> dict:
     """The plain-dict/JSON shape CampaignService publishes over the API and
     caches to disk - mirrors report.py's _selection_payload() for the
     single-station planner."""
+    params = preview.params or {}
     return {
         "status": "ok",
         "generated_utc": preview.generated_utc.isoformat(),
@@ -592,6 +803,8 @@ def _campaign_preview_payload(preview: CampaignPreview) -> dict:
                 "station_id": item.station_id,
                 "station_name": item.station_name,
                 "transmitter_uuid": item.transmitter_uuid,
+                "transmitter_description": item.transmitter_description,
+                "fallback": item.is_fallback,
                 "start": item.start.isoformat(),
                 "end": item.end.isoformat(),
                 "max_elevation_deg": round(item.max_elevation_deg, 1),
@@ -600,6 +813,21 @@ def _campaign_preview_payload(preview: CampaignPreview) -> dict:
         ],
         "skipped": preview.skipped,
         "calendars_read": preview.calendars_read,
+        "calendars_cached": preview.calendars_cached,
+        "stations_reachable": preview.stations_reachable,
+        "stations_booked": len({item.station_id for item in preview.items}),
+        # From the elevations exactly as the rows above publish them (rounded),
+        # because the commit result can only band its accepted rows from those
+        # published values. Banding the unrounded ones here would let a 74.96
+        # pass count as 75-60 in the preview and 90-75 once accepted.
+        "band_counts": band_counts_payload(
+            round(item.max_elevation_deg, 1) for item in preview.items
+        ),
+        "transmitters": _transmitters_payload(
+            preview.items, params.get("transmitter_uuid"),
+            list(params.get("fallback_transmitter_uuids") or []),
+        ),
+        "params": dict(params),
         # None when the plan is complete. Anything else means the run was cut
         # short and the plan covers only part of the network - the UI must say
         # so rather than let a truncated plan pass for a small network.

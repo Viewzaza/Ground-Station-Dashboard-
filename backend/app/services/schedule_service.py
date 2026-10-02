@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..config import Settings
+from ..config import CAMPAIGN_TRANSMITTER_POLICIES, Settings
 from ..util.nextfire import next_fire, normalize_times
 from . import autoscheduler_cli
 from ..vendor.autoscheduler.cache import Cache
@@ -57,6 +57,9 @@ _CONFIG_FIELDS: dict[str, tuple] = {
     "campaign_max_per_station": (int, True),
     "campaign_max_total": (int, True),
     "campaign_loop_until_exhausted": (bool, False),
+    # Clears on falsy: there is no meaningful "empty" policy, so blanking it
+    # means "back to GS_CAMPAIGN_TRANSMITTER_POLICY", like the caps above.
+    "campaign_transmitter_policy": (str, True),
     "auto_run_enabled": (bool, False),
     "auto_run_mode": (str, False),
     "auto_run_times": (normalize_times, False),
@@ -245,6 +248,23 @@ class ScheduleService:
         """Off by default: one commit is one batch of at most max_total."""
         return bool(self._config.get("campaign_loop_until_exhausted", False))
 
+    def campaign_transmitter_policy(self) -> str:
+        """Which KNACKSAT-2 downlink(s) the campaign books - see config.py's
+        campaign_transmitter_uuid note for what each policy means.
+
+        A hand-edited config (or a value from a newer build) that is not one
+        of the three falls back to the environment's seed rather than being
+        passed through for CampaignService to guess at. If that seed is itself
+        unrecognised, the answer is "pinned": the narrowest policy, so a typo
+        can shrink a campaign but never silently widen it onto the weaker
+        downlink - and never stop the backend from starting.
+        """
+        stored = str(self._config.get("campaign_transmitter_policy") or "").strip().lower()
+        if stored in CAMPAIGN_TRANSMITTER_POLICIES:
+            return stored
+        seed = (self.s.campaign_transmitter_policy or "").strip().lower()
+        return seed if seed in CAMPAIGN_TRANSMITTER_POLICIES else "pinned"
+
     def auto_run_enabled(self) -> bool:
         """Defaults to False: a fresh install must not book unattended."""
         return bool(self._config.get("auto_run_enabled", False))
@@ -333,6 +353,12 @@ class ScheduleService:
                 "campaign_max_per_station": self.campaign_max_per_station(),
                 "campaign_max_total": self.campaign_max_total(),
                 "campaign_loop_until_exhausted": self.campaign_loop_until_exhausted(),
+                "campaign_transmitter_policy": self.campaign_transmitter_policy(),
+                # Read-only: set by GS_CAMPAIGN_TRANSMITTER_UUID and
+                # GS_CAMPAIGN_FALLBACK_TRANSMITTER_UUIDS only. Returned so the
+                # panel can say which downlinks a policy actually means.
+                "campaign_transmitter_uuid": self.s.campaign_transmitter_uuid,
+                "campaign_fallback_transmitter_uuids": self.s.campaign_fallback_uuids,
                 # --- station auto run ---
                 "auto_run_enabled": self.auto_run_enabled(),
                 "auto_run_mode": self._config.get("auto_run_mode") or "times",

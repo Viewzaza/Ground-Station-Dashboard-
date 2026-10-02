@@ -17,13 +17,16 @@ Three details bite if you get them wrong:
 
 Reads are rate-limited by the server and writes are not; see
 ``RateLimitedSession`` below for the published budgets and for what this
-client does to stay inside them.
+client does to stay inside them. Station calendars are read from
+``/api/jobs/``, which is not rate-limited at all, whenever it answers; see
+``NetworkClient.future_bookings``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import threading
 import time
 from collections import Counter, deque
@@ -52,6 +55,7 @@ API_DATETIME = "%Y-%m-%d %H:%M:%S"
 #
 #     /api/observations/  list    60/hour anonymous, 240/hour with a token
 #     /api/stations/      list   256/hour anonymous, unthrottled with a token
+#     /api/jobs/          list   not throttled at all (see JOBS_LIST_PER_HOUR)
 #
 # Only the `list` action carries a throttle class - fetching one observation
 # by id is not throttled - and both observation throttles return early for
@@ -64,6 +68,32 @@ OBSERVATION_LIST_PER_HOUR_AUTH = 240
 # an AnonRateThrottle - but there is no reason to burst harder merely because
 # a token is present, so the anonymous ceiling applies either way.
 STATION_LIST_PER_HOUR = 256
+# /api/jobs/ has NO server-side budget: JobView (network/api/views.py) sets no
+# throttle_classes, and the project sets no DEFAULT_THROTTLE_CLASSES, so DRF's
+# default of none applies. This number is a courtesy ceiling of our own, not a
+# published rate. It is sized for what a full-network campaign really does -
+# ~222 calendars for a preview and as many again for its verify - several
+# times over in one hour, while still being a hard stop if a bug ever puts the
+# read in a loop. For scale: the dashboard's own poller already reads /jobs/
+# for 5024 every 60 s over httpx, outside this gate, and in 1147 responses saw
+# not one 429.
+JOBS_LIST_PER_HOUR = 1200
+
+# A calendar read from /jobs/ has somewhere to go when it fails - the
+# /observations/ walk - so it does not get the 90 s DEFAULT_TIMEOUT, which is
+# sized for ?norad_cat_id= queries that really take ~17 s. A station's /jobs/
+# answer measured at a 1.7 s median; 30 s is well over ten times that.
+JOBS_TIMEOUT_S = 30.0
+
+# After this many /jobs/ failures in a row, one client stops trying it and
+# reads calendars from /observations/ straight away - see future_bookings().
+# Each failed jobs read costs up to MAX_RETRIES attempts plus backoff before
+# the fallback even starts (~96 s when the endpoint times out), and a campaign
+# reads ~222 calendars: without this, a /jobs/ outage would add hours to a
+# preview only to end on the same fallback. The count lives on the client, and
+# CampaignService builds a fresh one per preview, commit and verify, so the
+# next operation tries /jobs/ again.
+JOBS_BYPASS_AFTER_FAILURES = 3
 
 # The server counts with a sliding window an hour wide, so we do too. A fixed
 # bucket would let us fire two full budgets back to back across its boundary.
@@ -87,6 +117,15 @@ MAX_THROTTLE_RETRIES = 2
 
 # Used only when a 429 arrives without a `Retry-After` we can read.
 THROTTLE_BACKOFF_BASE_S = 5.0
+
+# What satnogs-network's create_new_observation() raises as
+# ObservationOverlapError and the view returns as HTTP 409: "One or more
+# observations of station {id} overlap with the already scheduled ones." It
+# names the FIRST station, in item order, whose item overlaps something already
+# on that station's calendar - by anyone, touching intervals included. Every
+# item is validated before any is saved, so a batch refused this way created
+# nothing. See schedule().
+_OVERLAP_409 = re.compile(r"observations of station (\d+) overlap", re.IGNORECASE)
 
 
 class RateLimitedError(SatnogsHTTPError):
@@ -164,6 +203,7 @@ class RateLimitedSession:
             "observations": (OBSERVATION_LIST_PER_HOUR_AUTH if authenticated
                              else OBSERVATION_LIST_PER_HOUR_ANON),
             "stations": STATION_LIST_PER_HOUR,
+            "jobs": JOBS_LIST_PER_HOUR,
         }
         # With a share_key the count lives in a process-wide gate that every
         # client on the same credential uses; without one (tests, one-offs) it
@@ -186,6 +226,11 @@ class RateLimitedSession:
             # POST and PUT are explicitly exempted by the server's own throttle
             # classes, so a booking must never be delayed or refused by us.
             return None
+        # Checked first so that a /jobs/ read is only ever charged to its own
+        # courtesy budget, never to the observation feed's 240/hour - keeping
+        # calendar reads off that budget is the whole point of reading /jobs/.
+        if "/jobs" in url:
+            return "jobs"
         if "/observations" in url:
             return "observations"
         if "/stations" in url:
@@ -441,6 +486,28 @@ class NetworkClient:
             # clients are built - see _Gate.
             share_key=gate_key(settings.network_base_url, settings.network_token),
         )
+        # Calendar reads from /api/jobs/ get a session of their own that is
+        # ANONYMOUS - built with no token, so no Authorization header, ever,
+        # whatever token the client above carries. With the owner's token,
+        # GET /api/jobs/?ground_station=<own station> is not a read at all to
+        # the server: JobView.list treats it as that station's client polling
+        # for work and saves last_seen=now, so reading 5024's calendar with our
+        # token would mark the station alive whether it is or not. Anonymous
+        # costs nothing here, because /jobs/ has no throttle to spend.
+        #
+        # Its gate key carries no token either, so every client in the process
+        # - token or none - shares the one JOBS_LIST_PER_HOUR courtesy budget.
+        self.jobs_session = RateLimitedSession(
+            make_session(""),
+            authenticated=False,
+            share_key=gate_key(settings.network_base_url + "#jobs-anon", ""),
+        )
+        # Which source answered each future_bookings() call: "jobs" or
+        # "observations". Surfaced in the campaign payloads, so that a run
+        # quietly falling back to the budgeted feed is visible, not silent.
+        self.calendar_sources: Counter = Counter()
+        # Consecutive /jobs/ failures; see JOBS_BYPASS_AFTER_FAILURES.
+        self._jobs_failures = 0
 
     # -- reads ---------------------------------------------------------------
 
@@ -484,25 +551,137 @@ class NetworkClient:
                 log.warning("skipping unparseable station %r: %s", row.get("id"), exc)
         return [s for s in stations if s.schedulable]
 
-    def future_bookings(self, station_id: int, now: datetime | None = None) -> list[Booking]:
+    def future_bookings(self, station_id: int, now: datetime | None = None,
+                        source: str = "auto") -> list[Booking]:
         """Every observation on this station that has not yet STARTED.
 
-        Not "has not ended" - the stop predicate below ends the walk at the
-        first observation whose start is already past, and does not yield it.
-        An observation currently in progress is therefore both excluded and a
-        hard stop, so nothing after it in the feed is seen either. That is
-        fine for the two things that use this - checking for conflicts before
-        booking, and reconciling a run's own just-booked future passes - but
-        it is not a picture of the live calendar, and code that needs one has
-        to ask differently.
+        Not "has not ended": an observation already in progress is left out by
+        both sources below. That is fine for the two things that use this -
+        checking for conflicts before booking, and reconciling a run's own
+        just-booked future passes - and a booking that would collide with one
+        in progress is still refused by the server's own overlap check (HTTP
+        409, which counts everything with end > now). But it is not a picture
+        of the live calendar, and code that needs one has to ask differently.
+
+        ``source`` picks where the answer comes from:
+
+        * ``"auto"`` (the default) reads ``/api/jobs/`` anonymously and, if
+          that fails in any way, walks ``/api/observations/`` instead, exactly
+          as this always did. A campaign reads ~222 calendars at ~1.2-1.33
+          observation pages each, which is more than the 240/hour the token
+          allows; the same calendars from /jobs/ cost none of it.
+        * ``"jobs"`` reads /jobs/ only and lets its failure escape.
+        * ``"observations"`` walks the observation feed only, on the token
+          session and its budget, and may raise RateLimitedError as before.
+
+        Whichever source produced the answer is counted in
+        ``calendar_sources``.
+        """
+        if source not in ("auto", "jobs", "observations"):
+            raise ValueError(f"unknown calendar source {source!r}")
+        now = now or datetime.now(timezone.utc)
+
+        if source == "jobs" or (
+            source == "auto" and self._jobs_failures < JOBS_BYPASS_AFTER_FAILURES
+        ):
+            try:
+                bookings = self._jobs_calendar(station_id, now)
+            except (SatnogsHTTPError, ValueError) as exc:
+                # SatnogsHTTPError covers RateLimitedError (our courtesy budget
+                # spent, or a server 429) as well as any HTTP or transport
+                # failure; ValueError covers JSON we could not parse and rows
+                # we could not read. Every one of them means only that /jobs/
+                # did not answer usefully - the observation feed still can.
+                self._jobs_failures += 1
+                if source == "jobs":
+                    raise
+                log.warning(
+                    "could not read station %d's calendar from /jobs/ (%s); "
+                    "reading it from /observations/ instead", station_id, exc,
+                )
+                if self._jobs_failures == JOBS_BYPASS_AFTER_FAILURES:
+                    log.warning(
+                        "/jobs/ has failed %d times in a row; this client reads "
+                        "the remaining calendars from /observations/ directly",
+                        self._jobs_failures,
+                    )
+            else:
+                self._jobs_failures = 0
+                self.calendar_sources["jobs"] += 1
+                log.info("station %d has %d observation(s) already booked (from /jobs/)",
+                         station_id, len(bookings))
+                return bookings
+
+        bookings = self._observations_calendar(station_id, now)
+        self.calendar_sources["observations"] += 1
+        log.info("station %d has %d observation(s) already booked", station_id, len(bookings))
+        return bookings
+
+    def _jobs_calendar(self, station_id: int, now: datetime) -> list[Booking]:
+        """One station's not-yet-started observations, from /api/jobs/.
+
+        JobView's queryset is `start__gte=now()` and its list() serializes the
+        whole filtered queryset in one plain JSON list - no cursor, no throttle.
+        It is the read the official auto-scheduler uses for exactly this (1147
+        live answers for 5024, none paginated). Going through paginate() anyway
+        costs nothing and means a Link header, should one ever appear, is
+        followed for up to five pages instead of the first page being taken for
+        the whole calendar. Anything missed past that is still caught by the
+        server's own 409 on booking.
+
+        Rows are FILTERED, not walked to a stop like the observation feed:
+        nothing here depends on the order /jobs/ happens to return. A row on
+        another station is dropped in case the ground_station filter is ever
+        ignored server-side - the whole network's jobs read as one station's
+        calendar would block every pass it has. A row that cannot be parsed
+        fails the whole read, as ValueError: a half-understood answer is not a
+        calendar to book against, and the caller has a fallback that is.
+        """
+        url = f"{self.s.network_base_url}/jobs/"
+        params = {"ground_station": station_id, "format": "json"}
+        bookings: list[Booking] = []
+        for raw in paginate(self.jobs_session, url, params=params, max_pages=5,
+                            timeout=JOBS_TIMEOUT_S):
+            try:
+                row_station = raw.get("ground_station")
+                if row_station is not None and int(row_station) != station_id:
+                    continue
+                start = parse_api_datetime(raw["start"])
+                if start < now:
+                    continue
+                bookings.append(
+                    Booking(
+                        id=int(raw["id"]),
+                        norad_cat_id=int(raw.get("norad_cat_id") or 0),
+                        start=start,
+                        end=parse_api_datetime(raw["end"]),
+                        # /jobs/ rows carry no status; everything it lists is
+                        # by construction still to come.
+                        status=raw.get("status") or "future",
+                    )
+                )
+            except (KeyError, TypeError, AttributeError) as exc:
+                # TypeError/AttributeError: a row that is not a dict, a null
+                # where a timestamp belongs, or a naive timestamp compared with
+                # an aware `now`. ValueError already propagates as itself.
+                raise ValueError(f"unreadable /jobs/ row for station {station_id}: "
+                                 f"{type(exc).__name__}: {exc}") from exc
+        return bookings
+
+    def _observations_calendar(self, station_id: int, now: datetime) -> list[Booking]:
+        """One station's not-yet-started observations, from the observation feed.
+
+        The stop predicate below ends the walk at the first observation whose
+        start is already past, and does not yield it. An observation currently
+        in progress is therefore both excluded and a hard stop, so nothing
+        after it in the feed is seen either.
 
         The feed is ordered by start descending - the furthest-future
         observation first - which is what makes that early stop safe: every
         future observation has already been yielded by the time we reach a
-        past one. It keeps this to two or three pages instead of the station's
-        entire history.
+        past one. It keeps this to floor(N/25)+1 pages - measured at ~1.2-1.33
+        a station - instead of the station's entire history.
         """
-        now = now or datetime.now(timezone.utc)
         url = f"{self.s.network_base_url}/observations/"
         params = {"ground_station": station_id, "format": "json"}
 
@@ -523,7 +702,6 @@ class NetworkClient:
                 )
             except (KeyError, ValueError) as exc:
                 log.warning("skipping an unparseable observation: %s", exc)
-        log.info("station %d has %d observation(s) already booked", station_id, len(bookings))
         return bookings
 
     def observation_history(self, station_id: int, pages: int = 12) -> Counter:
@@ -566,17 +744,38 @@ class NetworkClient:
     def schedule(self, items: list[dict], execute: bool = False) -> ScheduleResult:
         """Book observations. Without ``execute`` this does nothing at all.
 
-        On a batch rejection we retry one at a time, because the API fails the
-        whole list if any single entry is bad - usually a pass that somebody
-        else booked in the seconds since we read the calendar - and losing
-        nineteen good bookings to one stale one is not a good trade.
+        The API fails the whole list if any single entry is bad - usually a
+        pass that somebody else booked since we read the calendar - and losing
+        nineteen good bookings to one stale one is not a good trade. What
+        happens next depends on why the batch was refused:
 
-        This is the *only* place ``settings.network_token`` matters anywhere
-        in this package - every read call (``get_station``, ``future_bookings``,
-        ``observation_history``) is unauthenticated. The dashboard's
-        ScheduleService never calls this method (it only ever calls ``plan()``,
-        never ``schedule --execute``), so a network token entered there has no
-        effect and booking stays off regardless of what is configured.
+        * HTTP 409 naming a station ("One or more observations of station N
+          overlap with the already scheduled ones"): only station N's items are
+          sent one at a time, and everything else goes back as a batch - again
+          and again while further 409s keep naming stations. The old rule sent
+          EVERY item on its own after any rejection; the 2026-09-22 run had 37
+          of 150 refused, all such 409s, so at 600 items one stale slot meant
+          about 600 sequential POSTs. Resubmitting the rest is safe because the
+          server validates every item before it saves any, so a refused batch
+          created nothing. Each round drops one whole station, so the rounds
+          run out after at most one batch per station; a hard cap of
+          (distinct stations + 1) batch attempts is enforced as well, falling
+          back to one at a time past it, so no edit can turn this into a loop.
+        * Any other refusal (a 400, a 409 that names no station): every item
+          still pending is sent one at a time, as before.
+        * No reliable answer (SatnogsOutcomeUnknown), for a batch or a single
+          item: those items may have landed. They go to ``uncertain_items`` and
+          are never sent again - resending is how 3 intended bookings once
+          became 18 rows.
+        * No connection at all: nothing more is sent, and the error says how
+          many items that left unsent.
+
+        The token is on ``self.session`` and so goes with every request sent
+        through it, reads included - it is what buys the 240/hour observation
+        budget. This method is the only one that WRITES with it, and
+        CampaignService._submit_batch is the dashboard's one caller with
+        ``execute=True``. Calendar reads from /jobs/ never carry it; see
+        ``jobs_session``.
         """
         result = ScheduleResult(submitted=len(items))
         if not items:
@@ -591,67 +790,142 @@ class NetworkClient:
             )
 
         url = f"{self.s.network_base_url}/observations/"
-        try:
-            request(self.session, "POST", url, json_body=items)
-        except SatnogsOutcomeUnknown as exc:
-            # Caught before SatnogsHTTPError, which it subclasses. The batch
-            # may have been applied, so the one-at-a-time fallback below - which
-            # exists for a batch the server REJECTED - would re-create every
-            # observation that did land. Stop, and say what is not known.
-            log.error("booking outcome unknown for all %d item(s): %s", len(items), exc)
-            result.uncertain_items = list(items)
-            result.errors.append(
-                f"OUTCOME UNKNOWN for all {len(items)} submitted item(s): {exc}. "
-                "Some or all may be booked. Do NOT resubmit - cross-check the "
-                "station calendars first."
-            )
-            return result
-        except SatnogsHTTPError as exc:
-            if exc.status is None:
-                # No status means the connection never completed on any
-                # attempt, so nothing reached the server. Trying each item on
-                # its own would only fail the same way len(items) more times.
-                log.warning("could not reach SatNOGS to submit %d item(s): %s", len(items), exc)
+        pending = list(items)
+        batches_left = len({_station_of(item) for item in items}) + 1
+        while pending:
+            batches_left -= 1
+            try:
+                request(self.session, "POST", url, json_body=pending)
+            except SatnogsOutcomeUnknown as exc:
+                # Caught before SatnogsHTTPError, which it subclasses. The batch
+                # may have been applied, so the one-at-a-time fallback below - which
+                # exists for a batch the server REJECTED - would re-create every
+                # observation that did land. Stop, and say what is not known.
+                log.error("booking outcome unknown for all %d item(s): %s", len(pending), exc)
+                result.uncertain_items.extend(pending)
                 result.errors.append(
-                    f"could not reach SatNOGS to submit {len(items)} item(s): {exc}. "
-                    "Nothing was booked."
+                    f"OUTCOME UNKNOWN for all {len(pending)} submitted item(s): {exc}. "
+                    "Some or all may be booked. Do NOT resubmit - cross-check the "
+                    "station calendars first."
                 )
-                return result
-            log.warning("the batch was rejected (%s); retrying one at a time", exc.status)
-            log.debug("batch rejection body: %s", exc.body)
-            for position, item in enumerate(items):
-                where = (f"station {item.get('ground_station')} {item['start']} "
-                         f"transmitter {item['transmitter_uuid']}")
-                try:
-                    request(self.session, "POST", url, json_body=[item])
-                except SatnogsOutcomeUnknown as single:
-                    result.uncertain_items.append(item)
-                    result.errors.append(f"{where}: OUTCOME UNKNOWN - {single}")
-                except SatnogsHTTPError as single:
-                    if single.status is None:
-                        # No status: the connection never opened on any attempt,
-                        # so SatNOGS became unreachable part-way through. Every
-                        # remaining item would fail the same way, three tries
-                        # each; say what happened to them instead.
-                        rest = items[position:]
+                break
+            except SatnogsHTTPError as exc:
+                if exc.status is None:
+                    # No status means the connection never completed on any
+                    # attempt, so nothing reached the server. Trying each item on
+                    # its own would only fail the same way len(pending) more times.
+                    log.warning("could not reach SatNOGS to submit %d item(s): %s",
+                                len(pending), exc)
+                    if result.accepted or result.uncertain_items:
+                        # A later round: earlier items of this call did land (or
+                        # may have), so "nothing was booked" would be false.
                         result.errors.append(
-                            f"could not reach SatNOGS for the last {len(rest)} item(s) "
-                            f"({single}); they were not sent and nothing was booked "
-                            "for them"
+                            f"could not reach SatNOGS to submit the remaining "
+                            f"{len(pending)} item(s): {exc}. They were not sent and "
+                            "nothing was booked for them."
                         )
-                        break
-                    # The station id is in the message now. With 77 stations in
-                    # a run, "HTTP 409" alone did not say which one refused.
-                    result.errors.append(
-                        f"{where}: HTTP {single.status} {single.body[:300]}"
+                    else:
+                        result.errors.append(
+                            f"could not reach SatNOGS to submit {len(pending)} item(s): "
+                            f"{exc}. Nothing was booked."
+                        )
+                    break
+                named = _overlap_station(exc) if batches_left > 0 else None
+                isolate = [item for item in pending
+                           if named is not None and _station_of(item) == named]
+                if isolate:
+                    rest = [item for item in pending if _station_of(item) != named]
+                    log.warning(
+                        "the batch of %d was refused with HTTP 409 for station %d; "
+                        "sending its %d item(s) one at a time and the other %d as a "
+                        "batch again", len(pending), named, len(isolate), len(rest),
                     )
-                else:
-                    result.accepted += 1
-                    result.accepted_items.append(item)
-        else:
-            result.accepted = len(items)
-            result.accepted_items = list(items)
+                    if not self._submit_one_at_a_time(url, isolate, result, unsent_after=rest):
+                        break
+                    pending = rest
+                    continue
+                # Not a 409 that names a station we sent (or the bound is
+                # spent): no telling which items are at fault, so each one
+                # still pending is tried alone - the pre-existing rule.
+                log.warning("the batch was rejected (%s); retrying one at a time", exc.status)
+                log.debug("batch rejection body: %s", exc.body)
+                self._submit_one_at_a_time(url, pending, result)
+                break
+            else:
+                result.accepted += len(pending)
+                result.accepted_items.extend(pending)
+                break
+
+        # Report in the order the caller sent, whatever order the rounds ran in,
+        # so that the same run always reads back the same way.
+        order = {id(item): position for position, item in enumerate(items)}
+        result.accepted_items.sort(key=lambda item: order.get(id(item), len(order)))
+        result.uncertain_items.sort(key=lambda item: order.get(id(item), len(order)))
         return result
+
+    def _submit_one_at_a_time(self, url: str, queue: list[dict], result: ScheduleResult,
+                              unsent_after: list[dict] | tuple = ()) -> bool:
+        """POST each item of ``queue`` on its own, recording every answer in ``result``.
+
+        Returns False if SatNOGS became unreachable part-way. The error then
+        counts every item that was not sent - the rest of ``queue`` plus
+        ``unsent_after``, the items the caller still meant to send - and the
+        caller must send nothing more.
+        """
+        for position, item in enumerate(queue):
+            where = (f"station {item.get('ground_station')} {item['start']} "
+                     f"transmitter {item['transmitter_uuid']}")
+            try:
+                request(self.session, "POST", url, json_body=[item])
+            except SatnogsOutcomeUnknown as single:
+                result.uncertain_items.append(item)
+                result.errors.append(f"{where}: OUTCOME UNKNOWN - {single}")
+            except SatnogsHTTPError as single:
+                if single.status is None:
+                    # No status: the connection never opened on any attempt,
+                    # so SatNOGS became unreachable part-way through. Every
+                    # remaining item would fail the same way, three tries
+                    # each; say what happened to them instead.
+                    unsent = len(queue) - position + len(unsent_after)
+                    result.errors.append(
+                        f"could not reach SatNOGS for the last {unsent} item(s) "
+                        f"({single}); they were not sent and nothing was booked "
+                        "for them"
+                    )
+                    return False
+                # The station id is in the message now. With 77 stations in
+                # a run, "HTTP 409" alone did not say which one refused.
+                result.errors.append(
+                    f"{where}: HTTP {single.status} {single.body[:300]}"
+                )
+            else:
+                result.accepted += 1
+                result.accepted_items.append(item)
+        return True
+
+
+def _station_of(item: dict) -> int | None:
+    """The station a POST item is for, as the int a 409 names."""
+    try:
+        return int(item.get("ground_station"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _overlap_station(exc: SatnogsHTTPError) -> int | None:
+    """The station an overlap 409 names, or None for any other refusal.
+
+    Only a 409 counts: it is the one refusal known to name the station at
+    fault among items that are otherwise fine. A 400 can be anything from one
+    item's field error to "Error in DB API connection" for the whole batch.
+    Even the 400 that reads much the same - "Observations of station N
+    overlap", from the within-batch check - means two of OUR items collide,
+    which build_campaign never plans; the one-at-a-time path sorts that out.
+    """
+    if exc.status != 409:
+        return None
+    match = _OVERLAP_409.search(exc.body or "")
+    return int(match.group(1)) if match else None
 
 
 def to_schedule_item(station_id: int, transmitter_uuid: str,

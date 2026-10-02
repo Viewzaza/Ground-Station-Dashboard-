@@ -229,12 +229,49 @@ one, and a local editable install would break the Docker build context
     re-sent twice; it raises at once and records the deadline in the gate, so
     nothing in the process asks again before then.
 
+17. **`campaign.py`: more stations per run - a fallback transmitter, a
+    calendar cache, a cap that counts what is already booked, and a sacrifice
+    bound for the first pick only.** Four changes to `build_campaign`, all
+    behind new optional keywords, so existing callers get today's behaviour
+    except where noted.
+    - `fallback_transmitter_uuids`: each station records the *first* of
+      `[transmitter_uuid, *fallbacks]` it can hear. Pinning KNACKSAT-2's
+      400.630 MHz telemetry alone reached 145 stations; falling back to the
+      145.825 MHz digipeater where telemetry is out of antenna range reaches
+      222 (measured offline on the cached catalogue). Telemetry still wins on
+      the 68 stations that hear both, where `pick_transmitter`'s tie-break
+      (DB order) would have chosen the digipeater. `pick_transmitter` is no
+      longer called with a uuid the station lacks, which logged a false
+      "priority file pins transmitter" warning per fallback station.
+      `CampaignItem` gains `transmitter_description` and `is_fallback`.
+    - `calendar_cache` (station id -> bookings): consulted before
+      `future_bookings()`, filled by every successful read, never by a failed
+      one. Freshness is the caller's job. A looped commit's later rounds are
+      what used to spend the read budget, re-reading every calendar each
+      round; with the cache they send no reads. Hits count in the new
+      `calendars_cached`, not in `calendars_read`.
+    - `cap_counts_existing` (default **on**, a behaviour change): observations
+      of the mission satellite already on a station's calendar inside the
+      booking window count against `max_per_station`, so a second click or the
+      auto timer tops a station up instead of stacking another full cap on it.
+      Other satellites' observations and our own `recent_attempts` stay
+      conflicts only.
+    - `MAX_ELEVATION_SACRIFICE_DEG` now binds a station's first pick in a
+      build only, so later picks can fill the thin low bands. Offline, at 600
+      bookings with the fallback and 3 per station, the bands went from
+      166/144/106/87/72/25 to 101/100/103/100/100/96 (90-75 down to 15-0).
+    The preview payload also publishes `stations_reachable`,
+    `stations_booked`, `calendars_cached`, `band_counts`, `transmitters` and
+    the `params` the build actually used. Pinned by
+    `tests/test_campaign_selection.py` and `tests/test_campaign_network.py`;
+    24 deliberate mutations, all caught.
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this
   vendored copy with a normal dependency (submodule or pinned pip package).
-- Upstream patches 1-6, 8-11, 14 and 16 above to that repo. 7, 12, 13 and 15
-  are `campaign.py`, which upstream does not have (see 7), so they are not
+- Upstream patches 1-6, 8-11, 14 and 16 above to that repo. 7, 12, 13, 15 and
+  17 are `campaign.py`, which upstream does not have (see 7), so they are not
   upstream material. 8 in particular is a plain bug for any consumer that
   books on a station it does not own; 11 and 16 matter to any consumer that
   reads more than a few dozen times an hour; 14 matters to any consumer that

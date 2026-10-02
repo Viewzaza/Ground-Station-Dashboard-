@@ -484,6 +484,46 @@ def test_one_unreachable_station_does_not_stop_the_run(monkeypatch):
     assert reasons[2].startswith("could not read this station's existing bookings")
 
 
+def test_a_failed_read_is_not_cached_so_the_next_build_asks_again(monkeypatch):
+    """The calendar cache must not launder a failure into a free calendar.
+    Caching nothing for a station whose read failed means the next build - a
+    looped commit's next round - asks it again and, if it fails again, still
+    leaves it out, instead of booking blind over whatever it already holds."""
+    synthetic_passes(monkeypatch,
+                     (NOW + timedelta(hours=2), NOW + timedelta(hours=2, minutes=10)))
+    network = StubNetwork(
+        [station(1), station(2), station(3)],
+        raises={2: RuntimeError("station unreachable")},
+    )
+    cache: dict[int, list] = {}
+
+    run(network, max_per_station=1, calendar_cache=cache)
+    second = run(network, max_per_station=1, calendar_cache=cache)
+
+    assert set(cache) == {1, 3}
+    assert network.asked.count(2) == 2
+    assert 2 not in {item.station_id for item in second.items}
+    reasons = {row["station_id"]: row["reason"] for row in second.skipped}
+    assert reasons[2].startswith("could not read this station's existing bookings")
+
+
+def test_a_cached_calendar_needs_no_read_budget(monkeypatch):
+    """Why a looped commit's later rounds survive a spent budget: with every
+    calendar already cached, a build that would be throttled on its first read
+    sends none, and plans in full."""
+    synthetic_passes(monkeypatch,
+                     (NOW + timedelta(hours=2), NOW + timedelta(hours=2, minutes=10)))
+    throttled = RateLimitedError("429, budget spent", status=429)
+    network = StubNetwork([station(1), station(2), station(3)],
+                          raises={1: throttled, 2: throttled, 3: throttled})
+
+    preview = run(network, max_per_station=1, calendar_cache={1: [], 2: [], 3: []})
+
+    assert network.asked == []
+    assert preview.stopped_early is None
+    assert {item.station_id for item in preview.items} == {1, 2, 3}
+
+
 # --------------------------------------------------------------------------
 # only asking stations that can actually see it
 # --------------------------------------------------------------------------

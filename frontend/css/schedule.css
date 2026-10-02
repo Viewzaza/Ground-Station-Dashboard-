@@ -259,6 +259,20 @@
   font: inherit;
   padding: 4px 6px;
 }
+/* The downlink policy picker. Same well as the number inputs; allowed to
+   shrink because its longest option ("Telemetry first, digipeater fallback -
+   most stations") is wider than a phone-width card. */
+.sched-campaign-row select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 4px 6px;
+}
 .sched-campaign-row-slider input[type="range"] {
   flex: 1 1 auto;
   min-width: 120px;
@@ -327,6 +341,56 @@
   border-color: var(--rule-soft);
   background: var(--panel-2);
 }
+/* "Outcome unknown": neither booked nor rejected, and the one count an
+   operator must not act on by resubmitting - so not the red of a rejection,
+   which reads as "safe to retry". */
+.sched-stat.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--panel));
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+}
+
+/* ── count chips: elevation bands and downlinks ───────────────────────────
+   Quieter than .sched-stat on purpose: these describe the SHAPE of a plan or
+   a run (how many per band, per transmitter), not its outcome, so they must
+   not compete with the booked/rejected chips for attention. */
+.sched-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 6px;
+  font-size: 10px;
+}
+.sched-chip-row-label {
+  color: var(--ink-3);
+  letter-spacing: .04em;
+  margin-right: 2px;
+}
+.sched-count-chip {
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--rule-soft);
+  background: var(--panel-2);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+/* An empty band is information (the plan has a hole there), but it should
+   read as absence, not as a count competing with the real ones. */
+.sched-count-chip.zero { color: var(--ink-4); }
+/* The fallback downlink is the historically weaker one; amber, the same
+   register as the preview table's fallback rows below, so the two read as
+   one fact. */
+.sched-count-chip.fallback {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--panel));
+}
+/* Downlink cell of the campaign preview. Allowed to wrap - unlike the rest
+   of .sched-table's cells - because "digipeater 145.825 (fallback)" is the
+   widest thing in the row and the table wrap clips horizontally. */
+.sched-table td.sched-tx-cell { white-space: normal; }
+.sched-table tr.is-fallback td.sched-tx-cell { color: var(--warn); }
 
 /* ── rejection reasons: grouped, not a flat dump ──────────────────────────
    A real campaign submit can reject dozens of items, but almost always for a
@@ -906,6 +970,16 @@ button.sched-prio-tx.is-editing { color: var(--track); }
      line here. */
   .schedule-section-head { flex-wrap: wrap; }
   .sched-list-btn { max-width: 100%; }
+  /* The campaign preview is six columns of nowrap cells with station names
+     of any length; clipped here, the rightmost column - which downlink each
+     booking uses - is the one that disappears. Scoped to the preview so the
+     other tables keep their no-sideways-scroll treatment. */
+  #campaign-preview-result .sched-table-wrap { overflow-x: auto; }
+  /* A long downlink chip must wrap inside the card rather than push it wide. */
+  .sched-count-chip { white-space: normal; }
+  /* Two danger buttons side by side do not fit next to the hint; each gets
+     the full row so neither label is squeezed into two lines. */
+  .sched-campaign-oneclick .sched-oneclick-btn { flex: 1 1 100%; }
 }
 
 /* ── station auto run ─────────────────────────────────────────────────────
