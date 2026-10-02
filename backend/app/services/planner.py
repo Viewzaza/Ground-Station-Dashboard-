@@ -70,6 +70,13 @@ class Candidate:
     priority: float
     score: float = 0.0
     breakdown: tuple[tuple[str, float], ...] = ()
+    # Signed azimuth the pass sweeps from AOS to LOS, unwrapped (so an
+    # overhead pass from 10° to 190° through east is +180, through west -180).
+    # Needed to know whether a starting bearing leaves room to finish the pass.
+    az_sweep: float = 0.0
+    # Worst pointing error a rate-limited rotator would suffer chasing this
+    # pass through the keyhole near zenith. 0 for anything below ~60°.
+    keyhole_error_deg: float = 0.0
 
     @property
     def duration_s(self) -> float:
@@ -113,37 +120,77 @@ class SlewModel:
     with the antenna still swinging into place, which loses the first minute of
     every pass — usually the low, Doppler-heavy part that is worst already.
     """
-    az_rate_deg_s: float = 2.0
-    el_rate_deg_s: float = 2.0
+    az_rate_deg_s: float = 1.5
+    el_rate_deg_s: float = 1.5
     setup_s: float = 30.0            # retune, start the recorder, settle
     min_az: float = -180.0
     max_az: float = 540.0
+    # SPID motors are not instantaneous; this covers start/stop ramps.
+    # An engineering margin, not a datasheet figure.
+    accel_margin_s: float = 4.0
+    # The community floor for a rotator station between observations
+    # (satnogs-auto-scheduler's recommended -w 60). Below this the antenna has
+    # no time to settle even when it barely has to move.
+    min_turnaround_s: float = 60.0
 
     def seconds(self, from_az: float, from_el: float,
-                to_az: float, to_el: float) -> float:
-        az_travel = self.az_travel(from_az, to_az)
+                to_az: float, to_el: float, sweep: float = 0.0) -> float:
+        _, az_travel = self.best_start(from_az, to_az, sweep)
         el_travel = abs(to_el - from_el)
-        return max(az_travel / self.az_rate_deg_s, el_travel / self.el_rate_deg_s)
+        moving = max(az_travel, el_travel) > 0.05
+        return (max(az_travel / self.az_rate_deg_s, el_travel / self.el_rate_deg_s)
+                + (self.accel_margin_s if moving else 0.0))
 
-    def az_travel(self, from_az: float, to_az: float) -> float:
-        """Degrees of azimuth the rotator must actually turn.
+    def turnaround(self, from_az: float, from_el: float,
+                   to_az: float, to_el: float, sweep: float = 0.0) -> float:
+        """Total time needed between one pass's LOS and the next one's AOS."""
+        return max(self.min_turnaround_s,
+                   self.seconds(from_az, from_el, to_az, to_el, sweep) + self.setup_s)
 
-        The short way round is usually available — a SPID's -180..540 range
-        holds every bearing at least twice — but not always: near either end
-        stop, the short way would drive past the limit and the rotator has to
-        go round the long way instead. Getting this wrong under-estimates the
-        slew by up to 180 degrees, which at 2 deg/s is a minute and a half.
+    def az_travel(self, from_az: float, to_az: float, sweep: float = 0.0) -> float:
+        return self.best_start(from_az, to_az, sweep)[1]
+
+    def best_start(self, from_az: float, to_az: float,
+                   sweep: float = 0.0) -> tuple[float, float]:
+        """Where to meet a pass that rises at `to_az`, and how far that is.
+
+        A SPID's -180..540 range holds every bearing at least twice, so there
+        is a choice. Two things constrain it:
+
+        * The whole pass has to fit. A starting bearing is only usable if the
+          antenna can follow the pass's full azimuth sweep from it without
+          hitting an end stop — a pass sweeps up to ~180°, so a start that is
+          fine on its own can still be unusable. Checking only the AOS point is
+          the mistake that leaves a track pinned against a limit at TCA.
+        * Nearest wins, and a tie goes to the bearing with the most room to
+          spare. From 0°, a pass rising at 180° is as far one way as the other;
+          the naive pick is -180, the end stop itself.
+
+        If no bearing fits the sweep, fall back to one that at least fits the
+        AOS point, charged as a full unwind — the honest cost of having to swing
+        round to the other branch first.
         """
-        best: float | None = None
-        for k in range(-2, 3):
-            target = to_az + 360.0 * k
-            if self.min_az <= target <= self.max_az:
-                travel = abs(target - from_az)
-                if best is None or travel < best:
-                    best = travel
-        # No representation within the limits (a misconfigured range): assume
-        # the worst rather than the best.
-        return best if best is not None else 360.0
+        def fits(a: float) -> bool:
+            return (self.min_az <= a <= self.max_az
+                    and self.min_az <= a + sweep <= self.max_az)
+
+        def margin(a: float) -> float:
+            lo, hi = min(a, a + sweep), max(a, a + sweep)
+            return min(lo - self.min_az, self.max_az - hi)
+
+        reps = [to_az + 360.0 * k for k in range(-3, 4)]
+        valid = [a for a in reps if fits(a)]
+        if valid:
+            best = min(valid, key=lambda a: (round(abs(a - from_az), 1), -margin(a)))
+            return best, abs(best - from_az)
+
+        in_range = [a for a in reps if self.min_az <= a <= self.max_az]
+        if in_range:
+            best = min(in_range, key=lambda a: abs(a - from_az))
+            return best, abs(best - from_az) + 360.0
+        # A misconfigured range with no representation at all: assume the
+        # worst rather than the best.
+        return to_az, 360.0
 
 
 # --------------------------------------------------------------------------
@@ -152,12 +199,28 @@ class SlewModel:
 
 @dataclass(frozen=True)
 class ScoreWeights:
+    """Weights for the three terms, each normalised to 0..1 before weighting.
+
+    Path loss gets the most authority because it has ~11 dB of dynamic range
+    across the passes worth working and dominates whether frames decode at all.
+    Duration earns little because it saturates early — most passes above 20°
+    are long enough. Freshness needs enough weight to pull a long-unheard
+    satellite ahead of a marginally better pass of one heard an hour ago, but
+    not enough to overturn a 10x priority difference.
+    """
     elevation: float = 0.55
-    duration: float = 0.30
-    freshness: float = 0.15
-    # Hours without a planned or recorded pass after which a satellite counts
-    # as fully neglected. Past this, its freshness term saturates.
-    freshness_horizon_h: float = 24.0
+    duration: float = 0.15
+    freshness: float = 0.30
+    # Duration is scored as expected beacons: KNACKSAT-2 beacons once a
+    # minute, and ten beacons is a well-heard pass.
+    beacon_interval_s: float = 60.0
+    beacons_for_full_marks: float = 10.0
+    # Freshness rises as 1 - 2^(-t / half-life): half credit after 12 hours
+    # unheard, three-quarters after a day.
+    freshness_half_life_h: float = 12.0
+    # The antenna's full 3 dB beamwidth, for the keyhole derate. A typical
+    # SatNOGS UHF Yagi is 30-50°.
+    beamwidth_deg: float = 40.0
 
 
 def slant_range_km(el_deg: float, alt_km: float) -> float:
@@ -183,8 +246,27 @@ def link_gain_db(max_el: float, floor_el: float, alt_km: float = 420.0) -> float
     return 20.0 * math.log10(r_floor / r_peak) if r_peak > 0 else 0.0
 
 
+def keyhole_derate(pointing_error_deg: float, beamwidth_deg: float) -> float:
+    """Fraction of signal left when the antenna lags the satellite.
+
+    An az/el mount's required azimuth rate near zenith goes as 1/cos(el): for a
+    400 km pass peaking at 80° it is about 6°/s, at 89° about 60°/s. A SPID
+    turning at 1.5-3°/s cannot keep up, so through TCA — the best part of the
+    pass — the beam points well behind the satellite. That is why an overhead
+    pass is genuinely worse than a 60-75° one on this hardware.
+
+    Gaussian beam loss: G = 12·(ε/θ3dB)² dB, which is 3 dB at half the
+    beamwidth. Returned as a linear factor.
+    """
+    if pointing_error_deg <= 0 or beamwidth_deg <= 0:
+        return 1.0
+    loss_db = 12.0 * (pointing_error_deg / beamwidth_deg) ** 2
+    return 10.0 ** (-loss_db / 10.0)
+
+
 def score_pass(*, max_el: float, duration_s: float, priority: float,
                hours_since_heard: float | None, floor_el: float,
+               keyhole_error_deg: float = 0.0,
                weights: ScoreWeights = ScoreWeights()
                ) -> tuple[float, tuple[tuple[str, float], ...]]:
     """A pass's value. Higher is better; priority multiplies, it does not add.
@@ -194,31 +276,88 @@ def score_pass(*, max_el: float, duration_s: float, priority: float,
     should beat "a slightly higher pass of someone else's", and an additive
     priority would let a perfect pass of an unimportant satellite outscore a
     middling pass of the one this station exists for.
+
+    Freshness depends only on when this station last *actually* heard the
+    satellite, never on what else is in the plan. Letting an earlier planned
+    pass lower a later one's freshness would make a pass's value depend on its
+    predecessors, and the plan would stop being an exact optimum.
     """
     best_gain = link_gain_db(90.0, floor_el)
     elevation = link_gain_db(max_el, floor_el) / best_gain if best_gain > 0 else 0.0
     elevation = max(0.0, min(1.0, elevation))
 
-    # 15 minutes is about the longest pass a LEO satellite gives this station.
-    duration = max(0.0, min(1.0, duration_s / 900.0))
+    beacons = math.floor(max(0.0, duration_s) / weights.beacon_interval_s)
+    duration = max(0.0, min(1.0, beacons / weights.beacons_for_full_marks))
 
     if hours_since_heard is None:
         freshness = 1.0             # never heard: as neglected as it gets
     else:
-        freshness = max(0.0, min(1.0, hours_since_heard / weights.freshness_horizon_h))
+        freshness = 1.0 - 2.0 ** (-max(0.0, hours_since_heard)
+                                  / weights.freshness_half_life_h)
+
+    keyhole = keyhole_derate(keyhole_error_deg, weights.beamwidth_deg)
 
     base = (
         weights.elevation * elevation
         + weights.duration * duration
         + weights.freshness * freshness
     )
-    total = base * max(0.0, priority)
+    total = base * keyhole * max(0.0, priority)
     return total, (
         ("elevation", round(elevation, 3)),
         ("duration", round(duration, 3)),
         ("freshness", round(freshness, 3)),
+        ("keyhole", round(keyhole, 3)),
         ("priority", round(priority, 3)),
     )
+
+
+def peak_pointing_error(samples: list[dict], az_rate_deg_s: float,
+                        el_rate_deg_s: float) -> float:
+    """Simulate a rate-limited rotator chasing a pass; return its worst error.
+
+    `samples` are {"t", "az", "el"} along the pass. The rotator starts on the
+    target and each step moves toward it no faster than its rates allow. The
+    error is the great-circle angle between where it points and where the
+    satellite is — what the beam actually cares about, which is the azimuth lag
+    scaled down by cos(el).
+    """
+    if len(samples) < 2:
+        return 0.0
+
+    def ts(s):
+        t = s["t"]
+        return t.timestamp() if isinstance(t, datetime) else datetime.fromisoformat(t).timestamp()
+
+    # Unwrap the target azimuth so the follower never "chases" a 360° jump.
+    unwrapped = [samples[0]["az"]]
+    for s in samples[1:]:
+        prev = unwrapped[-1]
+        a = s["az"]
+        while a - prev > 180.0:
+            a -= 360.0
+        while a - prev < -180.0:
+            a += 360.0
+        unwrapped.append(a)
+
+    az_r, el_r = unwrapped[0], samples[0]["el"]
+    worst = 0.0
+    t_prev = ts(samples[0])
+    for s, az_t in zip(samples[1:], unwrapped[1:]):
+        t = ts(s)
+        dt = max(0.0, t - t_prev)
+        t_prev = t
+        el_t = s["el"]
+        az_r += max(-az_rate_deg_s * dt, min(az_rate_deg_s * dt, az_t - az_r))
+        el_r += max(-el_rate_deg_s * dt, min(el_rate_deg_s * dt, el_t - el_r))
+        worst = max(worst, _separation(az_r, el_r, az_t, el_t))
+    return worst
+
+
+def _separation(az1: float, el1: float, az2: float, el2: float) -> float:
+    a1, e1, a2, e2 = map(math.radians, (az1, el1, az2, el2))
+    cos_d = math.sin(e1) * math.sin(e2) + math.cos(e1) * math.cos(e2) * math.cos(a1 - a2)
+    return math.degrees(math.acos(max(-1.0, min(1.0, cos_d))))
 
 
 # --------------------------------------------------------------------------
@@ -341,13 +480,13 @@ def _time_overlap(a: Candidate, b: Candidate) -> bool:
 def _compatible(a: Candidate, b: Candidate, slew: SlewModel) -> bool:
     """Can the antenna finish pass a, then be ready for pass b at its AOS?
 
-    The move is from where a sets to where b rises, both on the horizon.
+    The move is from where a sets to where b rises, both on the horizon, and b
+    has to be met at a bearing that leaves room for its whole sweep.
     """
     if b.aos <= a.los:
         return False
     gap = (b.aos - a.los).total_seconds()
-    need = slew.seconds(a.los_az, 0.0, b.aos_az, 0.0) + slew.setup_s
-    return gap >= need
+    return gap >= slew.turnaround(a.los_az, 0.0, b.aos_az, 0.0, b.az_sweep)
 
 
 def _why_planned(c: Candidate) -> str:

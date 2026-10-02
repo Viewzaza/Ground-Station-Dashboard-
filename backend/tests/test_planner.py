@@ -19,13 +19,22 @@ from app.services.planner import (
     ScoreWeights,
     SlewModel,
     link_gain_db,
+    peak_pointing_error,
     score_pass,
     select,
     slant_range_km,
 )
 
 T0 = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
-FAST = SlewModel(az_rate_deg_s=1000.0, el_rate_deg_s=1000.0, setup_s=0.0)
+# Effectively instant, with no floors, so selection tests test selection.
+FAST = SlewModel(az_rate_deg_s=1000.0, el_rate_deg_s=1000.0, setup_s=0.0,
+                 accel_margin_s=0.0, min_turnaround_s=0.0)
+# Pure slew arithmetic: real rates, but no margins or floors.
+def bare(**kw):
+    base = dict(az_rate_deg_s=2.0, el_rate_deg_s=2.0, setup_s=0.0,
+                accel_margin_s=0.0, min_turnaround_s=0.0)
+    return SlewModel(**{**base, **kw})
+
 
 
 def cand(key: str, start_min: float, dur_min: float, score: float, *,
@@ -122,7 +131,7 @@ def test_planned_passes_never_overlap():
 def test_a_pass_that_cannot_be_reached_in_time_is_marked_infeasible():
     """Ends at 0°, the next rises at 180° only 20 s later: at 2°/s that is a
     90-second slew. Overlap is not the only way two passes conflict."""
-    slew = SlewModel(az_rate_deg_s=2.0, el_rate_deg_s=2.0, setup_s=0.0)
+    slew = bare()
     cands = [
         cand("first", 0, 10, 1.0, los_az=0.0),
         cand("second", 10 + 20 / 60, 10, 0.9, aos_az=180.0),
@@ -135,7 +144,7 @@ def test_a_pass_that_cannot_be_reached_in_time_is_marked_infeasible():
 
 
 def test_the_same_gap_is_fine_when_the_next_pass_rises_where_the_last_set():
-    slew = SlewModel(az_rate_deg_s=2.0, el_rate_deg_s=2.0, setup_s=0.0)
+    slew = bare()
     cands = [
         cand("first", 0, 10, 1.0, los_az=170.0),
         cand("second", 10 + 20 / 60, 10, 0.9, aos_az=180.0),
@@ -145,7 +154,7 @@ def test_the_same_gap_is_fine_when_the_next_pass_rises_where_the_last_set():
 
 
 def test_setup_time_is_respected_even_with_no_slew():
-    slew = SlewModel(az_rate_deg_s=1000.0, el_rate_deg_s=1000.0, setup_s=60.0)
+    slew = bare(az_rate_deg_s=1000.0, el_rate_deg_s=1000.0, setup_s=60.0)
     cands = [cand("a", 0, 10, 1.0), cand("b", 10.5, 10, 1.0)]   # 30 s gap
     plan = select(cands, slew=slew, now=T0 - timedelta(hours=1))
     assert len(plan.planned) == 1
@@ -156,7 +165,7 @@ def test_setup_time_is_respected_even_with_no_slew():
 # --------------------------------------------------------------------------
 
 def test_axes_move_together_so_the_slower_axis_decides():
-    slew = SlewModel(az_rate_deg_s=2.0, el_rate_deg_s=1.0)
+    slew = bare(az_rate_deg_s=2.0, el_rate_deg_s=1.0)
     # 90° of az (45 s) and 60° of el (60 s) -> 60 s, not 105 s.
     assert slew.seconds(0, 0, 90, 60) == pytest.approx(60.0)
 
@@ -293,3 +302,169 @@ def test_terms_are_normalised():
     terms = dict(breakdown)
     for name in ("elevation", "duration", "freshness"):
         assert 0.0 <= terms[name] <= 1.0
+
+
+# --------------------------------------------------------------------------
+# cable wrap: the whole pass has to fit
+# --------------------------------------------------------------------------
+
+def test_a_start_bearing_must_leave_room_for_the_whole_sweep():
+    """At +500 the pass rising at 140° could be met at 500 — but it sweeps a
+    further +100°, to 600, past the 540 limit. It has to be met at 140."""
+    slew = bare(min_az=-180.0, max_az=540.0)
+    start, _ = slew.best_start(500.0, 140.0, sweep=+100.0)
+    assert start == pytest.approx(140.0)
+    assert start + 100.0 <= 540.0
+
+
+def test_without_a_sweep_the_near_branch_is_fine():
+    slew = bare(min_az=-180.0, max_az=540.0)
+    start, travel = slew.best_start(500.0, 140.0, sweep=0.0)
+    assert start == pytest.approx(500.0)
+    assert travel == pytest.approx(0.0)
+
+
+def test_when_no_branch_fits_the_cost_is_a_full_unwind():
+    """A rotator with a single turn of travel cannot hold a 300° sweep from
+    anywhere; charge the honest cost rather than pretending it fits."""
+    slew = bare(min_az=0.0, max_az=360.0)
+    _, travel = slew.best_start(10.0, 20.0, sweep=+350.0)
+    assert travel >= 360.0
+
+
+def test_a_long_sweep_can_make_a_tight_turnaround_infeasible():
+    """Same gap, same bearings — only the next pass's sweep differs. If the
+    near branch leaves no room for that sweep, the far branch is a long slew."""
+    slew = bare(min_az=-180.0, max_az=540.0)
+    a = cand("a", 0, 10, 1.0, los_az=170.0)
+    b_short = cand("b", 10 + 40 / 60, 10, 1.0, aos_az=530.0 - 360.0)   # 170°
+    fits = select([a, b_short], slew=slew, now=T0 - timedelta(hours=1))
+    assert len(fits.planned) == 2
+
+    # Pass rising at 170° that sweeps -400°: from 170 that would reach -230,
+    # past -180. Meeting it at 530 instead is a 360° slew — 3 minutes at 2°/s.
+    b_long = Candidate(**{**b_short.__dict__, "key": "b2", "az_sweep": -400.0})
+    blocked = select([a, b_long], slew=slew, now=T0 - timedelta(hours=1))
+    assert len(blocked.planned) == 1
+
+
+# --------------------------------------------------------------------------
+# turnaround floors
+# --------------------------------------------------------------------------
+
+def test_the_community_minimum_turnaround_applies_even_with_no_slew():
+    slew = SlewModel(az_rate_deg_s=1000.0, el_rate_deg_s=1000.0, setup_s=0.0,
+                     accel_margin_s=0.0, min_turnaround_s=60.0)
+    assert slew.turnaround(100, 0, 100, 0) == pytest.approx(60.0)
+
+
+def test_acceleration_margin_is_only_charged_for_an_actual_move():
+    slew = SlewModel(az_rate_deg_s=2.0, el_rate_deg_s=2.0, accel_margin_s=4.0)
+    assert slew.seconds(100, 0, 100, 0) == pytest.approx(0.0)
+    assert slew.seconds(100, 0, 120, 0) == pytest.approx(10.0 + 4.0)
+
+
+def test_default_rates_are_the_conservative_ones():
+    """The Rot2Prog controller does not say which SPID rotator it drives, and
+    the rates vary 1.5-3 deg/s. Defaulting to the slowest keeps plans honest."""
+    from app.config import Settings
+
+    s = Settings()
+    assert s.rotator_az_rate_deg_s <= 1.5
+    assert s.rotator_el_rate_deg_s <= 1.5
+
+
+# --------------------------------------------------------------------------
+# the keyhole
+# --------------------------------------------------------------------------
+
+def _overhead_track(max_el: float, alt_km: float = 400.0, step_s: float = 1.0):
+    """A straight-line pass over (or near) the station, sampled in az/el.
+
+    Flat-earth geometry is plenty to exercise the follower: what matters is the
+    azimuth whipping round near TCA, and that is reproduced exactly."""
+    import math as _m
+    v = 7.67                                   # km/s ground track speed
+    offset = alt_km / _m.tan(_m.radians(max_el)) if max_el < 89.99 else 0.0
+    out = []
+    t = T0
+    for k in range(-300, 301, int(step_s)):
+        x = v * k                               # along-track, km
+        rng = _m.hypot(x, offset)
+        el = _m.degrees(_m.atan2(alt_km, rng))
+        az = (_m.degrees(_m.atan2(x, offset if offset else 1e-6)) + 360.0) % 360.0
+        out.append({"t": t + timedelta(seconds=k), "az": az, "el": el})
+    return out
+
+
+def test_a_rotator_keeps_up_with_a_moderate_pass():
+    err = peak_pointing_error(_overhead_track(45.0), 1.5, 1.5)
+    assert err < 1.0
+
+
+def test_an_overhead_pass_outruns_the_rotator():
+    """The research table: at 80°+ a ~2.5°/s rotator lags ~15° at TCA, more
+    at lower rates. The exact figure depends on geometry; the shape must hold."""
+    e60 = peak_pointing_error(_overhead_track(60.0), 1.5, 1.5)
+    e80 = peak_pointing_error(_overhead_track(80.0), 1.5, 1.5)
+    e89 = peak_pointing_error(_overhead_track(89.0), 1.5, 1.5)
+    assert e60 < e80 < e89
+    assert e80 > 5.0
+    assert e89 > 20.0
+
+
+def test_a_faster_rotator_suffers_less_in_the_keyhole():
+    slow = peak_pointing_error(_overhead_track(85.0), 1.5, 1.5)
+    fast = peak_pointing_error(_overhead_track(85.0), 6.0, 6.0)
+    assert fast < slow
+
+
+def test_keyhole_derate_is_three_db_at_half_the_beamwidth():
+    from app.services.planner import keyhole_derate
+
+    assert keyhole_derate(0.0, 40.0) == 1.0
+    assert keyhole_derate(20.0, 40.0) == pytest.approx(10 ** (-0.3), rel=1e-6)
+
+
+def test_on_this_hardware_an_overhead_pass_scores_below_a_seventy_degree_one():
+    """The counter-intuitive result the research quantified: through the
+    keyhole, the best part of an overhead pass is spent pointing behind it."""
+    def score(max_el):
+        err = peak_pointing_error(_overhead_track(max_el), 1.5, 1.5)
+        total, _ = score_pass(max_el=max_el, duration_s=600, priority=1,
+                              hours_since_heard=0, floor_el=10,
+                              keyhole_error_deg=err)
+        return total
+
+    assert score(89.0) < score(70.0)
+
+
+# --------------------------------------------------------------------------
+# research-backed scoring terms
+# --------------------------------------------------------------------------
+
+def test_duration_is_scored_as_expected_beacons():
+    """KNACKSAT-2 beacons once a minute: a 9m59s pass hears nine, not ten."""
+    _, a = score_pass(max_el=40, duration_s=599, priority=1, hours_since_heard=0, floor_el=10)
+    _, b = score_pass(max_el=40, duration_s=600, priority=1, hours_since_heard=0, floor_el=10)
+    assert dict(a)["duration"] == pytest.approx(0.9)
+    assert dict(b)["duration"] == pytest.approx(1.0)
+
+
+def test_freshness_is_half_after_one_half_life():
+    _, bd = score_pass(max_el=40, duration_s=600, priority=1,
+                       hours_since_heard=12, floor_el=10)
+    assert dict(bd)["freshness"] == pytest.approx(0.5, abs=1e-3)
+
+
+# Independently computed by a separate simulation (400 km, rate-limited
+# follower). Two implementations agreeing is the check; the 89° row differs by
+# a few percent because this fixture uses flat-earth geometry.
+@pytest.mark.parametrize("rate,max_el,expected", [
+    (2.5, 70, 2.2), (2.5, 75, 7.5), (2.5, 80, 14.8), (2.5, 85, 25.5),
+    (3.0, 75, 3.6), (3.0, 80, 9.9), (3.0, 85, 19.7),
+    (5.0, 80, 1.4), (5.0, 85, 7.9),
+])
+def test_keyhole_lag_matches_an_independent_simulation(rate, max_el, expected):
+    ours = peak_pointing_error(_overhead_track(max_el), rate, rate)
+    assert ours == pytest.approx(expected, rel=0.06, abs=0.3)

@@ -39,6 +39,7 @@ from .planner import (
     Reservation,
     ScoreWeights,
     SlewModel,
+    peak_pointing_error,
     score_pass,
     select,
 )
@@ -133,7 +134,13 @@ class PlannerService:
 
     def reservations(self) -> list[Reservation]:
         out = []
-        for job in self.satnogs.jobs or []:
+        # commitments, not jobs: /api/jobs/ drops an observation the moment
+        # it starts, so planning from jobs alone could plan straight over a
+        # recording SatNOGS is making right now.
+        source = getattr(self.satnogs, "commitments", None)
+        if source is None:
+            source = self.satnogs.jobs or []
+        for job in source:
             start, end = _parse_ts(job.get("start")), _parse_ts(job.get("end"))
             if start is None or end is None:
                 # An unparsable job cannot be planned around, so it cannot be
@@ -176,19 +183,57 @@ class PlannerService:
             last = heard.get(norad)
             hours = None if last is None else (now - last).total_seconds() / 3600.0
             for p in self.predictor.passes(norad, hours=self.s.planner_horizon_h):
+                sweep, keyhole = self._geometry(norad, p)
                 score, breakdown = score_pass(
                     max_el=p.max_el, duration_s=p.duration_s, priority=priority,
                     hours_since_heard=hours, floor_el=self.s.min_culmination_deg,
-                    weights=self.weights,
+                    keyhole_error_deg=keyhole, weights=self.weights,
                 )
                 out.append(Candidate(
                     key=p.pass_id, norad=norad, name=p.name,
                     aos=p.aos, tca=p.tca, los=p.los,
                     max_el=p.max_el, aos_az=p.aos_az, los_az=p.los_az,
                     priority=priority, score=round(score, 4), breakdown=breakdown,
+                    az_sweep=round(sweep, 1), keyhole_error_deg=round(keyhole, 1),
                 ))
         self.unplannable = blind
         return out
+
+    # Below this peak elevation a 1.5°/s rotator keeps up with the satellite
+    # comfortably, so the follower simulation is skipped.
+    KEYHOLE_FROM_EL = 55.0
+
+    def _geometry(self, norad: int, p) -> tuple[float, float]:
+        """The pass's unwrapped azimuth sweep, and its worst keyhole lag.
+
+        Both come from sampling the predicted track. The sweep decides which
+        starting bearing leaves room for the whole pass; the lag is what a
+        rate-limited rotator loses chasing the satellite through zenith.
+        """
+        track = getattr(self.predictor, "track", None)
+        if track is None:
+            return 0.0, 0.0
+        step = 2.0 if p.max_el >= self.KEYHOLE_FROM_EL else 15.0
+        try:
+            samples = track(norad, p.aos, p.los, step_s=step)
+        except Exception:
+            log.exception("could not sample pass %s", p.pass_id)
+            return 0.0, 0.0
+        if len(samples) < 2:
+            return 0.0, 0.0
+
+        sweep = 0.0
+        for a, b in zip(samples, samples[1:]):
+            d = b["az"] - a["az"]
+            d = (d + 180.0) % 360.0 - 180.0      # the short way between samples
+            sweep += d
+
+        keyhole = 0.0
+        if p.max_el >= self.KEYHOLE_FROM_EL:
+            keyhole = peak_pointing_error(
+                samples, self.s.rotator_az_rate_deg_s, self.s.rotator_el_rate_deg_s
+            )
+        return sweep, keyhole
 
     # --- build --------------------------------------------------------------
     def rebuild(self, now: datetime | None = None) -> Plan:
@@ -262,6 +307,7 @@ def _candidate_json(c: Candidate) -> dict:
         "max_el": round(c.max_el, 1), "aos_az": round(c.aos_az, 1),
         "los_az": round(c.los_az, 1), "duration_s": round(c.duration_s),
         "priority": c.priority, "score": c.score, "breakdown": dict(c.breakdown),
+        "az_sweep": c.az_sweep, "keyhole_error_deg": c.keyhole_error_deg,
     }
 
 
@@ -420,7 +466,7 @@ class PlanExecutor:
         lead = self._lead_s(nxt)
         if now >= nxt.aos - timedelta(seconds=lead):
             if self._positioned_for != nxt.key:
-                await self.control.goto(self._nearest(nxt.aos_az), 0.0)
+                await self.control.goto(self._start_bearing(nxt), 0.0)
                 self._positioned_for = nxt.key
                 self._expect = "manual"
             self._set("positioning",
@@ -441,25 +487,19 @@ class PlanExecutor:
         sample = self.rotator.last
         need = 0.0
         if sample is not None:
-            need = self.planner.slew.seconds(sample.az_raw, sample.el, nxt.aos_az, 0.0)
+            need = self.planner.slew.seconds(sample.az_raw, sample.el,
+                                             nxt.aos_az, 0.0, nxt.az_sweep)
         return max(float(self.s.planner_lead_s), need + float(self.s.planner_setup_s))
 
-    def _nearest(self, az: float) -> float:
-        """The representation of `az` nearest the antenna, inside its limits —
-        so pre-positioning does not wind the cable a full turn."""
+    def _start_bearing(self, nxt: Candidate) -> float:
+        """Where to meet the pass: the same choice the planner costed.
+
+        Using the planner's SlewModel rather than a second implementation keeps
+        the bearing autopilot drives to identical to the one whose slew time
+        the plan was built on — including leaving room for the pass's whole
+        sweep, and never parking on an end stop.
+        """
         sample = self.rotator.last
-        slew = self.planner.slew
-        current = sample.az_raw if sample is not None else az
-        options = [az + 360.0 * k for k in range(-2, 3)
-                   if slew.min_az <= az + 360.0 * k <= slew.max_az]
-        if not options:
-            return az
-
-        def margin(a: float) -> float:
-            return min(a - slew.min_az, slew.max_az - a)
-
-        # Nearest first; on a tie, the bearing furthest from either end stop.
-        # From 0° a pass rising at 180° is as far one way as the other, and the
-        # naive pick is -180 — the rotator's limit — which starts the pass with
-        # no room at all to follow the satellite in one direction.
-        return min(options, key=lambda a: (round(abs(a - current), 1), -margin(a)))
+        current = sample.az_raw if sample is not None else nxt.aos_az
+        bearing, _ = self.planner.slew.best_start(current, nxt.aos_az, nxt.az_sweep)
+        return bearing

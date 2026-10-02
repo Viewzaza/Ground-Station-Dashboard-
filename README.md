@@ -51,6 +51,8 @@ Light paper chrome, dark instrument windows — see
 | SatNOGS 5024 activity feed | done |
 | Grafana telemetry strip | done, cut back to one stat's height |
 | Decoded frames — the most recent frames SatNOGS demodulated | done, **no token needed** |
+| Observation planner — which passes to work when they compete | done, verified against the live SatNOGS schedule |
+| Autopilot — works the plan through the interlock | done, **never yet run against the hardware** |
 
 The rotator control path has been exercised against the station's own rotctld
 and correctly **refused** every command, because satnogs-client was connected.
@@ -576,6 +578,79 @@ On site this refuses correctly today: station 5024 is connected, so
 `{"error": "refused: satnogs_idle", "blocked_by": ["satnogs_idle"]}`. Nothing
 has yet commanded the real antenna to move. Before it does, someone should have
 eyes on the mast and the station should be out of the SatNOGS schedule.
+
+## Observation planner
+
+One rotator and one radio means passes compete. The planner decides which ones
+to work over the next `GS_PLANNER_HORIZON_H` hours, and explains every decision
+— `GET /api/plan` returns each pass with a status and a reason.
+
+| Status | Meaning |
+|---|---|
+| `planned` | this station will work it |
+| `satnogs` | SatNOGS already has it scheduled; nothing for us to do |
+| `reserved` | overlaps a SatNOGS job for a different satellite |
+| `conflict` | lost to a better overlapping pass — the reason names which one |
+| `infeasible` | the antenna cannot slew there in time from the pass before it |
+| `low` | peaks below the station's 10° culmination threshold |
+
+**How it chooses.** This is weighted interval scheduling with a twist: the time
+the antenna needs between two passes depends on *which* two. Leaving a pass in
+the north-east and catching the next rising in the south-west is a long slew;
+two passes that set and rise in the same part of the sky need almost none. That
+rules out the textbook sort-by-finish-time method, which assumes compatibility
+depends on time alone. Instead the plan is a longest path through a DAG — one
+node per pass, an edge wherever the antenna can get from the end of one to the
+start of the next — which finds the true optimum in O(n²).
+`tests/test_planner.py` checks it against an exhaustive search on random
+schedules.
+
+The obvious alternative, greedy-by-score, is wrong in a common way: it takes one
+excellent pass that blocks two good ones worth more together.
+
+**How it scores.** Each pass gets a 0–1 value for elevation, duration and how
+long since this station last heard that satellite, weighted and then
+*multiplied* by the satellite's priority. Elevation is scored on link budget,
+not degrees: free-space path loss goes as 20·log₁₀(range), and at 420 km an
+overhead pass is about 10 dB closer than a 10° one. Priority multiplies rather
+than adds so that a middling KNACKSAT-2 pass beats a perfect pass of a
+satellite nobody here is responsible for.
+
+```ini
+GS_PLANNER_PRIORITIES=67683:10    # norad:weight, comma separated
+GS_PLANNER_INCLUDE_CATALOG=0      # 1 = plan the whole amateur catalogue too
+GS_ROTATOR_AZ_RATE_DEG_S=2.0      # conservative; overestimating the rotator
+GS_ROTATOR_EL_RATE_DEG_S=2.0      #   loses the first minute of every pass
+GS_PLANNER_SETUP_S=30             # retune and start recording between passes
+```
+
+**SatNOGS comes first.** Its scheduled observations are hard reservations,
+with the same guard band the interlock uses. A job that cannot be parsed
+reserves the whole horizon rather than being ignored, and a satellite SatNOGS
+schedules under a temporary catalogue number — which no public element set
+carries — is listed under `unplannable` rather than silently dropped. Its window
+is still protected.
+
+### Autopilot
+
+Autopilot works the plan: pre-positions the antenna where the next pass rises,
+tracks it from AOS, stops at LOS, and moves on. It is built to be timid:
+
+- **It goes through `ControlService`.** All four gates apply to every command it
+  issues, exactly as for an operator.
+- **It never takes a lease.** It can only be engaged while an operator holds
+  one (`POST /api/plan/autopilot {"enabled": true}`), and it disengages itself
+  when that lease expires or is released. Re-engaging is a human decision.
+- **The operator always wins.** Pressing STOP, or driving the antenna by hand,
+  disengages autopilot rather than being fought by it. It stops only tracks it
+  started.
+- **A closed gate is not an operator.** If SatNOGS reconnects mid-pass the
+  interlock stops the track; autopilot reports it is blocked and resumes when
+  the gate reopens, within the same lease.
+
+Like manual control, **autopilot has never commanded the real antenna**. The
+same precondition applies: eyes on the mast, and the station out of the SatNOGS
+schedule.
 
 ## Tests
 

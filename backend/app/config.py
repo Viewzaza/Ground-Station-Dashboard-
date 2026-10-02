@@ -102,8 +102,12 @@ class Settings(BaseSettings):
     # Slew rates are deliberately conservative. A plan that thinks the rotator
     # is faster than it is starts every pass with the antenna still swinging
     # into place, and loses the low, Doppler-heavy first minute.
-    rotator_az_rate_deg_s: float = 2.0
-    rotator_el_rate_deg_s: float = 2.0
+    # Station 5024's controller is a Rot2Prog, which does not identify the
+    # rotator behind it; SPID rates run 1.5-3 deg/s by model and supply
+    # voltage, and the datasheets disagree. 1.5 is the slowest plausible
+    # figure. Time a 180-degree slew on site and raise these to match.
+    rotator_az_rate_deg_s: float = 1.5
+    rotator_el_rate_deg_s: float = 1.5
     planner_setup_s: int = 30           # retune, start the recorder, settle
     planner_lead_s: int = 90            # start pre-positioning at least this early
     planner_horizon_h: float = 24.0
