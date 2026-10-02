@@ -70,11 +70,30 @@ _UNREACHABLE = "could not reach SatNOGS"
 # What SatNOGS answers (HTTP 400) for a booking on a station the requesting
 # account may not schedule on - "No permission to schedule observations on
 # station: 40", or "...on stations: [...]" for several (satnogs-network
-# base/perms.py). For the campaign that is never about the one station: the
-# rule is per ACCOUNT (see own_station_state), so every item of every later
-# POST would get the same answer. Matched as text for the same reason as
-# _UNREACHABLE: schedule() reports refusals only as error strings.
+# base/perms.py has_perm_to_schedule_on_station). The same words cover two
+# different refusals. While the account owns no useable station (ours not
+# Online - see own_station_state) it is refused on EVERY station, and every
+# later POST would get the same answer. While it does, the verdict is per
+# TARGET station: `return target_station.is_available`, so one station that
+# went unavailable after our catalogue read (cached for an hour) is refused
+# alone while the rest book fine - records show this on stations 12, 16 and
+# 36. _submit_batch tells the two apart (_refusal_is_account_wide). Matched as
+# text for the same reason as _UNREACHABLE: schedule() reports refusals only
+# as error strings.
 _NO_PERMISSION = "No permission to schedule observations"
+
+# What run_auto_cycle() returns when it could not even preview because
+# another campaign operation (a manual preview or commit, the auto-run chain,
+# or a cross-check) held the single-flight guard. The timer retries soon on it
+# instead of sleeping a whole campaign_poll_s - see Scheduler._campaign_loop.
+AUTO_CYCLE_BUSY = "busy"
+
+# How a stale-commit refusal names the commit that booked in the meantime.
+_TRIGGER_LABELS = {
+    "manual": "a manual submit",
+    "auto": "the campaign timer",
+    "chained": "the Station Schedule auto-run chain",
+}
 
 # How old SatnogsService's last poll of our own station may be before its
 # status stops counting as evidence. It polls every satnogs_station_poll_s
@@ -102,10 +121,16 @@ class _BatchOutcome:
     # part-way says in its own error how many of its items went unsent.)
     not_sent: int = 0
     unreachable: bool = False
-    # A whole POST came back "No permission to schedule observations": the
-    # account cannot book other people's stations right now (in practice, our
-    # own station is not Online), so nothing after it was sent.
+    # A whole POST came back "No permission to schedule observations" AND
+    # that reads as the account, not the stations in it (see
+    # _refusal_is_account_wide): the account cannot book other people's
+    # stations right now - in practice our own station is not Online - so
+    # nothing after it was sent.
     no_permission: bool = False
+    # Stations a whole POST was refused on for permission while the account
+    # itself was fine - unavailable targets. The commit's later rounds do not
+    # plan them again.
+    refused_stations: set[int] = field(default_factory=set)
 
 
 def _result_row(item: dict) -> dict:
@@ -133,6 +158,20 @@ def _band_counts(rows: Iterable[dict]) -> list[dict]:
         # not 15-0.
         if row.get("max_elevation_deg") is not None
     )
+
+
+def _parse_utc(raw) -> datetime | None:
+    """An ISO timestamp this service wrote, as an aware UTC datetime; None for
+    anything else. A naive one is taken as UTC, which is all we ever write."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _preference_ranked(uuids: Iterable[str], preference: list[str]) -> list[str]:
@@ -203,6 +242,15 @@ class CampaignService:
         self.result_path = settings.data_dir / "campaign_last_run.json"
         self.history_path = settings.data_dir / "campaign_history.json"
         self.recent_attempts_path = settings.data_dir / "campaign_recent_attempts.json"
+        # When this process last POSTed a booking, and for which trigger -
+        # what stale_commit() holds a previewed plan against. Persisted so a
+        # reload between the auto-run chain's commit and an operator's CONFIRM
+        # cannot make the older plan look fresh again.
+        self.last_submit_path = settings.data_dir / "campaign_last_submit.json"
+        # When the campaign's OWN timer last ran a cycle - what
+        # auto_cycle_delay_s() anchors on, so that previews from other
+        # triggers (the auto-run chain, the operator) do not move the timer.
+        self.auto_cycle_path = settings.data_dir / "campaign_last_auto_cycle.json"
 
         self._run_lock = asyncio.Lock()
         self._running = False
@@ -253,9 +301,11 @@ class CampaignService:
         observations on station: N".
 
         Unknown or stale status NEVER blocks. The server's refusal is the
-        backstop (_submit_batch stops after one refused POST), whereas a
-        poller that has stopped updating - or was never wired - would
-        otherwise switch the campaign off silently and indefinitely.
+        backstop (_submit_batch stops once a whole POST is refused for
+        permission across two or more stations - see
+        _refusal_is_account_wide), whereas a poller that has stopped
+        updating - or was never wired - would otherwise switch the campaign
+        off silently and indefinitely.
         """
         snapshot = None
         if self._own_station is not None:
@@ -521,7 +571,15 @@ class CampaignService:
         return self._read_json(self.preview_path, {"status": "never_run"})
 
     # --- commit --------------------------------------------------------------
-    async def commit_campaign(self, items: list[dict] | None = None, trigger: str = "manual") -> dict:
+    async def commit_campaign(self, items: list[dict] | None = None, trigger: str = "manual",
+                              preview_generated_utc: str | None = None) -> dict:
+        """Submit `items` (a plan previewed earlier), or build and submit a
+        fresh plan when `items` is None.
+
+        `preview_generated_utc` is the generated_utc of the preview `items`
+        came from. Given, the commit is refused as "stale" - nothing sent, no
+        run record, no history row - if this process has POSTed bookings since
+        that preview was built; see stale_commit()."""
         if self._running:
             return {"status": "running"}
         async with self._run_lock:
@@ -529,10 +587,19 @@ class CampaignService:
                 return {"status": "running"}
             self._running = True
         try:
-            # Checked first, for every trigger and in mock mode too: with our
-            # own station not Online every item would come back "No
-            # permission" (2026-10-02: 100 sent, 100 refused), so the honest
-            # run is the one that sends nothing and says why.
+            # Ahead of the own-station gate, and never written as the last
+            # run: the last run on disk is the commit that made this plan
+            # stale, and the cross-check reads its accepted items back.
+            if items is not None:
+                stale = self.stale_commit(preview_generated_utc, trigger)
+                if stale is not None:
+                    log.warning("campaign commit refused: %s", stale["stopped_reason"])
+                    return stale
+            # Checked before anything is built or sent, for every trigger and
+            # in mock mode too: with our own station not Online every item
+            # would come back "No permission" (2026-10-02: 100 sent, 100
+            # refused), so the honest run is the one that sends nothing and
+            # says why.
             gate = self.own_station_state()
             if gate["blocks_booking"]:
                 result = self._blocked_result(gate, trigger)
@@ -591,6 +658,64 @@ class CampaignService:
                 f"station {gate['station_id']} is {gate['status']} "
                 f"(last seen {gate['last_seen'] or 'unknown'}) - SatNOGS refuses bookings "
                 "on other people's stations until one of ours is Online, so nothing was sent"
+            ),
+        }
+
+    def _note_submit(self, trigger: str) -> None:
+        """Remember that a booking POST is about to go out - the evidence
+        stale_commit() checks a previewed plan against. Written BEFORE the
+        POST, like _record_attempts: a POST whose answer never arrives may
+        still have booked, so it makes older plans stale all the same."""
+        self._write_json(self.last_submit_path, {
+            "at": datetime.now(timezone.utc).isoformat(), "trigger": trigger,
+        })
+
+    def stale_commit(self, preview_generated_utc: str | None,
+                     trigger: str = "manual") -> dict | None:
+        """The "stale" answer for a commit of a plan previewed at
+        `preview_generated_utc`, or None if that plan may still be sent.
+
+        A commit of previewed items sends them as they are: round 1 is not
+        re-planned, so nothing re-checks them against the per-station cap.
+        That is right while the plan is the newest word on those calendars,
+        and wrong once anything has booked since. The auto-run chain makes
+        this routine: an operator reads a preview at 10:58Z, the 11:00Z slot
+        previews afresh and books - a different shuffle, so other passes on
+        the same stations - and CONFIRM at 11:03Z then lands the older plan
+        too: twice max_per_station on those stations, with no SatNOGS overlap
+        to stop it (measured in review: cap 1, two per station). So a plan is
+        refused once this process has POSTed after it was built. A preview
+        and a commit never overlap (one guard), so "POSTed after the build
+        began" is exactly "booked by a commit that ran after this preview".
+
+        No stamp (an older client, or a commit that builds its own plan) is
+        not checked. A stamp that does not parse is refused: it cannot show
+        the plan is fresh."""
+        if preview_generated_utc is None:
+            return None
+        last = self._read_json(self.last_submit_path, None)
+        last_at = _parse_utc(last.get("at")) if isinstance(last, dict) else None
+        if last_at is None:
+            return None  # nothing POSTed since this was first recorded
+        planned = _parse_utc(preview_generated_utc)
+        if planned is not None and last_at < planned:
+            return None
+        by = _TRIGGER_LABELS.get(last.get("trigger"), "another campaign submit")
+        return {
+            "status": "stale", "trigger": trigger,
+            "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "preview_generated_utc": preview_generated_utc,
+            "last_submit_utc": last_at.isoformat(),
+            "submitted": 0, "accepted": 0, "errors": [], "accepted_items": [], "rounds": 0,
+            "stopped_reason": (
+                f"this plan was computed at {planned:%Y-%m-%d %H:%M:%S} UTC, and {by} has "
+                f"booked since (at {last_at:%H:%M:%S} UTC) - the plan does not count "
+                "those bookings, so it could put more passes on a station than the "
+                "per-station cap allows. Nothing was sent; run PREVIEW again"
+                if planned is not None else
+                f"this plan's timestamp ({preview_generated_utc!r}) could not be read, "
+                "so it cannot be shown to be newer than the last submit. Nothing was "
+                "sent; run PREVIEW again"
             ),
         }
 
@@ -655,6 +780,9 @@ class CampaignService:
         not_sent = 0
         no_permission = False
         booked_counts: dict[int, int] = {}
+        # Stations SatNOGS refused a whole POST on for permission while the
+        # account was fine (_BatchOutcome.refused_stations).
+        refused_stations: set[int] = set()
         rounds = 0
         stopped = "one batch per commit (looping is off)"
 
@@ -666,12 +794,13 @@ class CampaignService:
                 stopped = ("nothing could be planned" if first_build_early
                            else "no bookings to submit")
                 break
-            batch = self._submit_batch(network, items)
+            batch = self._submit_batch(network, items, trigger=trigger)
             submitted += batch.submitted
             errors += batch.errors
             accepted_detail += batch.accepted
             uncertain += batch.uncertain
             not_sent += batch.not_sent
+            refused_stations |= batch.refused_stations
             # Uncertain items count against the per-station cap as well: they
             # may well be on the calendar, and the cap is the courtesy limit
             # for what we ask of one station. (Their windows are already
@@ -710,8 +839,16 @@ class CampaignService:
                 break
             # The next round sees everything submitted so far as occupied via
             # _recent_attempts, and every station's bookings so far via
-            # booked_counts, so it can only pick up what is still left.
-            items, early = build(rounds + 1, booked_counts)
+            # booked_counts, so it can only pick up what is still left. A
+            # station refused for permission is handed over as already at its
+            # cap: it is unavailable, not short of free passes, and planning
+            # its other passes again is exactly how such a station ends up
+            # alone in a POST of its own (see _refusal_is_account_wide).
+            counts = dict(booked_counts)
+            if refused_stations:
+                cap = self.schedule_service.campaign_max_per_station()
+                counts.update({sid: max(counts.get(sid, 0), cap) for sid in refused_stations})
+            items, early = build(rounds + 1, counts)
             if not items:
                 # A build that was cut short and found nothing has not shown
                 # the network is exhausted - only that it could not look. The
@@ -742,7 +879,8 @@ class CampaignService:
             "stopped_reason": stopped,
         }
 
-    def _submit_batch(self, network: NetworkClient, items: list[dict]) -> _BatchOutcome:
+    def _submit_batch(self, network: NetworkClient, items: list[dict],
+                      trigger: str = "manual") -> _BatchOutcome:
         """Submit one round: one POST per transmitter per CAMPAIGN_POST_CHUNK
         items (see _chunks_by_transmitter), stopping if SatNOGS goes away or
         refuses us permission outright."""
@@ -757,6 +895,7 @@ class CampaignService:
             # reproduce the same rejection. See RECENT_ATTEMPT_TTL. Per chunk,
             # so items in chunks never sent (below) stay bookable next time.
             attempts = self._record_attempts(chunk, datetime.now(timezone.utc))
+            self._note_submit(trigger)
 
             schedule_items = [
                 to_schedule_item(
@@ -802,16 +941,32 @@ class CampaignService:
 
             if (not took and not maybe and not result.accepted and result.errors
                     and all(_NO_PERMISSION in error for error in result.errors)):
-                # The whole POST was refused for permission, which SatNOGS
-                # decides per ACCOUNT (see own_station_state): every later POST
-                # would get the same answer - this is the backstop for when the
+                # The whole POST was refused for permission. schedule() already
+                # took the refusal as the verdict for every station it listed,
+                # so the chunk cost one POST, not one per item. Only a clean
+                # sweep counts; a permission error mixed in with other outcomes
+                # is left to today's per-item handling.
+                refused = {item["station_id"] for item in chunk}
+                if not self._refusal_is_account_wide(refused):
+                    # About these stations, not us: they went unavailable
+                    # (see _NO_PERMISSION). Unlike the account-wide case their
+                    # windows STAY in _recent_attempts - they were really
+                    # refused, and forgetting them would have the next commit
+                    # inside the catalogue hour plan them again - and every
+                    # later POST still goes out, since it is for other stations.
+                    outcome.refused_stations |= refused
+                    log.warning(
+                        "SatNOGS refused a POST of %d item(s) for permission on "
+                        "station(s) %s; that reads as those stations being "
+                        "unavailable, not as our account, so the run goes on",
+                        len(chunk), sorted(refused),
+                    )
+                    continue
+                # Account-wide (see own_station_state): every later POST would
+                # get the same answer. This is the backstop for when the
                 # own-station gate could not see the outage (status stale or
                 # unknown; SatNOGS itself only marks a station Offline about an
-                # hour after it goes quiet). schedule() already took the
-                # refusal as the verdict for every station it listed, so the
-                # chunk cost one POST, not one per item. Only a clean sweep
-                # counts; a permission error mixed in with other outcomes is
-                # left to today's per-item handling.
+                # hour after it goes quiet), or the station dropped mid-commit.
                 outcome.no_permission = True
                 # A definitive refusal booked nothing and says nothing about
                 # the slots, so unlike any other rejection they must not sit
@@ -829,6 +984,37 @@ class CampaignService:
                     )
                 break
         return outcome
+
+    def _refusal_is_account_wide(self, stations: set[int]) -> bool:
+        """Whether a POST refused for permission on every one of `stations`
+        means the ACCOUNT may not book anyone else's station right now, as
+        opposed to those stations being unavailable.
+
+        SatNOGS answers both with the same words (see _NO_PERMISSION), and it
+        grants the account-level permission on exactly what our own station's
+        status reports - connected, available, not testing - so that status
+        decides when we have it:
+
+        * fresh and "Online": SatNOGS sees a useable station of ours, so the
+          refusal can only be about the targets. Treating it as an outage
+          used to stop a looped commit at the first chunk that held one
+          unavailable station alone, forget its attempts and tell the
+          operator our station was down while the gate showed it Online;
+        * fresh and anything else: our station dropped during the commit
+          (the gate let it start) - account-wide;
+        * stale or unknown: no evidence either way, so the refusal's breadth
+          decides. An outage refuses every station of every POST; one
+          unavailable station is refused alone. Two or more distinct stations
+          is the outage - a single one costs at most one more POST to tell.
+
+        Read live, not snapshotted at commit start: a looped commit can run
+        for minutes, and the poller (every ~60 s) may have seen the station
+        drop since.
+        """
+        gate = self.own_station_state()
+        if gate["fresh"] and gate["status"] is not None:
+            return gate["status"] != "Online"
+        return len(stations) >= 2
 
     def _mock_commit(self, items: list[dict] | None, trigger: str) -> dict:
         rows = [_result_row(item) for item in
@@ -1054,40 +1240,79 @@ class CampaignService:
     # --- the timer -----------------------------------------------------------
     def auto_cycle_delay_s(self, now: datetime | None = None) -> float:
         """How long scheduler.py's timer should wait before its FIRST cycle
-        after a (re)start: whatever is left of campaign_poll_s since the last
-        preview (manual or timed), or 0 if there is none.
+        after a (re)start: whatever is left of campaign_poll_s since the
+        timer's own last cycle, or 0 if there is none.
 
         The loop used to run a cycle the moment it started, and uvicorn
         --reload restarts it on every edit under backend/app - so each edit
         fired a full real preview (~145-222 calendar reads) and, with
         auto-commit on, real bookings on community stations. A daily timer
         has no reason to fire twice in a day because the process restarted.
+
+        Anchored on the TIMER's last cycle (auto_cycle_path), not on the last
+        preview of any kind as it first was. With the auto-run chain on, the
+        last preview is usually the chain's - started at a Station Schedule
+        slot plus that day's own run - so every reload moved the timer onto
+        the next day's slot, where whichever of the two previewed first made
+        the other answer "running": with auto-commit off the timer's
+        preview-only cycle then cost the chain its whole slot. Only when the
+        timer has no record of its own (a data dir from before it was kept)
+        does the last preview stand in, as before - and _keep_timer_anchor()
+        stops a chained preview from ever being that stand-in.
         """
         poll_s = float(self.s.campaign_poll_s)
-        last = self.get_last_preview()
-        raw = last.get("generated_utc") if isinstance(last, dict) else None
-        if not raw:
+        own = self._read_json(self.auto_cycle_path, None)
+        generated = _parse_utc(own.get("generated_utc")) if isinstance(own, dict) else None
+        if generated is None:
+            last = self.get_last_preview()
+            generated = _parse_utc(last.get("generated_utc")) if isinstance(last, dict) else None
+        if generated is None:
             return 0.0
-        try:
-            generated = datetime.fromisoformat(raw)
-        except (TypeError, ValueError):
-            return 0.0
-        if generated.tzinfo is None:
-            generated = generated.replace(tzinfo=timezone.utc)
         age_s = ((now or datetime.now(timezone.utc)) - generated).total_seconds()
         # Clamped to one poll period so a preview stamped in the future (a
         # clock step) delays the timer by at most one cycle, never longer.
         return max(0.0, min(poll_s, poll_s - age_s))
 
-    async def run_auto_cycle(self) -> None:
+    def _keep_timer_anchor(self) -> None:
+        """Before a chained preview overwrites the last preview: if the timer
+        has no record of its own cycle yet, keep the preview it would fall
+        back on (auto_cycle_delay_s) as that record.
+
+        Without this the fallback is a window, not a one-off: until the
+        timer's first cycle on this code - up to campaign_poll_s after the
+        deploy - a chain slot can write the last preview, and a reload then
+        anchors the timer on that slot for good, its own record carrying the
+        slot's phase forward every day after."""
+        if self.auto_cycle_path.exists():
+            return
+        last = self.get_last_preview()
+        raw = last.get("generated_utc") if isinstance(last, dict) else None
+        if _parse_utc(raw) is not None:
+            self._write_json(self.auto_cycle_path, {"generated_utc": raw})
+
+    async def run_auto_cycle(self) -> str:
         """Called only by scheduler.py's timer loop. Always previews first;
-        only auto-commits if the operator has explicitly turned that on."""
+        only auto-commits if the operator has explicitly turned that on.
+
+        Returns AUTO_CYCLE_BUSY when the preview was refused because another
+        campaign operation held the guard - nothing ran, so the timer retries
+        shortly instead of writing the cycle off - and "done" otherwise."""
         preview = await self.preview_campaign()
+        if preview.get("status") == "running":
+            return AUTO_CYCLE_BUSY
+        # Whatever came of the preview, the timer's cycle happened: this is
+        # what the next restart's delay is measured from.
+        self._write_json(self.auto_cycle_path, {
+            "generated_utc": preview.get("generated_utc")
+            or datetime.now(timezone.utc).isoformat(),
+        })
         if not self.schedule_service.campaign_auto_commit_enabled():
-            return
+            return "done"
         if preview.get("status") == "error" or not preview.get("items"):
-            return
-        await self.commit_campaign(items=preview["items"], trigger="auto")
+            return "done"
+        await self.commit_campaign(items=preview["items"], trigger="auto",
+                                   preview_generated_utc=preview.get("generated_utc"))
+        return "done"
 
     async def run_chained_cycle(self) -> dict:
         """The worldwide campaign, chained onto a Station Schedule auto-run
@@ -1106,12 +1331,15 @@ class CampaignService:
         operator's tick do nothing unless they also switched on a second,
         unrelated stream of unattended bookings they did not ask for.
         """
+        self._keep_timer_anchor()
         preview = await self.preview_campaign()
         status = preview.get("status")
         if status == "running":
-            # A manual preview/commit/cross-check holds the single-flight
-            # guard. Not retried: the caller moves on, and the next slot (or
-            # the operator's own run) covers the window.
+            # Another campaign operation holds the single-flight guard - a
+            # manual preview/commit/cross-check, or (rarely, now that the
+            # timer keeps its own phase) the timer's cycle. Not retried: the
+            # caller moves on, and the next slot (or the operator's own run)
+            # covers the window.
             return {"status": "running"}
         if status == "error":
             return {"status": "skipped",
@@ -1122,7 +1350,8 @@ class CampaignService:
                     "reason": ("the preview was cut short before it planned anything "
                                f"({early.get('reason', 'unknown reason')})") if early
                     else "the preview found nothing to book"}
-        return await self.commit_campaign(items=preview["items"], trigger="chained")
+        return await self.commit_campaign(items=preview["items"], trigger="chained",
+                                          preview_generated_utc=preview.get("generated_utc"))
 
     # --- small json helpers ----------------------------------------------------
     def _read_json(self, path: Path, default):

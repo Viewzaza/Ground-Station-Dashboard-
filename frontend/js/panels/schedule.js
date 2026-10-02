@@ -47,6 +47,10 @@ let settingsOpen = false;
 
 let networkTokenSet = false;
 let campaignPreviewItems = null;   // the exact items last previewed, so CONFIRM submits what was shown
+// generated_utc of the preview campaignPreviewItems came from, sent with the
+// commit: the backend refuses ("stale") a plan it has booked over since - the
+// auto-run chain books at fixed slot times and nothing tells this tab it ran.
+let campaignPreviewGeneratedUtc = null;
 let campaignLoop = false;          // campaign_loop_until_exhausted, as last loaded/saved
 // campaign_transmitter_policy, as last loaded/saved. 'pinned' until a config
 // says otherwise: a backend that predates the setting pins the telemetry, and
@@ -63,7 +67,7 @@ let lastPreviewAt = null;               // generated_utc (ms) of the preview the
 // stop nor wave through a run.
 let lastPreviewOwnStation = null;
 // The newest thing known about whether SatNOGS will let us book other
-// people's stations at all: {at, source, blocks, text}. See noteOwnStation().
+// people's stations at all: {at, source, blocks, describe}. See noteOwnStation().
 let ownStationEvidence = null;
 // campaign_max_total / campaign_max_per_station as last LOADED or SAVED - not
 // the sliders, which can hold unsaved moves (and clamp a saved value above
@@ -71,7 +75,10 @@ let ownStationEvidence = null;
 // chained campaign books with the saved caps.
 let campaignSavedTotal = null;
 let campaignSavedPer = null;
-let configStationId = null;   // the configured station id, for the no-permission note
+// The configured station id, for the no-permission notes. Read when a note is
+// PAINTED, not when its evidence arrives: open() fetches config and the last
+// run in parallel, and either can answer first.
+let configStationId = null;
 // One-click and MAX COVERAGE share one in-flight flag. updateCampaignGate()
 // re-derives both buttons from the token alone, and it runs on every
 // max-total slider move and every loadConfig() - so without this, touching a
@@ -134,9 +141,14 @@ const panel = () => document.getElementById('schedule-panel');
 
 async function open() {
   panel().hidden = false;
+  const config = loadConfig();
   await Promise.all([
-    loadLastRun(), loadPriorities(), loadConfig(), loadPriorityLists(),
-    loadCampaignLastRun(), loadCampaignHistory(), loadCampaignPreviewStats(),
+    loadLastRun(), loadPriorities(), config, loadPriorityLists(),
+    // After the config, not alongside it: the last run's no-permission note
+    // ("most likely station 5024 is not Online") is rendered once, naming the
+    // station from config - in a race it said "ours" instead. loadConfig()
+    // swallows its own errors, so a failed config still lets this run.
+    config.then(loadCampaignLastRun), loadCampaignHistory(), loadCampaignPreviewStats(),
   ]);
 }
 
@@ -1182,6 +1194,9 @@ async function loadConfig() {
     updateCampaignGate();
     renderAutoRun(cfg, { keepEdits: true });
     refreshRunGate();
+    // A no-permission warning painted before this config landed said
+    // "station ?"; it names configStationId at paint time, so repaint.
+    paintOwnStationWarning();
   } catch (err) {
     console.error('[schedule] config', err);
   }
@@ -1425,35 +1440,40 @@ function onChainCampaignChange(ev) {
   paintAutoRun();
 }
 
-/* The chain's consent prompt. It names what the chained campaign will
-   actually do, from the values it will actually use: the auto-run slots as
-   they stand in this form (they are saved by the same SAVE), and the Network
-   Campaign's SAVED caps - not its sliders, which may hold moves nobody saved
-   (the backend plans from the saved config only). "Up to N stations" is the
-   per-round bound - a round books at most N bookings, so at most N stations;
-   with loop on the slot keeps going, and the prompt says so rather than
-   quote N as a ceiling it is not. */
-function chainCampaignConsentText() {
+/* When the Station Schedule auto-run fires, in words: the slots as they
+   stand in this form (they are saved by the same SAVE as the chain toggle). */
+function autoRunSlotsText() {
   const cfg = autoRunCfg || {};
-  const total = campaignSavedTotal ?? '?';
-  const per = campaignSavedPer ?? '?';
   const tz = cfg.timezone ? ` (${cfg.timezone})` : '';
-  let slots;
   if (cfg.auto_run_mode === 'interval') {
     const every = numberOr(document.getElementById('schedule-auto-interval').value,
       cfg.auto_run_interval_min ?? 180);
-    slots = `every ${every} minutes`;
-  } else {
-    slots = autoTimes.length
-      ? `at ${autoTimes.join(', ')}${tz}`
-      : 'at the configured times (none are set yet, so nothing fires until one is added)';
+    return `every ${every} minutes`;
   }
+  return autoTimes.length
+    ? `at ${autoTimes.join(', ')}${tz}`
+    : 'at the configured times (none are set yet, so nothing fires until one is added)';
+}
+
+/* The chain's consent prompt. It names what the chained campaign will
+   actually do, from the values it will actually use: the auto-run slots
+   (autoRunSlotsText), and the Network Campaign's SAVED caps - not its
+   sliders, which may hold moves nobody saved (the backend plans from the
+   saved config only). How many STATIONS a slot can reach comes from
+   stationBoundText, the same wording one-click uses: with loop off a round
+   books at most N bookings, so at most N stations; with loop on later rounds
+   reach stations the first did not, so N is no bound on stations at all and
+   is quoted only as the per-round booking cap. */
+function chainCampaignConsentText() {
+  const total = campaignSavedTotal ?? '?';
+  const per = campaignSavedPer ?? '?';
   const autoRunOff = !document.getElementById('schedule-auto-enabled').checked;
+  const stations = stationBoundText(campaignPolicy, total, campaignLoop);
   return 'After every Station Schedule auto-run, also book KNACKSAT-2 on community '
     + 'stations worldwide?\n\n'
-    + `Every auto-run slot - ${slots} - will, right after this station's own run, `
-    + 'compute a Network Campaign plan and SUBMIT it with nobody watching: real '
-    + `observations booked on up to ${total} community station(s) each time.\n\n`
+    + `Every auto-run slot - ${autoRunSlotsText()} - will, right after this station's `
+    + 'own run, compute a Network Campaign plan and SUBMIT it with nobody watching. '
+    + `Each slot books real observations on ${stations}.\n\n`
     + 'It uses the Network Campaign caps as saved:\n'
     + `  • Up to ${total} bookings per round\n`
     + `  • At most ${per} per station in the 48 h window (counting KNACKSAT-2 `
@@ -1461,7 +1481,7 @@ function chainCampaignConsentText() {
     + `  • Downlink: ${CAMPAIGN_POLICY_TEXT[campaignPolicy] || campaignPolicy}\n`
     + (campaignLoop
       ? '  • Loop ON - each slot keeps booking further rounds until nothing is left, '
-        + `so one slot can book well above ${total}.\n`
+        + `so one slot can book well above ${total} bookings.\n`
       : '  • Loop off - one round per slot.\n')
     + (campaignConfigDirty
       ? '\nThe Network Campaign tab has unsaved changes; the chain books with the '
@@ -1913,7 +1933,12 @@ function campaignTriggerTag(trigger) {
    preview that finds the station Online clears an older "blocked" run's
    warning, and a later run that booked something clears a blocked preview's.
    A payload that predates the gate carries neither and is no evidence either
-   way - it never clears or raises the warning. */
+   way - it never clears or raises the warning.
+
+   Evidence carries `describe`, a function, not finished text: the sentence
+   can name our station from config (configStationId), and the config may
+   land after the evidence does - text frozen on arrival read "station ?"
+   for good on a first open whose last-run GET won the race. */
 function ownStationFromPreview(preview) {
   const own = preview?.own_station;
   if (!own || typeof own !== 'object') return null;
@@ -1925,14 +1950,14 @@ function ownStationFromPreview(preview) {
     at: Date.parse(preview.generated_utc),
     source: 'preview',
     blocks: !!own.blocks_booking,
-    text: own.blocks_booking ? ownStationBlockedText(own) : '',
+    describe: () => ownStationBlockedText(own),
   };
 }
 
 function ownStationFromRun(run) {
   const at = Date.parse(run?.generated_utc);
   if (run?.status === 'blocked') {
-    return { at, source: 'submit', blocks: true, text: blockedRunText(run) };
+    return { at, source: 'submit', blocks: true, describe: () => blockedRunText(run) };
   }
   // The backend's backstop fired: SatNOGS itself answered "No permission to
   // schedule observations" for a whole POST, so by the END of this run it was
@@ -1941,12 +1966,12 @@ function ownStationFromRun(run) {
   // permission part-way (the station dropping off mid-run) as proof that all
   // is well and clear the warning.
   if (run?.no_permission) {
-    return { at, source: 'submit', blocks: true, text: noPermissionRunText() };
+    return { at, source: 'submit', blocks: true, describe: noPermissionRunText };
   }
   // A run that got bookings accepted proves SatNOGS was letting us book then.
   // One that booked nothing proves nothing about the station either way.
   if ((run?.status === 'ok' || run?.status === 'ok_with_warnings') && (run.accepted ?? 0) > 0) {
-    return { at, source: 'submit', blocks: false, text: '' };
+    return { at, source: 'submit', blocks: false, describe: null };
   }
   return null;
 }
@@ -1979,7 +2004,7 @@ function paintOwnStationWarning() {
     ? ` (As of the ${ev.source === 'preview' ? 'last preview' : 'last submit'}, `
       + `${shortDateTime(new Date(ev.at).toISOString(), 'UTC')} UTC.)`
     : '';
-  el.textContent = `${ev.text}${when}`;
+  el.textContent = `${ev.describe()}${when}`;
   el.hidden = false;
 }
 
@@ -2007,8 +2032,9 @@ function blockedRunText(run) {
 /* The warning for a run SatNOGS refused for permission. That run carries no
    station status (the gate let it through because the status was unknown or
    stale - SatNOGS only marks a station Offline about an hour after it goes
-   quiet), so it says what SatNOGS said and the likely cause, not a status it
-   never read. */
+   quiet - or the station dropped during the run), so it says what SatNOGS
+   said and the likely cause, not a status it never read. Built when painted:
+   it names configStationId, which may land after the run does. */
 function noPermissionRunText() {
   return 'SatNOGS refused the last submit with "No permission to schedule observations" '
     + `- most likely station ${configStationId ?? '?'} is not Online. SatNOGS won't accept `
@@ -2078,6 +2104,7 @@ function setOneClickButtonsDisabled(disabled) {
 
 function invalidateCampaignPreview() {
   campaignPreviewItems = null;
+  campaignPreviewGeneratedUtc = null;
   document.getElementById('campaign-commit-btn').hidden = true;
 }
 
@@ -2320,8 +2347,10 @@ function renderCampaignPreview(preview) {
     : 'Preview ready: no observations would be booked.');
 
   // What CONFIRM actually submits — exactly what was just shown, not a
-  // recompute at click time, so what's confirmed is what was reviewed.
+  // recompute at click time, so what's confirmed is what was reviewed. Its
+  // stamp goes with it, so the backend can tell when it has gone stale.
   campaignPreviewItems = items;
+  campaignPreviewGeneratedUtc = preview.generated_utc || null;
   lastPreviewStoppedEarly = preview.stopped_early || null;
   lastPreviewParams = preview.params || null;
   const renderedAt = Date.parse(preview.generated_utc);
@@ -2591,7 +2620,24 @@ async function submitPreviewedItems() {
     // has a non-'running' status from any earlier commit, so only a changed
     // generated_utc proves *this* submit actually finished.
     const before = (await api.campaignLastRun())?.generated_utc;
-    const started = await api.commitCampaign(campaignPreviewItems);
+    const started = await api.commitCampaign(campaignPreviewItems, campaignPreviewGeneratedUtc);
+    if (started?.status === 'stale') {
+      // Something booked over this plan after it was computed - typically
+      // the Station Schedule auto-run chain, which nobody in this tab saw
+      // run. Sending it now could put a second set of passes on stations
+      // already at their cap, so the backend sent nothing. The plan is
+      // dropped (CONFIRM must not stay offered on it), and the newer run is
+      // shown so the operator can see what booked in the meantime.
+      invalidateCampaignPreview();
+      await Promise.all([loadCampaignLastRun(), loadCampaignHistory()]);
+      box.prepend(alertNote(
+        `Not submitted — ${started.stopped_reason
+          || 'bookings were made after this plan was computed, so nothing was sent; '
+            + 'run PREVIEW again'}.`, 'error'));
+      announceCampaign('Not submitted: the plan was out of date. Nothing was sent. '
+        + 'Run PREVIEW again.');
+      return;
+    }
     if (started?.status === 'running') {
       // Preview, commit and the cross-check share one "is a campaign op
       // running" flag on the backend, so a still-running preview (or
@@ -2876,16 +2922,24 @@ function stationBoundText(policy, total, loop) {
 }
 
 /* The one-click consent prompt, and MAX COVERAGE's (`preset`), which differs
-   in saying first that it overwrites the saved settings - and that the
-   unattended timer, if on, inherits them. The per-station wording says "in
-   the 48 h window, counting what is already booked" because that is what the
-   cap now means: a second run tops stations up, it does not add `per` more. */
+   in saying first that it overwrites the saved settings - and that every
+   unattended trigger that is on inherits them: the Network Campaign's own
+   timer ("Book automatically") and the Station Schedule auto-run chain, which
+   books every slot from these same saved settings even with the timer off.
+   The per-station wording says "in the 48 h window, counting what is already
+   booked" because that is what the cap now means: a second run tops stations
+   up, it does not add `per` more. */
 function campaignConsentText({ total, per, loop, policy, preset = false }) {
   const perText = `at most ${per} per station in the 48 h window (counting KNACKSAT-2 `
     + 'observations already booked on it)';
   let text;
   if (preset) {
     const autoOn = !!document.getElementById('campaign-auto-commit')?.checked;
+    // Saved ON, or ticked and waiting for the Station Schedule SAVE (its
+    // consent was given against the caps of the moment, which this replaces).
+    const chainOn = chainCampaignSupported()
+      && (autoRunCfg.auto_run_chain_campaign === true
+        || !!document.getElementById('auto-run-chain-campaign')?.checked);
     text = 'MAX COVERAGE — book KNACKSAT-2 on as many community stations as possible?\n\n'
       + 'This first SAVES these campaign settings, replacing the current ones:\n'
       + `  • Downlink: ${CAMPAIGN_POLICY_TEXT[policy]}\n`
@@ -2898,6 +2952,13 @@ function campaignConsentText({ total, per, loop, policy, preset = false }) {
       + (autoOn
         ? 'Automatic booking is ON: every later unattended cycle will book with '
           + 'these settings too.\n\n'
+        : '')
+      + (chainOn
+        ? 'The Station Schedule auto-run chain is ON: every auto-run slot '
+          + `(${autoRunSlotsText()}) will also book with these settings, unattended`
+          + (document.getElementById('schedule-auto-enabled')?.checked
+            ? '.\n\n'
+            : ' - once auto run itself is enabled.\n\n')
         : '');
   } else {
     // With looping on, the commit does not stop at `total`: it recomputes and
@@ -2927,8 +2988,9 @@ function campaignConsentText({ total, per, loop, policy, preset = false }) {
 /* MAX COVERAGE: the preset in MAX_COVERAGE, saved, then the ordinary one-click.
 
    It asks BEFORE touching the saved settings, not after. Those settings are
-   also what the unattended timer books with, so a save followed by a declined
-   prompt would leave "600, loop on" armed for the next auto cycle - a booking
+   also what the unattended triggers book with - the campaign timer and the
+   Station Schedule auto-run chain - so a save followed by a declined prompt
+   would leave "600, loop on" armed for the next unattended run - a booking
    nobody agreed to. Asking first means a "no" changes nothing at all.
 
    A failed save stops here, visibly: going on would ask the backend to plan

@@ -208,7 +208,16 @@ async def campaign_commit(request: Request, body: CampaignCommitRequest) -> dict
     if service.is_running():
         return {"status": "running"}
     items = [item.model_dump() for item in body.items] if body.items is not None else None
-    asyncio.create_task(service.commit_campaign(items=items, trigger="manual"))
+    if items is not None:
+        # Answered here, not left to the background task: a stale commit
+        # writes no run record (the one on disk is the newer run that made
+        # this plan stale), so a panel polling for one would wait out its
+        # whole timeout. commit_campaign checks again under its guard.
+        stale = service.stale_commit(body.preview_generated_utc, trigger="manual")
+        if stale is not None:
+            return stale
+    asyncio.create_task(service.commit_campaign(
+        items=items, trigger="manual", preview_generated_utc=body.preview_generated_utc))
     return {"status": "started"}
 
 

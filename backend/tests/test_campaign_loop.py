@@ -20,14 +20,20 @@ empty. The properties that matter:
   items each (a mixed POST can fail whole on SatNOGS's 2 s DB lookup; a huge
   one can die mid-save), uncertain items are reported apart and never resent,
   and nothing more is sent once SatNOGS is unreachable;
-* the timer does not fire a cycle at startup when one ran recently - every
-  uvicorn --reload used to fire a full real preview.
+* the timer does not fire a cycle at startup when its own last cycle ran
+  recently - every uvicorn --reload used to fire a full real preview - and
+  previews from other triggers (the auto-run chain, the operator) do not move
+  it, or every reload would land it on the next day's auto-run slot;
+* a cycle refused because another campaign operation holds the guard (a
+  minutes-long cross-check, typically) is retried a minute later, not a day.
 
 Nothing here touches the network.
 """
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -496,6 +502,8 @@ def _write_preview(svc, generated_utc):
 
 
 def test_the_first_cycle_waits_out_what_is_left_of_the_poll_period(tmp_path, monkeypatch):
+    # No record of the timer's own cycle here (a data dir from before it was
+    # kept), so the last preview stands in for it - the original rule.
     svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork(),
                        campaign_poll_s=86400)
     now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
@@ -520,8 +528,169 @@ def test_the_first_cycle_waits_out_what_is_left_of_the_poll_period(tmp_path, mon
     assert svc.auto_cycle_delay_s(now) == pytest.approx(22 * 3600)
 
 
+def test_a_chained_preview_does_not_move_the_timer_onto_the_auto_run_slot(tmp_path,
+                                                                          monkeypatch):
+    """With the chain on, the last preview is usually the chain's: started at
+    a Station Schedule slot plus that day's own run (23:02:10Z here). Anchored
+    on it, a reload at 04:00Z put the timer's next cycle at 23:02:10Z - inside
+    the next slot, where whichever previewed first made the other answer
+    "running", and with auto-commit off the chain lost that slot outright."""
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork(),
+                       campaign_poll_s=86400)
+    timer_cycle = datetime(2026, 10, 2, 6, 0, tzinfo=timezone.utc)
+    svc._write_json(tmp_path / "campaign_last_auto_cycle.json",
+                    {"generated_utc": timer_cycle.isoformat()})
+    _write_preview(svc, datetime(2026, 10, 2, 23, 2, 10, tzinfo=timezone.utc).isoformat())
+    reload_at = datetime(2026, 10, 3, 4, 0, tzinfo=timezone.utc)
+
+    first_cycle = reload_at + timedelta(seconds=svc.auto_cycle_delay_s(reload_at))
+
+    assert first_cycle == datetime(2026, 10, 3, 6, 0, tzinfo=timezone.utc), (
+        "the timer keeps its own phase, a day after its own last cycle")
+
+
+def _stamped_previews(svc, monkeypatch, stamps):
+    """Each preview is built at the next of `stamps`."""
+    stamps = iter(stamps)
+    monkeypatch.setattr(svc, "_preview_sync", lambda: {
+        "status": "ok", "generated_utc": next(stamps).isoformat(), "items": [item(1, 0)]})
+
+    async def commit(**kwargs):
+        return {"status": "ok"}
+    monkeypatch.setattr(svc, "commit_campaign", commit)
+
+
+async def test_the_timer_records_its_own_cycle_and_nothing_else_does(tmp_path, monkeypatch):
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork())
+    svc.schedule_service.campaign_auto_commit_enabled = lambda: False
+    t = datetime(2026, 10, 2, 6, 0, tzinfo=timezone.utc)
+    _stamped_previews(svc, monkeypatch, [t + timedelta(hours=h) for h in range(4)])
+
+    await svc.preview_campaign()       # the operator's PREVIEW, 06:00
+    assert not svc.auto_cycle_path.exists()
+
+    svc._running = True                # a refused cycle did not happen
+    assert await svc.run_auto_cycle() == cs.AUTO_CYCLE_BUSY
+    assert not svc.auto_cycle_path.exists()
+    svc._running = False
+
+    timer_cycle = {"generated_utc": "2026-10-02T07:00:00+00:00"}
+    assert await svc.run_auto_cycle() == "done"           # the timer, 07:00
+    assert svc._read_json(svc.auto_cycle_path, None) == timer_cycle
+
+    await svc.run_chained_cycle()                          # a chain slot, 08:00
+    await svc.preview_campaign()
+    assert svc._read_json(svc.auto_cycle_path, None) == timer_cycle
+
+
+async def test_before_the_timer_s_first_cycle_a_chain_slot_cannot_become_its_anchor(
+        tmp_path, monkeypatch):
+    """A data dir from before the timer kept its own record: the last preview
+    is the fallback. A chain slot overwriting that preview, then a reload,
+    must not hand the timer the slot's phase - which its own record would
+    then carry forward every day."""
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=StubNetwork(),
+                       campaign_poll_s=86400)
+    _write_preview(svc, datetime(2026, 10, 2, 6, 0, tzinfo=timezone.utc).isoformat())
+    _stamped_previews(svc, monkeypatch, [datetime(2026, 10, 2, 23, 2, 10, tzinfo=timezone.utc)])
+
+    await svc.run_chained_cycle()
+    assert svc.get_last_preview()["generated_utc"] == "2026-10-02T23:02:10+00:00"
+    reload_at = datetime(2026, 10, 3, 4, 0, tzinfo=timezone.utc)
+
+    first_cycle = reload_at + timedelta(seconds=svc.auto_cycle_delay_s(reload_at))
+
+    assert first_cycle == datetime(2026, 10, 3, 6, 0, tzinfo=timezone.utc)
+
+
 class _Stop(Exception):
     pass
+
+
+async def test_a_cross_check_in_flight_delays_the_timer_a_minute_not_a_day(tmp_path,
+                                                                         monkeypatch):
+    """The cross-check shares the single-flight guard and reads calendars
+    serially (~6 min for ~220 stations). A timer cycle that came due during
+    one used to answer "running", and the loop slept campaign_poll_s - the
+    day's automatic cycle lost even with auto-commit on."""
+    reading, release = threading.Event(), threading.Event()
+
+    class SlowNetwork(StubNetwork):
+        def future_bookings(self, station_id, now=None):
+            reading.set()
+            release.wait(5)        # a /jobs/ read in progress
+            return []
+
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=SlowNetwork())
+    svc.schedule_service.campaign_auto_commit_enabled = lambda: True
+    soon = datetime.now(timezone.utc) + timedelta(hours=5)
+    svc._write_json(svc.result_path, {"status": "ok", "accepted_items": [{
+        "station_id": 40, "transmitter_uuid": "tx", "start": soon.isoformat(),
+        "end": (soon + timedelta(minutes=8)).isoformat()}]})
+    monkeypatch.setattr(svc, "_preview_sync", lambda: {
+        "status": "ok", "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "items": [item(1, 0)]})
+    commits: list[dict] = []
+
+    async def commit(**kwargs):
+        commits.append(kwargs)
+        return {"status": "ok"}
+    monkeypatch.setattr(svc, "commit_campaign", commit)
+
+    verify = asyncio.create_task(svc.verify_last_run())
+    while not reading.is_set():
+        await asyncio.sleep(0.01)
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 1 and seconds == 60.0:
+            release.set()          # the cross-check finishes during the retry wait
+            await verify
+            return
+        raise _Stop
+
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", fake_sleep)
+    owner = scheduler_module.Scheduler.__new__(scheduler_module.Scheduler)
+    owner.campaign_service = svc
+    owner.s = svc.s
+    try:
+        with pytest.raises(_Stop):
+            await owner._campaign_loop()
+    finally:
+        release.set()
+        await verify
+
+    assert sleeps == [60.0, 86400]
+    assert [c["trigger"] for c in commits] == ["auto"], "the day's cycle still committed"
+
+
+async def test_a_guard_that_never_frees_costs_one_cycle_not_a_retry_loop(monkeypatch):
+    events: list = []
+
+    class BusyCampaign:
+        def auto_cycle_delay_s(self):
+            return 0.0
+
+        async def run_auto_cycle(self):
+            events.append("cycle")
+            return cs.AUTO_CYCLE_BUSY
+
+    async def fake_sleep(seconds):
+        events.append(("sleep", seconds))
+        if seconds == 86400:
+            raise _Stop
+
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", fake_sleep)
+    owner = scheduler_module.Scheduler.__new__(scheduler_module.Scheduler)
+    owner.campaign_service = BusyCampaign()
+    owner.s = SimpleNamespace(campaign_poll_s=86400)
+    with pytest.raises(_Stop):
+        await owner._campaign_loop()
+
+    assert scheduler_module.Scheduler._CAMPAIGN_BUSY_MAX_RETRIES == 30
+    assert events == ["cycle", ("sleep", 60.0)] * 30 + ["cycle", ("sleep", 86400)]
 
 
 async def _run_campaign_loop(monkeypatch, delay_s: float) -> list:

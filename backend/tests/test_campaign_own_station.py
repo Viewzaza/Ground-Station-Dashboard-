@@ -14,6 +14,15 @@ from happening again:
   commit stops there, and that POST's attempts are forgotten so its slots are
   bookable the moment the station is back.
 
+The backstop must not mistake the OTHER refusal with the same words for an
+outage. While our own station is useable, SatNOGS decides per TARGET station
+(`return target_station.is_available`), so one station that went unavailable
+after the catalogue read is refused on its own - and in a looped commit its
+remaining passes can make up a whole POST by themselves. With our status fresh
+and "Online" that is never an outage; with it unknown, one station alone is
+not either. Such a refusal keeps its attempts, the run goes on, and later
+rounds leave that station out.
+
 Nothing here touches the network.
 """
 
@@ -326,3 +335,158 @@ async def test_a_permission_error_among_other_outcomes_changes_nothing(tmp_path,
     assert len(network.posts) == 3
     assert result["no_permission"] is False and result["not_sent"] == 0
     assert {sid for sid, *_ in svc._recent_attempts} == {40, 41, 42, 43}
+
+
+# --- ...but not for a refusal that is about the target station -------------------------------
+
+async def test_a_station_refused_alone_while_we_are_online_does_not_stop_the_commit(
+        tmp_path, monkeypatch):
+    """Station 12 went is_available=False after the catalogue read; our own
+    station is fresh and Online, so SatNOGS is answering about station 12."""
+    network = Network(refuse("tx-b"))
+    svc = make_service(tmp_path, monkeypatch, network, own_station=own("Online"))
+    items = [item(40, "tx-a"), item(12, "tx-b", 0), item(12, "tx-b", 1), item(43, "tx-c")]
+
+    result = await svc.commit_campaign(items=items, trigger="manual")
+
+    assert [post[0]["transmitter_uuid"] for post in network.posts] == ["tx-a", "tx-b", "tx-c"], (
+        "the POST after the refused one still goes out")
+    assert result["no_permission"] is False and result["not_sent"] == 0
+    assert result["accepted"] == 2
+    assert "permission" not in result["stopped_reason"]
+    assert svc.test_states[-1] == ("campaign", "ok", "2 booked"), "no 'is our station Online?'"
+    # Really refused, so held like any rejection: the next commit inside the
+    # catalogue hour does not plan the same windows again.
+    assert sorted(sid for sid, *_ in svc._recent_attempts) == [12, 12, 40, 43]
+
+
+async def test_a_looped_commit_does_not_plan_a_refused_station_again(tmp_path, monkeypatch):
+    network = Network(refuse("tx-b"))
+    svc = make_service(tmp_path, monkeypatch, network, loop=True, own_station=own("Online"))
+    seen: list[dict] = []
+
+    def build(network, db, auto_settings, booked_counts=None, calendar_cache=None):
+        seen.append(dict(booked_counts or {}))
+        return {"items": []}
+    monkeypatch.setattr(svc, "_build_items", build)
+
+    await svc.commit_campaign(items=[item(40, "tx-a"), item(12, "tx-b")], trigger="chained")
+
+    assert seen == [{40: 1, 12: 3}], "station 12 goes into round 2 as already at its cap (3)"
+
+
+async def test_with_our_status_unknown_one_station_alone_is_not_an_outage(tmp_path, monkeypatch):
+    """No evidence from the gate: an outage refuses every station of every
+    POST, so one station alone costs at most one more POST to tell apart."""
+    network = Network(refuse("tx-b"))
+    svc = make_service(tmp_path, monkeypatch, network, own_station=None)
+
+    result = await svc.commit_campaign(
+        items=[item(12, "tx-b"), item(12, "tx-b", 1), item(43, "tx-c")], trigger="auto")
+
+    assert len(network.posts) == 2 and result["no_permission"] is False
+    assert result["accepted"] == 1
+
+
+async def test_our_station_dropping_mid_commit_is_an_outage_even_on_one_station(
+        tmp_path, monkeypatch):
+    """The gate is read when the refusal comes back, not when the commit
+    started: a looped commit can run for minutes."""
+    status = {"now": "Online"}
+    refusing = refuse("tx-b")
+
+    def answer(posted):
+        if posted[0]["transmitter_uuid"] == "tx-b":
+            status["now"] = "Offline"   # the poller saw 5024 drop meanwhile
+        return refusing(posted)
+    network = Network(answer)
+    svc = make_service(tmp_path, monkeypatch, network, own_station=lambda: {
+        "id": 5024, "status": status["now"], "last_seen": LAST_SEEN, "age_s": 30.0})
+
+    result = await svc.commit_campaign(
+        items=[item(40, "tx-a"), item(12, "tx-b"), item(43, "tx-c")], trigger="auto")
+
+    assert [post[0]["transmitter_uuid"] for post in network.posts] == ["tx-a", "tx-b"]
+    assert result["no_permission"] is True and result["not_sent"] == 1
+
+
+async def test_an_unavailable_station_against_satnogs_own_permission_rule(tmp_path, monkeypatch):
+    """End to end through the real NetworkClient.schedule, against a server
+    that applies satnogs-network's rule for an account in good standing: only
+    stations with is_available=False are refused, all named at once. Round 1
+    books station 12's neighbours around it; round 2's telemetry POST is
+    station 12 alone, and round 2's digipeater POST (station 202) must still
+    go out."""
+    import requests
+
+    from app.vendor.autoscheduler import http as http_mod
+    from app.vendor.autoscheduler.campaign import CampaignItem, CampaignPreview
+    from app.vendor.autoscheduler.network_client import NetworkClient
+
+    digipeater = "JR28wAEjmpuDQ4FrPWAiwf"
+    t0 = datetime.now(timezone.utc) + timedelta(hours=3)
+    monkeypatch.setattr(http_mod.time, "sleep", lambda _s: None)
+
+    class Server:
+        def __init__(self):
+            self.headers: dict = {}
+            self.posts: list[list[int]] = []
+
+        def request(self, method, url, json=None, **kw):
+            assert method == "POST"
+            stations = [i["ground_station"] for i in json]
+            self.posts.append(stations)
+            resp = requests.Response()
+            resp.encoding = "utf-8"
+            if 12 in stations:
+                resp.status_code = 400
+                resp._content = (b'{"non_field_errors":["No permission to schedule '
+                                 b'observations on station: 12"]}')
+            else:
+                resp.status_code = 201
+                resp._content = b"[]"
+            return resp
+
+    server = Server()
+
+    def client(auto_settings, cache):
+        c = NetworkClient(SimpleNamespace(network_token="t0k3n",
+                                          network_base_url="https://network.example/api"),
+                          cache=object())
+        c.session = server
+        return c
+
+    def it(sid, uuid, n):
+        start = t0 + timedelta(hours=n, minutes=sid % 50)
+        return CampaignItem(station_id=sid, station_name=f"S{sid}", transmitter_uuid=uuid,
+                            start=start, end=start + timedelta(minutes=8), max_elevation_deg=40.0,
+                            transmitter_description="tlm", is_fallback=uuid == digipeater)
+
+    rounds = [
+        [it(101, TELEMETRY, 0), it(102, TELEMETRY, 0), it(12, TELEMETRY, 0),
+         it(12, TELEMETRY, 6), it(201, digipeater, 0)],
+        # Round 2 plans station 12 again whatever booked_counts says, so the
+        # test does not rest on the planner leaving it out: station 12 got
+        # nothing in round 1, so it still had its whole allowance then.
+        [it(12, TELEMETRY, 12), it(12, TELEMETRY, 18), it(202, digipeater, 3)],
+    ]
+
+    def fake_build(network, db, *, booked_counts=None, now=None, **kw):
+        items = rounds.pop(0) if rounds else []
+        return CampaignPreview(generated_utc=now, window_start=now,
+                               window_end=now + timedelta(hours=48), items=items,
+                               stations_reachable=5)
+
+    svc = make_service(tmp_path, monkeypatch, Network(), loop=True, own_station=own("Online"))
+    monkeypatch.setattr(cs, "NetworkClient", client)
+    monkeypatch.setattr(cs, "build_campaign", fake_build)
+    assert svc.s.campaign_fallback_uuids == [digipeater], "the shipped fallback"
+
+    result = await svc.commit_campaign(items=None, trigger="chained")
+
+    assert [202] in server.posts, "round 2's digipeater POST was never sent"
+    assert result["no_permission"] is False
+    assert server.posts == [[101, 102, 12, 12], [101, 102], [201], [12, 12], [202]]
+    assert result["accepted"] == 4 and result["rounds"] == 2
+    assert result["stopped_reason"] == "no bookings left"
+    assert svc.test_states[-1][1] == "ok"

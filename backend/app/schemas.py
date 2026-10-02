@@ -425,14 +425,21 @@ class CampaignCommitRequest(BaseModel):
     # Omit to recompute a fresh preview and submit that; pass the exact
     # items a client already previewed to submit precisely what was shown.
     items: list[CampaignItem] | None = None
+    # The generated_utc of the preview `items` came from. With it, a plan
+    # that something else has booked over since (the auto-run chain, the
+    # timer, another tab) is refused as "stale" and nothing is sent - see
+    # CampaignService.stale_commit. Optional so an older panel still submits.
+    preview_generated_utc: str | None = None
 
 
 class CampaignCommitResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     # "blocked": the own-station gate stopped it and nothing was sent - see
-    # stopped_reason and own_station.
-    status: Literal["ok", "ok_with_warnings", "error", "running", "blocked"]
+    # stopped_reason and own_station. "stale": the previewed plan was booked
+    # over since it was computed, so nothing was sent; it is only ever an
+    # answer, never stored as the last run or in history.
+    status: Literal["ok", "ok_with_warnings", "error", "running", "blocked", "stale"]
     # "chained": run straight after a Station Schedule auto-run slot.
     trigger: Literal["manual", "auto", "chained"] = "manual"
     generated_utc: str | None = None
@@ -452,8 +459,10 @@ class CampaignCommitResult(BaseModel):
     # Items never sent because SatNOGS became unreachable, or refused us
     # permission, part-way through.
     not_sent: int = 0
-    # A whole POST came back "No permission to schedule observations" and the
-    # commit stopped there (the own-station gate could not see the outage).
+    # A whole POST came back "No permission to schedule observations" in a
+    # way only an account with no useable station gets, and the commit
+    # stopped there (the own-station gate could not see the outage). A POST
+    # refused for one unavailable target station does not set it.
     no_permission: bool = False
     own_station: CampaignOwnStation | None = None
     calendar_sources: dict[str, int] = Field(default_factory=dict)

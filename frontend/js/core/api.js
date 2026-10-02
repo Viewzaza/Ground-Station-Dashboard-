@@ -102,7 +102,13 @@ export const api = {
   campaignLastRun:     ()         => get('/api/schedule/campaign'),
   runCampaignPreview:  ()         => post('/api/schedule/campaign/preview', {}),
   campaignPreview:     ()         => get('/api/schedule/campaign/preview'),
-  commitCampaign:      (items)    => post('/api/schedule/campaign/commit', { items: items || null }),
+  // previewGeneratedUtc: the stamp of the preview `items` came from, so the
+  // backend can refuse a plan something else has booked over since ("stale").
+  // Undefined is dropped by JSON.stringify, which the backend reads as "not
+  // checked".
+  commitCampaign:      (items, previewGeneratedUtc) => post('/api/schedule/campaign/commit', {
+    items: items || null, preview_generated_utc: previewGeneratedUtc || undefined,
+  }),
   campaignHistory:     ()         => get('/api/schedule/campaign/history'),
   verifyCampaign:      ()         => post('/api/schedule/campaign/verify', {}),
 };

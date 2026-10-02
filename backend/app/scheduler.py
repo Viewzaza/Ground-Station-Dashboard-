@@ -15,7 +15,7 @@ from typing import Awaitable, Callable
 
 from .config import Settings
 from .hub import hub
-from .services.campaign_service import CampaignService
+from .services.campaign_service import AUTO_CYCLE_BUSY, CampaignService
 from .services.control import ControlService
 from .services.predictor import Predictor
 from .services.rig_service import RigService
@@ -284,6 +284,18 @@ class Scheduler:
             log.info("auto-run: chained campaign %s - %s booked; %s", status,
                      outcome.get("accepted", 0), outcome.get("stopped_reason") or "")
 
+    # The campaign timer's answer to a busy guard, the counterpart of
+    # _AUTO_RUN_BUSY_RETRY_S. Since the cross-check went behind the same
+    # single-flight guard as preview and commit, a CROSS-CHECK clicked shortly
+    # before the timer is due holds it for minutes (one serial calendar read
+    # per station, ~1.7 s each: ~6 min for ~220 stations), and a cycle that
+    # simply gave up then lost the whole day - the loop went straight back to
+    # sleep for campaign_poll_s (24 h), auto-commit or not. Bounded, so a
+    # guard that never frees (a 90-minute looped commit is the longest real
+    # case) costs this cycle, not a retry loop forever: 30 x 60 s = 30 min.
+    _CAMPAIGN_BUSY_RETRY_S = 60.0
+    _CAMPAIGN_BUSY_MAX_RETRIES = 30
+
     async def _campaign_loop(self) -> None:
         """Keep the ~48h network-campaign booking window full on a timer.
 
@@ -293,18 +305,34 @@ class Scheduler:
         path is allowed to auto-commit at all while the UI's manual trigger
         never does.
 
-        It does not fire at startup if a preview ran within the last
+        It does not fire at startup if its own last cycle was within the last
         campaign_poll_s: it sleeps out the remainder first. Running eagerly
         meant every restart - including each uvicorn --reload after an edit
         under backend/app - fired a full real preview, and with auto-commit
         on, real bookings. See CampaignService.auto_cycle_delay_s().
+
+        A cycle refused because another campaign operation holds the guard
+        is retried every _CAMPAIGN_BUSY_RETRY_S (at most
+        _CAMPAIGN_BUSY_MAX_RETRIES times) instead of waiting a whole period.
         """
         delay_s = self.campaign_service.auto_cycle_delay_s()
         if delay_s > 0:
-            log.info("campaign timer: last preview is recent; first cycle in %.0f s", delay_s)
+            log.info("campaign timer: its last cycle is recent; first cycle in %.0f s", delay_s)
             await asyncio.sleep(delay_s)
+        busy_retries = 0
         while True:
-            await self.campaign_service.run_auto_cycle()
+            outcome = await self.campaign_service.run_auto_cycle()
+            if outcome == AUTO_CYCLE_BUSY:
+                if busy_retries < self._CAMPAIGN_BUSY_MAX_RETRIES:
+                    busy_retries += 1
+                    log.info("campaign timer: another campaign operation is running; "
+                             "retrying in %.0f s (%d/%d)", self._CAMPAIGN_BUSY_RETRY_S,
+                             busy_retries, self._CAMPAIGN_BUSY_MAX_RETRIES)
+                    await asyncio.sleep(self._CAMPAIGN_BUSY_RETRY_S)
+                    continue
+                log.warning("campaign timer: still busy after %d retries; this cycle is "
+                            "skipped, the next is in %.0f s", busy_retries, self.s.campaign_poll_s)
+            busy_retries = 0
             await asyncio.sleep(self.s.campaign_poll_s)
 
     async def _control_loop(self) -> None:
