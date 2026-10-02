@@ -98,12 +98,18 @@ class Hub:
 
         A browser opening mid-pass gets a complete dashboard immediately rather
         than a blank one until each source next polls.
+
+        It carries the sequence number of the newest frame it contains rather
+        than taking a new one. A snapshot goes to one client, so a number it
+        took would be missing from every other client's stream — and a client
+        that sees a gap asks for a snapshot. Two screens open, each resync made
+        a gap for the other, and they asked each other for snapshots forever.
         """
-        self._seq += 1
         frames = [
             f.model_dump(mode="json")
             for f in (*self._last.values(), *self._last_status.values())
         ]
+        # A client resumes from here: the next live frame is _seq + 1, no gap.
         return Frame(type="snapshot", seq=self._seq, data={"frames": frames})
 
     def latest(self, frame_type: str) -> Frame | None:

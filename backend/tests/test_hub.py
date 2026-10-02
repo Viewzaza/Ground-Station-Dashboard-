@@ -50,6 +50,23 @@ def test_snapshot_carries_the_latest_frame_of_every_type():
     assert types["satpos"]["lat"] == 13.8
 
 
+def test_a_snapshot_does_not_leave_a_gap_in_other_clients_streams():
+    """A snapshot goes to one client. When it took a sequence number of its
+    own, every other client saw that number missing, read it as a lost frame
+    and asked for a snapshot — which took another number, and so on: two open
+    screens asked each other for snapshots forever."""
+    hub = Hub()
+    other = hub.register()
+    hub.publish("rotator", {})
+    snap = hub.snapshot()                       # sent to some other browser
+    hub.publish("rotator", {})
+
+    seqs = [f.seq for f in drain(other)]
+    assert seqs[1] == seqs[0] + 1, "the snapshot must not consume a number"
+    # The client that got the snapshot resumes from it with no gap either.
+    assert snap.seq == seqs[0]
+
+
 def test_status_is_kept_per_component_not_per_type():
     """Several producers publish `status`. Keeping only the newest by type
     would tell a new client about one component and nothing about the others."""

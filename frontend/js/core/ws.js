@@ -14,11 +14,14 @@ import { bus } from './bus.js';
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 15000;
 const SILENCE_LIMIT_MS = 25000;
+// While a resync is outstanding, further gaps wait for its snapshot.
+const RESYNC_MIN_MS = 5000;
 
 let socket = null;
 let backoff = RECONNECT_MIN_MS;
 let lastFrameAt = 0;
 let lastSeq = null;
+let resyncAt = 0;
 let watchdog = null;
 
 function url() {
@@ -35,6 +38,11 @@ export function connect() {
 
   socket.onopen = () => {
     backoff = RECONNECT_MIN_MS;
+    // A restarted backend counts from 1 again; carried over, the old numbers
+    // would have every frame from the new one discarded as already seen.
+    lastSeq = null;
+    resyncAt = 0;
+    applied.clear();
     lastFrameAt = Date.now();
     setStatus('api', 'ok');
     startWatchdog();
@@ -90,20 +98,52 @@ function send(type, data = {}) {
 }
 
 function handle(frame) {
-  // A gap in the sequence means we missed something; ask for a fresh picture
-  // rather than rendering a half-stale dashboard.
-  if (frame.seq && lastSeq !== null && frame.seq > lastSeq + 1 && frame.type !== 'snapshot') {
-    send('resync', { last_seq: lastSeq });
+  if (frame.seq) {
+    // A gap means we missed something; ask for a fresh picture rather than
+    // rendering a half-stale dashboard. One request at a time: the snapshot
+    // that answers it closes the gap, and asking again before it lands only
+    // queues more of them.
+    if (lastSeq !== null && frame.seq > lastSeq + 1 && frame.type !== 'snapshot'
+        && Date.now() - resyncAt > RESYNC_MIN_MS) {
+      resyncAt = Date.now();
+      send('resync', { last_seq: lastSeq });
+    }
+    // Never backwards. A resync's snapshot is sent beside the live stream, not
+    // in it, so a live frame can overtake it.
+    lastSeq = Math.max(lastSeq ?? 0, frame.seq);
   }
-  if (frame.seq) lastSeq = frame.seq;
+  apply(frame);
+}
 
+/** The newest frame applied so far, per type — per component for `status`,
+    which many sources share. */
+const applied = new Map();
+const keyOf = (f) => (f.type === 'status' ? `status:${f.data?.component}` : f.type);
+
+/** Frames inside a snapshot are applied but never sequenced. They are the
+    latest of each type, so their numbers are old and in no order; letting them
+    move lastSeq made the next live frame look like a gap, and every snapshot
+    asked for several more — about 7,000 resyncs a second from one open tab.
+
+    Each type keeps the newest frame it has seen, so neither direction of
+    overtaking steps a panel back: a frame queued before a snapshot that already
+    holds something newer is dropped, and a snapshot that a live frame overtook
+    does not overwrite it. That matters most for the frames sent only on change
+    — control, autopilot — which would otherwise stay stale until the next one. */
+function apply(frame) {
+  if (frame.seq) {
+    const key = keyOf(frame);
+    if ((applied.get(key) ?? 0) >= frame.seq) return;
+    applied.set(key, frame.seq);
+  }
   switch (frame.type) {
     case 'hello':
       bus.emit('hello', frame.data);
       break;
 
     case 'snapshot':
-      for (const inner of frame.data.frames || []) handle(inner);
+      resyncAt = 0;
+      for (const inner of frame.data.frames || []) apply(inner);
       break;
 
     case 'rotator':
