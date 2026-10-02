@@ -14,13 +14,18 @@ four interlock gates. On top of that:
   * It never arms or extends a lease. Autopilot can only be switched on while
     an operator holds one, and the moment that lease lapses — expiry or
     release — autopilot switches itself off. Re-engaging is a human decision.
-  * An operator always wins. Pressing STOP, or driving the antenna by hand,
-    disengages autopilot rather than being fought by it.
-  * It only stops tracks it started. A track an operator began is theirs.
+  * An operator always wins. Any command an operator issues — STOP, a goto,
+    a park, a track, a release — disengages autopilot and is left to stand.
+    That is read from ControlService's command journal, not guessed from the
+    mode: a track ended by a closing gate leaves the same mode behind as one
+    ended by a human, and only the journal can tell them apart.
+  * It stops only motion it started, named by track id — never by "the mode
+    says track".
 
 If SatNOGS reconnects, or one of its observations comes within the guard
 window, the interlock closes and ControlService's own track loop stops the
-antenna. The executor sees the closed gate, reports it, and waits.
+antenna. The executor sees the closed gate, reports it, and resumes when it
+reopens, within the same lease.
 """
 
 from __future__ import annotations
@@ -80,15 +85,40 @@ def parse_priorities(raw: str) -> dict[int, float]:
 # planner
 # --------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class PlanInputs:
+    """Everything a rebuild reads from the live system, captured in one place.
+
+    Gathered on the event loop, then handed to a worker thread. The thread
+    touches only this and the predictor, never SatNOGS's or the rotator's
+    mutable state — which the event loop is iterating and pruning at the same
+    time.
+    """
+    now: datetime
+    priorities: dict
+    reservations: tuple
+    heard: dict
+    slew: SlewModel
+    origin_az: float | None
+    schedule_known: bool
+    schedule_age_s: float | None
+
+
 class PlannerService:
+    # Below this peak elevation a 1.5°/s rotator keeps up with the satellite
+    # comfortably, so the follower simulation is skipped.
+    KEYHOLE_FROM_EL = 55.0
+
     def __init__(self, settings: Settings, predictor, satnogs, tles=None) -> None:
         self.s = settings
         self.predictor = predictor
         self.satnogs = satnogs
         self.tles = tles
+        self.rotator = None
         self.plan: Plan | None = None
         self.weights = ScoreWeights()
         self._inputs: tuple = ()
+        self._lock = asyncio.Lock()
         # Watched satellites the plan cannot see, and why. SatNOGS schedules
         # objects under temporary catalogue numbers that no public element
         # set carries; their windows are still reserved, but an operator
@@ -99,18 +129,24 @@ class PlannerService:
     # --- model --------------------------------------------------------------
     @property
     def slew(self) -> SlewModel:
-        caps = None
-        rotator = getattr(self, "rotator", None)
-        if rotator is not None:
-            caps = getattr(rotator.client, "caps", None)
+        min_az, max_az = -180.0, 540.0
+        client = getattr(self.rotator, "client", None)
+        limits = getattr(client, "limits", None)
+        if callable(limits):
+            try:
+                min_az, max_az = limits()[:2]
+            except Exception:
+                log.exception("could not read rotator limits; using defaults")
         return SlewModel(
             az_rate_deg_s=self.s.rotator_az_rate_deg_s,
             el_rate_deg_s=self.s.rotator_el_rate_deg_s,
             setup_s=float(self.s.planner_setup_s),
-            # Use the limits the rotator itself reported, so the cable-wrap
-            # arithmetic matches the hardware rather than a datasheet.
-            min_az=caps.min_az if caps else -180.0,
-            max_az=caps.max_az if caps else 540.0,
+            # The limits actually in force — the configured station limits
+            # intersected with the backend's — not dump_caps's compiled range.
+            # On station 5024 those differ (-90..450 against -180..540), and a
+            # start bearing the clamp then moves undoes the cable-wrap logic.
+            min_az=min_az,
+            max_az=max_az,
         )
 
     def priorities(self) -> dict[int, float]:
@@ -123,12 +159,12 @@ class PlannerService:
         """
         out = parse_priorities(self.s.planner_priorities)
         out.setdefault(self.s.default_norad, max(out.values(), default=1.0))
-        for job in self.satnogs.jobs or []:
+        for job in list(self.satnogs.jobs or []):
             norad = job.get("norad_cat_id")
             if isinstance(norad, int):
                 out.setdefault(norad, self.s.planner_default_priority)
         if self.s.planner_include_catalog and self.tles is not None:
-            for item in self.tles.catalog():
+            for item in list(self.tles.catalog()):
                 out.setdefault(int(item["norad"]), self.s.planner_default_priority)
         return out
 
@@ -139,7 +175,7 @@ class PlannerService:
         # recording SatNOGS is making right now.
         source = getattr(self.satnogs, "commitments", None)
         if source is None:
-            source = self.satnogs.jobs or []
+            source = list(self.satnogs.jobs or [])
         for job in source:
             start, end = _parse_ts(job.get("start")), _parse_ts(job.get("end"))
             if start is None or end is None:
@@ -159,7 +195,7 @@ class PlannerService:
         """When this station last decoded something from each satellite."""
         out: dict[int, datetime] = {}
         now = datetime.now(timezone.utc)
-        for obs in self.satnogs.observations or []:
+        for obs in list(self.satnogs.observations or []):
             norad = obs.get("norad")
             start = _parse_ts(obs.get("start"))
             if not isinstance(norad, int) or start is None or start > now:
@@ -169,18 +205,89 @@ class PlannerService:
                     out[norad] = start
         return out
 
-    def candidates(self, now: datetime | None = None) -> list[Candidate]:
+    def _origin_az(self) -> float | None:
+        """Where the antenna is, unwrapped — if the link says it is real."""
+        last = getattr(self.rotator, "last", None)
+        if last is None or getattr(last, "link", "up") != "up":
+            return None
+        return float(last.az_raw)
+
+    # --- build --------------------------------------------------------------
+    def gather(self, now: datetime | None = None) -> PlanInputs:
+        """Read the live system. Call on the event loop."""
         now = now or datetime.now(timezone.utc)
-        heard = self.last_heard()
+        age = getattr(self.satnogs, "jobs_age_s", None)
+        if not isinstance(age, (int, float)):
+            # Fakes and older services without freshness tracking: treat an
+            # attribute that is simply absent as "known", None as "not yet".
+            age = 0.0 if not hasattr(self.satnogs, "jobs_age_s") else None
+        return PlanInputs(
+            now=now,
+            priorities=dict(self.priorities()),
+            reservations=tuple(self.reservations()),
+            heard=dict(self.last_heard()),
+            slew=self.slew,
+            origin_az=self._origin_az(),
+            schedule_known=age is not None,
+            schedule_age_s=age,
+        )
+
+    def compute(self, inputs: PlanInputs) -> tuple[Plan, list[dict]]:
+        """Build a plan from captured inputs. Safe to run in a worker thread:
+        it reads only `inputs` and the predictor."""
+        cands, blind = self._candidates(inputs)
+        plan = select(
+            cands,
+            slew=inputs.slew,
+            reservations=inputs.reservations,
+            guard_s=float(self.s.gate_guard_s),
+            floor_el=self.s.min_culmination_deg,
+            now=inputs.now,
+            origin_az=inputs.origin_az,
+        )
+        plan.horizon_h = self.s.planner_horizon_h
+        plan.schedule_known = inputs.schedule_known
+        plan.schedule_age_s = inputs.schedule_age_s
+        return plan, blind
+
+    def rebuild(self, now: datetime | None = None) -> Plan:
+        """Synchronous rebuild, on the calling thread. For tests and tools —
+        the running service uses rebuild_async, which keeps Skyfield off the
+        event loop."""
+        plan, blind = self.compute(self.gather(now))
+        self.plan, self.unplannable = plan, blind
+        return plan
+
+    async def rebuild_async(self) -> Plan:
+        """Gather on the loop, compute in a thread, one rebuild at a time.
+
+        The lock is what stops two rebuilds — the timer and an operator's
+        "rebuild" button — racing, with the older one landing last and
+        silently replacing the newer plan.
+        """
+        async with self._lock:
+            inputs = self.gather()
+            plan, blind = await asyncio.to_thread(self.compute, inputs)
+            self.plan, self.unplannable = plan, blind
+            hub.publish("plan", self.snapshot())
+            return plan
+
+    def candidates(self, now: datetime | None = None) -> list[Candidate]:
+        cands, blind = self._candidates(self.gather(now))
+        self.unplannable = blind
+        return cands
+
+    def _candidates(self, inputs: PlanInputs) -> tuple[list[Candidate], list[dict]]:
+        now = inputs.now
         out: list[Candidate] = []
         blind: list[dict] = []
         has_elements = getattr(self.predictor, "satellite", None)
-        for norad, priority in self.priorities().items():
+        for norad, priority in inputs.priorities.items():
             if has_elements is not None and has_elements(norad) is None:
                 blind.append({"norad": norad, "reason": "no orbital elements — "
                               "not in the element sets this station fetches"})
                 continue
-            last = heard.get(norad)
+            last = inputs.heard.get(norad)
             hours = None if last is None else (now - last).total_seconds() / 3600.0
             for p in self.predictor.passes(norad, hours=self.s.planner_horizon_h):
                 sweep, keyhole = self._geometry(norad, p)
@@ -196,12 +303,7 @@ class PlannerService:
                     priority=priority, score=round(score, 4), breakdown=breakdown,
                     az_sweep=round(sweep, 1), keyhole_error_deg=round(keyhole, 1),
                 ))
-        self.unplannable = blind
-        return out
-
-    # Below this peak elevation a 1.5°/s rotator keeps up with the satellite
-    # comfortably, so the follower simulation is skipped.
-    KEYHOLE_FROM_EL = 55.0
+        return out, blind
 
     def _geometry(self, norad: int, p) -> tuple[float, float]:
         """The pass's unwrapped azimuth sweep, and its worst keyhole lag.
@@ -235,29 +337,18 @@ class PlannerService:
             )
         return sweep, keyhole
 
-    # --- build --------------------------------------------------------------
-    def rebuild(self, now: datetime | None = None) -> Plan:
-        now = now or datetime.now(timezone.utc)
-        plan = select(
-            self.candidates(now),
-            slew=self.slew,
-            reservations=self.reservations(),
-            guard_s=float(self.s.gate_guard_s),
-            floor_el=self.s.min_culmination_deg,
-            now=now,
-        )
-        plan.horizon_h = self.s.planner_horizon_h
-        self.plan = plan
-        return plan
-
     def snapshot(self) -> dict:
         plan = self.plan
         if plan is None:
-            return {"built_at": None, "planned": [], "decisions": [], "total_score": 0}
+            return {"built_at": None, "planned": [], "decisions": [], "total_score": 0,
+                    "unplannable": [], "schedule_known": False}
+        slew = self.slew
         return {
             "built_at": plan.built_at.isoformat(),
             "horizon_h": plan.horizon_h,
             "total_score": plan.total_score,
+            "schedule_known": plan.schedule_known,
+            "schedule_age_s": plan.schedule_age_s,
             "planned": [_candidate_json(c) for c in plan.planned],
             "decisions": [
                 {**_candidate_json(d.candidate), "status": d.status,
@@ -267,20 +358,28 @@ class PlannerService:
             "counts": _counts(plan),
             "unplannable": self.unplannable,
             "slew": {
-                "az_rate_deg_s": self.slew.az_rate_deg_s,
-                "el_rate_deg_s": self.slew.el_rate_deg_s,
-                "setup_s": self.slew.setup_s,
+                "az_rate_deg_s": slew.az_rate_deg_s,
+                "el_rate_deg_s": slew.el_rate_deg_s,
+                "setup_s": slew.setup_s,
+                "min_az": slew.min_az,
+                "max_az": slew.max_az,
             },
         }
 
     def _fingerprint(self) -> tuple:
         """Everything a rebuild depends on, so an unchanged input is not
-        re-planned every few seconds."""
-        jobs = tuple(sorted((j.get("id"), j.get("start")) for j in self.satnogs.jobs or []))
-        tle_at = None
-        if self.tles is not None:
-            tle_at = getattr(self.tles, "_fetched_at", None)
-        return (jobs, tle_at, tuple(sorted(self.priorities().items())))
+        re-planned every few seconds — including recordings in progress, so a
+        job that starts is planned around at once rather than at the next
+        timed rebuild."""
+        source = getattr(self.satnogs, "commitments", None)
+        if source is None:
+            source = list(self.satnogs.jobs or [])
+        jobs = tuple(sorted((str(j.get("id")), str(j.get("start"))) for j in source))
+        tle_at = getattr(self.tles, "_fetched_at", None) if self.tles is not None else None
+        known = getattr(self.satnogs, "jobs_age_s", 0.0) is not None
+        slew = self.slew
+        return (jobs, tle_at, known, (slew.min_az, slew.max_az),
+                tuple(sorted(self.priorities().items())))
 
     async def run(self) -> None:
         last_build = 0.0
@@ -289,12 +388,11 @@ class PlannerService:
             inputs = self._fingerprint()
             stale = loop.time() - last_build >= self.s.planner_rebuild_s
             if stale or inputs != self._inputs:
-                # Skyfield is CPU-bound; keep it off the event loop so the
-                # rotator poll and the WebSocket do not stall during a rebuild.
-                await asyncio.to_thread(self.rebuild)
+                # Skyfield is CPU-bound; rebuild_async keeps it off the event
+                # loop so the rotator poll and the WebSocket do not stall.
+                await self.rebuild_async()
                 self._inputs = inputs
                 last_build = loop.time()
-                hub.publish("plan", self.snapshot())
                 log.info("plan rebuilt: %d planned of %d candidates",
                          len(self.plan.planned), len(self.plan.decisions))
             await asyncio.sleep(15.0)
@@ -308,6 +406,7 @@ def _candidate_json(c: Candidate) -> dict:
         "los_az": round(c.los_az, 1), "duration_s": round(c.duration_s),
         "priority": c.priority, "score": c.score, "breakdown": dict(c.breakdown),
         "az_sweep": c.az_sweep, "keyhole_error_deg": c.keyhole_error_deg,
+        "start_bearing": c.start_bearing,
     }
 
 
@@ -335,7 +434,23 @@ class AutopilotRefused(RuntimeError):
     pass
 
 
+# What a refused or failed command looks like from here. None of these is an
+# internal error: the interlock said no, or the link is down, and the right
+# response is to report it and wait — not to disengage.
+_TRANSIENT = (ConnectionError, OSError, asyncio.TimeoutError)
+
+
 class PlanExecutor:
+    """Works the plan through ControlService. See the module docstring.
+
+    Operator intervention is read from ControlService's command journal, never
+    inferred from the mode string. The journal increments on every command
+    ControlService *accepts*, and on nothing else — so "has anyone else
+    commanded the antenna since I last did?" is exactly `command_seq != mine`.
+    A track ended by a closing gate, a lapsing position or a failed write does
+    not move the journal, so it can never be mistaken for a human.
+    """
+
     def __init__(self, settings: Settings, planner: PlannerService, control,
                  rotator) -> None:
         self.s = settings
@@ -343,134 +458,236 @@ class PlanExecutor:
         self.control = control
         self.rotator = rotator
         self.state = ExecutorState()
+        self._seq: int | None = None            # journal position after our last command
+        self._owned: Candidate | None = None    # the pass whose track we started
+        self._owned_track_id: int | None = None
         self._positioned_for: str | None = None
-        self._owned_track: Candidate | None = None
-        self._expect: str | None = None       # mode we last put control into
+        self._lock = asyncio.Lock()
+
+    # --- journal ------------------------------------------------------------
+    def _journal(self) -> int:
+        return int(getattr(self.control, "command_seq", 0))
+
+    def _ours_is_latest(self) -> bool:
+        return self._seq is not None and self._journal() == self._seq
+
+    async def _command(self, fn, *args) -> bool:
+        """Issue one command as autopilot. Returns False if it was refused.
+
+        A refusal is not a crash: the interlock closed under the rotctld lock,
+        or the rotator link is down. Report it and try again next step.
+        """
+        from .control import ControlRefused
+        from .rotctld_client import RotctldError
+
+        try:
+            await fn(*args, origin="autopilot")
+        except ControlRefused as exc:
+            self._set("blocked", f"refused: {exc}")
+            return False
+        except (RotctldError, *_TRANSIENT) as exc:
+            self._set("blocked", f"rotator write failed: {exc}")
+            return False
+        self._seq = self._journal()
+        return True
 
     # --- switching ----------------------------------------------------------
     def enable(self) -> ExecutorState:
-        """Engage autopilot. Requires an operator to be holding a lease now."""
+        """Engage autopilot. Requires an operator to be holding a lease now.
+
+        Idempotent: engaging an engaged autopilot changes nothing. Re-engaging
+        used to reset what it believed it had last done, so a second click —
+        or a second browser — made the operator's next STOP invisible to it.
+
+        Engaging is a handover. From this moment the antenna is autopilot's to
+        drive, including away from a track the operator had running.
+        """
+        if self.state.enabled:
+            return self.state
         if not self.s.rotator_control_enabled:
             raise AutopilotRefused("rotator control is disabled in configuration")
         if not self.control.armed:
             raise AutopilotRefused("arm control first — autopilot never takes a lease itself")
-        self.state = ExecutorState(enabled=True, phase="waiting",
-                                   detail="engaged")
+        self.state = ExecutorState(enabled=True, phase="waiting", detail="engaged")
+        # Everything already in the journal is history; only what happens from
+        # here on can count as someone else taking over.
+        self._seq = self._journal()
+        self._owned = None
+        self._owned_track_id = None
         self._positioned_for = None
-        self._expect = None
         log.warning("autopilot ENGAGED")
-        self.publish()
+        self._publish()
         return self.state
 
     async def disable(self, because: str = "switched off by the operator") -> ExecutorState:
-        was_tracking = self._owned_track is not None and self.control.state().mode == "track"
-        self.state = ExecutorState(enabled=False, phase="off", detail=because,
-                                   disengaged_because=because)
-        self._positioned_for = None
-        self._expect = None
-        if was_tracking:
-            # Stop what we started. A track the operator began is theirs.
-            try:
-                await self.control.stop()
-            except Exception:
-                log.exception("autopilot could not stop its own track")
-        self._owned_track = None
-        log.warning("autopilot disengaged: %s", because)
-        self.publish()
+        async with self._lock:
+            await self._disable(because)
         return self.state
 
-    def publish(self) -> None:
-        hub.publish("autopilot", {
-            "enabled": self.state.enabled,
-            "phase": self.state.phase,
-            "detail": self.state.detail,
-            "current": self.state.current,
-            "disengaged_because": self.state.disengaged_because,
-        })
+    async def _disable(self, because: str, *, stop_motion: bool = True) -> None:
+        """Stand down. State first, so nothing below can leave autopilot on.
+
+        If autopilot's command is still the latest in the journal, whatever the
+        antenna is doing — tracking, or a minutes-long pre-position slew at
+        1.5°/s — it is doing because autopilot said so, and it is stopped. If
+        anyone else has commanded it since, their command stands.
+        """
+        mine = self._ours_is_latest()
+        self.state = ExecutorState(enabled=False, phase="off", detail=because,
+                                   disengaged_because=because)
+        self._seq = None
+        self._owned = None
+        self._owned_track_id = None
+        self._positioned_for = None
+        log.warning("autopilot disengaged: %s", because)
+
+        if stop_motion and mine:
+            try:
+                mode = self.control.state().mode
+            except Exception:
+                mode = "unknown"
+            if mode in ("track", "manual", "unknown"):
+                try:
+                    await self.control.stop(origin="autopilot")
+                except Exception:
+                    log.exception("autopilot could not stop its own motion")
+        self._publish()
+
+    def _publish(self) -> None:
+        try:
+            hub.publish("autopilot", {
+                "enabled": self.state.enabled,
+                "phase": self.state.phase,
+                "detail": self.state.detail,
+                "current": self.state.current,
+                "disengaged_because": self.state.disengaged_because,
+            })
+        except Exception:
+            log.exception("could not publish autopilot state")
 
     # --- loop ---------------------------------------------------------------
     async def run(self) -> None:
         while True:
             try:
-                await self.step()
+                async with self._lock:
+                    await self.step()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 # A crash must leave the antenna alone, not half-way through a
-                # sequence it no longer understands.
+                # sequence it no longer understands. Disengage *first*, by
+                # assignment, so that even a failure inside the stop below
+                # cannot leave autopilot engaged.
                 log.exception("autopilot step failed")
-                await self.disable(f"internal error: {exc}")
+                mine = self._ours_is_latest()
+                self.state = ExecutorState(
+                    enabled=False, phase="off",
+                    detail=f"internal error: {exc}",
+                    disengaged_because=f"internal error: {exc}",
+                )
+                self._seq = None
+                self._owned = None
+                self._owned_track_id = None
+                if mine:
+                    try:
+                        await self.control.stop(origin="autopilot")
+                    except Exception:
+                        log.exception("autopilot could not stop after an error")
+                self._publish()
             await asyncio.sleep(1.0)
 
     async def step(self, now: datetime | None = None) -> None:
         if not self.state.enabled:
             return
         now = now or datetime.now(timezone.utc)
+        control = self.control
 
-        # 1. The lease is the operator's consent. Lose it and stand down.
-        if not self.control.armed:
-            await self.disable("control lease ended — re-arm and re-engage to continue")
-            return
+        # 1. Consent. The lease is the operator's; lose it and stand down.
         if not self.s.rotator_control_enabled:
-            await self.disable("rotator control was disabled")
+            await self._disable("rotator control was disabled")
+            return
+        if not control.armed:
+            await self._disable("control lease ended — re-arm and re-engage to continue")
             return
 
-        # 2. Has an operator taken over?
-        mode = self.control.state().mode
-        if self._expect is not None and mode != self._expect:
-            if mode == "idle" and not self.control.blocked_by():
-                await self.disable("operator stopped the antenna")
-                return
-            if mode in ("manual", "track"):
-                await self.disable("operator took manual control")
-                return
-
-        # 3. End a track we own once its pass is over.
-        if self._owned_track is not None and now >= self._owned_track.los:
-            if mode == "track":
-                await self.control.stop()
-            log.info("autopilot: pass %s complete", self._owned_track.key)
-            self._owned_track = None
-            self._expect = None
+        # 2. Has anyone else commanded the antenna since we last did? Their
+        #    command stands — do not stop it, do not fight it.
+        if self._seq is not None and self._journal() != self._seq:
+            who = getattr(control, "last_origin", "someone")
+            what = getattr(control, "_last_command", "") or "a command"
+            await self._disable(f"{who} took control ({what})", stop_motion=False)
+            return
 
         plan = self.planner.plan
-        upcoming = [c for c in (plan.planned if plan else []) if c.los > now]
+        planned_keys = {c.key for c in plan.planned} if plan else set()
+
+        # 3. A track we own ends at its LOS — or as soon as the plan no longer
+        #    contains it, because a rebuild found a reason not to work it.
+        if self._owned is not None:
+            over = now >= self._owned.los
+            dropped = self._owned.key not in planned_keys
+            if over or dropped:
+                st = control.state()
+                if st.mode == "track" and getattr(control, "track_id", None) == self._owned_track_id:
+                    if not await self._command(control.stop):
+                        return
+                log.info("autopilot: pass %s %s", self._owned.key,
+                         "complete" if over else "dropped from the plan")
+                self._owned = None
+                self._owned_track_id = None
+
+        # 4. The interlock decides, not us — checked before anything else
+        #    about the plan, so an empty plan cannot skip it.
+        blocked = control.blocked_by()
+        if blocked:
+            self._set("blocked", f"waiting for the interlock: {', '.join(blocked)}")
+            return
+
+        # 5. Is the plan fit to act on?
+        if plan is None:
+            self._set("idle", "no plan built yet")
+            return
+        if not plan.schedule_known:
+            self._set("blocked", "the plan was built before SatNOGS's schedule "
+                                 "loaded — waiting for a rebuild")
+            return
+
+        upcoming = [c for c in plan.planned if c.los > now]
         if not upcoming:
             self._set("idle", "nothing left in the plan")
             return
         nxt = upcoming[0]
         self.state.current = nxt.key
 
-        # 4. The interlock decides, not us.
-        blocked = self.control.blocked_by()
-        if blocked:
-            # ControlService ends its own track when a gate closes, so the
-            # mode we put it in no longer holds. Forget it — otherwise, when
-            # the gate reopens, "expected track, found idle" would read as an
-            # operator pressing STOP and wrongly disengage autopilot.
-            self._expect = None
-            self._set("blocked", f"waiting for the interlock: {', '.join(blocked)}")
-            return
-
-        # 5. In the pass: track it.
+        # 6. In the pass: track it, unless the track running is already ours
+        #    for exactly this pass. After a gate closed and reopened, the track
+        #    ControlService ended is no longer running, so this resumes it.
         if nxt.aos <= now < nxt.los:
-            state = self.control.state()
-            if state.mode != "track" or state.target_norad != nxt.norad:
-                await self.control.track(nxt.norad)
-                self._owned_track = nxt
-                self._expect = "track"
+            st = control.state()
+            ours = (st.mode == "track"
+                    and getattr(control, "track_id", None) == self._owned_track_id
+                    and st.target_norad == nxt.norad
+                    and self._owned is not None and self._owned.key == nxt.key)
+            if not ours:
+                if not await self._command(control.track, nxt.norad):
+                    return
+                self._owned = nxt
+                self._owned_track_id = getattr(control, "track_id", None)
             self._set("tracking", f"{nxt.name or nxt.norad} until {nxt.los:%H:%M:%S}Z")
             return
 
-        # 6. Before the pass: get to where it rises, in good time.
-        lead = self._lead_s(nxt)
-        if now >= nxt.aos - timedelta(seconds=lead):
+        # 7. Before the pass: get to where it rises, in good time.
+        if now >= nxt.aos - timedelta(seconds=self._lead_s(nxt)):
             if self._positioned_for != nxt.key:
-                await self.control.goto(self._start_bearing(nxt), 0.0)
+                if not await self._command(control.goto, self._start_bearing(nxt), 0.0):
+                    return
                 self._positioned_for = nxt.key
-                self._expect = "manual"
+                # A goto ends any track; nothing is ours to stop any more.
+                self._owned = None
+                self._owned_track_id = None
             self._set("positioning",
-                      f"at {nxt.aos_az:.0f}° for {nxt.name or nxt.norad}, AOS {nxt.aos:%H:%M:%S}Z")
+                      f"at {self._start_bearing(nxt):.0f}° for {nxt.name or nxt.norad}, "
+                      f"AOS {nxt.aos:%H:%M:%S}Z")
             return
 
         self._set("waiting", f"next: {nxt.name or nxt.norad} at {nxt.aos:%H:%M:%S}Z")
@@ -479,27 +696,32 @@ class PlanExecutor:
     def _set(self, phase: str, detail: str) -> None:
         if (phase, detail) != (self.state.phase, self.state.detail):
             self.state.phase, self.state.detail = phase, detail
-            self.publish()
-
-    def _lead_s(self, nxt: Candidate) -> float:
-        """How early to start moving: the configured lead, or longer if the
-        antenna is far from where the pass rises."""
-        sample = self.rotator.last
-        need = 0.0
-        if sample is not None:
-            need = self.planner.slew.seconds(sample.az_raw, sample.el,
-                                             nxt.aos_az, 0.0, nxt.az_sweep)
-        return max(float(self.s.planner_lead_s), need + float(self.s.planner_setup_s))
+            self._publish()
 
     def _start_bearing(self, nxt: Candidate) -> float:
-        """Where to meet the pass: the same choice the planner costed.
+        """Where to meet the pass: the bearing the plan was costed on.
 
-        Using the planner's SlewModel rather than a second implementation keeps
-        the bearing autopilot drives to identical to the one whose slew time
-        the plan was built on — including leaving room for the pass's whole
-        sweep, and never parking on an end stop.
+        Planned passes carry it, chosen by the DAG with the whole sequence in
+        view — so the bearing autopilot drives to is exactly the one whose
+        slew time made the plan feasible. Only a pass without one (built by
+        hand, say) falls back to choosing from where the antenna is.
         """
+        if nxt.start_bearing is not None:
+            return nxt.start_bearing
         sample = self.rotator.last
         current = sample.az_raw if sample is not None else nxt.aos_az
         bearing, _ = self.planner.slew.best_start(current, nxt.aos_az, nxt.az_sweep)
         return bearing
+
+    def _lead_s(self, nxt: Candidate) -> float:
+        """How early to start moving: the configured lead, or longer if the
+        antenna is far from where the pass will be met."""
+        sample = self.rotator.last
+        if sample is None:
+            return float(self.s.planner_lead_s)
+        slew = self.planner.slew
+        target = self._start_bearing(nxt)
+        az_s = abs(target - sample.az_raw) / slew.az_rate_deg_s
+        el_s = abs(sample.el) / slew.el_rate_deg_s
+        need = max(az_s, el_s) + slew.accel_margin_s + float(self.s.planner_setup_s)
+        return max(float(self.s.planner_lead_s), need)

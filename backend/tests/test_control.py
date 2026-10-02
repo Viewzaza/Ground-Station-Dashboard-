@@ -50,7 +50,12 @@ class FakeClient:
         self.commands: list[tuple] = []
         self.fail_with: RotctldError | None = None
 
-    async def set_position(self, az: float, el: float) -> None:
+    async def set_position(self, az: float, el: float, guard=None) -> None:
+        # The real client runs `guard` after taking the rotctld lock and before
+        # writing, so a gate that closed while the command queued still stops
+        # it. Mirror that, or the fake would hide exactly that race.
+        if guard is not None:
+            guard()
         if self.fail_with:
             raise self.fail_with
         self.commands.append(("set_pos", round(az, 2), round(el, 2)))

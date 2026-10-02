@@ -55,16 +55,36 @@ def planned_keys(plan) -> list[str]:
 
 
 def brute_force_best(cands, slew) -> float:
-    """Check every subset. Only feasible for tiny inputs — which is the point:
-    it is an independent oracle for the DAG."""
-    from app.services.planner import _compatible
+    """Check every subset under every assignment of wrap branches.
+
+    Only feasible for tiny inputs — which is the point: it shares nothing with
+    the DAG but the two primitives (which branches a pass allows, and how long
+    a move between two explicit bearings takes), so it is an independent
+    oracle for the selection itself.
+    """
+    from itertools import product
+
+    from app.services.planner import branches, sweep_of, turn_s
 
     best = 0.0
     ordered = sorted(cands, key=lambda c: c.aos)
     for r in range(1, len(ordered) + 1):
         for subset in combinations(ordered, r):
-            if all(_compatible(a, b, slew) for a, b in zip(subset, subset[1:])):
-                best = max(best, sum(c.score for c in subset))
+            if any(a.los >= b.aos for a, b in zip(subset, subset[1:])):
+                continue
+            options = [branches(c, slew) for c in subset]
+            if not all(options):
+                continue
+            for assignment in product(*options):
+                ok = all(
+                    (b.aos - a.los).total_seconds()
+                    >= turn_s(slew, ba + sweep_of(a), bb)
+                    for (a, ba), (b, bb) in zip(zip(subset, assignment),
+                                                zip(subset[1:], assignment[1:]))
+                )
+                if ok:
+                    best = max(best, sum(c.score for c in subset))
+                    break
     return best
 
 
@@ -342,10 +362,29 @@ def test_a_long_sweep_can_make_a_tight_turnaround_infeasible():
     assert len(fits.planned) == 2
 
     # Pass rising at 170° that sweeps -400°: from 170 that would reach -230,
-    # past -180. Meeting it at 530 instead is a 360° slew — 3 minutes at 2°/s.
+    # past -180, so it can only be met at 530. That is still workable — if the
+    # pass before it is met at 360 instead of 0, it *ends* at 530. Choosing a
+    # branch for one pass to suit the next is exactly what planning over
+    # (pass, branch) nodes is for; a pairwise model cannot see it.
     b_long = Candidate(**{**b_short.__dict__, "key": "b2", "az_sweep": -400.0})
-    blocked = select([a, b_long], slew=slew, now=T0 - timedelta(hours=1))
-    assert len(blocked.planned) == 1
+    chained = select([a, b_long], slew=slew, now=T0 - timedelta(hours=1))
+    assert len(chained.planned) == 2
+    assert chained.planned[0].start_bearing == pytest.approx(360.0)
+    assert chained.planned[1].start_bearing == pytest.approx(530.0)
+
+
+def test_when_no_branch_chains_the_tight_turnaround_is_infeasible():
+    """Same as above, but the first pass sweeps +190°: met at 360 it would end
+    at 550, past the 540 limit, so it must be met at 0 and ends at 190 — a
+    340° slew from where the next pass can start."""
+    slew = bare(min_az=-180.0, max_az=540.0)
+    a = cand("a", 0, 10, 1.0, los_az=190.0)
+    b_long = Candidate(**{**cand("b2", 10 + 40 / 60, 10, 1.0, aos_az=170.0).__dict__,
+                          "az_sweep": -400.0})
+    plan = select([a, b_long], slew=slew, now=T0 - timedelta(hours=1))
+    assert len(plan.planned) == 1
+    loser = next(d for d in plan.decisions if d.status != "planned")
+    assert loser.status == "infeasible"
 
 
 # --------------------------------------------------------------------------
@@ -468,3 +507,71 @@ def test_freshness_is_half_after_one_half_life():
 def test_keyhole_lag_matches_an_independent_simulation(rate, max_el, expected):
     ours = peak_pointing_error(_overhead_track(max_el), rate, rate)
     assert ours == pytest.approx(expected, rel=0.06, abs=0.3)
+
+
+# --------------------------------------------------------------------------
+# review findings, pinned
+# --------------------------------------------------------------------------
+
+def test_a_wrapped_end_is_costed_from_where_the_antenna_really_is():
+    """Review R13. A pass met at 360 that sweeps +170 ends at 530, not at its
+    compass LOS of 170. Costing the next slew from 170 under-estimated it by
+    340°. With the start forced onto the 360 branch (by origin), a next pass
+    rising at 190 that only fits from 190 is 340° away — infeasible in 60 s."""
+    slew = bare(min_az=-180.0, max_az=540.0, min_turnaround_s=0.0)
+    a = cand("a", 30, 10, 1.0, aos_az=0.0, los_az=170.0)      # sweep +170
+    b = Candidate(**{**cand("b", 41, 10, 1.0, aos_az=190.0).__dict__,
+                     "az_sweep": +300.0})                       # only 190 fits
+    plan = select([a, b], slew=slew, now=T0, origin_az=360.0)
+    assert [p.key for p in plan.planned][0] == "a"
+    # 0 is reachable from 360 in time, so the DAG may choose it — which is
+    # precisely how both passes can be worked. What it must never do is claim
+    # a 360 start and then cost the next slew from 170.
+    if plan.planned[0].start_bearing == pytest.approx(360.0):
+        assert len(plan.planned) == 1
+    else:
+        assert len(plan.planned) == 2
+
+
+def test_the_first_pass_must_be_reachable_from_where_the_antenna_is():
+    """At 1°/s, 180° of slew is three minutes. A pass rising in 90 s on the far
+    side of the sky cannot be the first thing worked."""
+    slew = bare(az_rate_deg_s=1.0, el_rate_deg_s=1.0)
+    near_far = cand("far", 1.5, 8, 5.0, aos_az=180.0)
+    later = cand("later", 30, 8, 1.0, aos_az=0.0)
+    plan = select([near_far, later], slew=slew, now=T0, origin_az=0.0)
+    assert [p.key for p in plan.planned] == ["later"]
+    far = next(d for d in plan.decisions if d.candidate.key == "far")
+    assert far.status == "infeasible"
+
+
+def test_a_pass_already_under_way_can_always_be_joined():
+    slew = bare(az_rate_deg_s=1.0, el_rate_deg_s=1.0)
+    running = cand("now", -3, 8, 1.0, aos_az=180.0)
+    plan = select([running], slew=slew, now=T0, origin_az=0.0)
+    assert [p.key for p in plan.planned] == ["now"]
+
+
+def test_zero_priority_is_never_planned_even_alone():
+    """Review R11: a plan of one beats a plan of none, so a score-0 pass used
+    to be planned whenever it was the only one on offer."""
+    plan = select([cand("zero", 30, 10, 0.0)], slew=FAST, now=T0)
+    assert plan.planned == []
+    assert plan.decisions[0].status == "low"
+
+
+def test_a_pass_whose_sweep_cannot_fit_anywhere_is_infeasible():
+    slew = bare(min_az=0.0, max_az=360.0)
+    huge = Candidate(**{**cand("huge", 30, 10, 1.0, aos_az=20.0).__dict__,
+                        "az_sweep": 350.0})
+    plan = select([huge], slew=slew, now=T0)
+    assert plan.planned == []
+    assert plan.decisions[0].status == "infeasible"
+    assert "sweep" in plan.decisions[0].reason
+
+
+def test_planned_passes_carry_the_bearing_they_were_costed_on():
+    plan = select([cand("a", 30, 10, 1.0, aos_az=100.0)], slew=bare(), now=T0,
+                  origin_az=90.0)
+    (p,) = plan.planned
+    assert p.start_bearing == pytest.approx(100.0)

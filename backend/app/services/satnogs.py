@@ -177,10 +177,23 @@ class SatnogsService:
         """Everything SatNOGS has claimed that has not yet ended: scheduled
         jobs plus anything recording now. This, not `jobs`, is what anything
         deciding whether the antenna is free must read."""
+        # Side-effect free on purpose. The planner calls this from a worker
+        # thread while the event loop iterates `running` in gates() and
+        # snapshot(); pruning here would mutate a dict mid-iteration in the
+        # other thread. Pruning happens only in the refresh paths, on the loop.
+        # Snapshot both containers before reading them, for the same reason.
         now = datetime.now(timezone.utc)
-        self._prune_running(now)
-        seen = {j.get("id") for j in self.jobs}
-        return list(self.jobs) + [j for k, j in self.running.items() if k not in seen]
+        jobs = list(self.jobs)
+        running = list(self.running.items())
+        seen = {j.get("id") for j in jobs}
+        live = []
+        for key, job in running:
+            if key in seen:
+                continue
+            end = _parse_ts(job.get("end"))
+            if end is not None and end > now:
+                live.append(job)
+        return jobs + live
 
     async def refresh_observations(self, client: httpx.AsyncClient) -> None:
         data, _ = await self._get(

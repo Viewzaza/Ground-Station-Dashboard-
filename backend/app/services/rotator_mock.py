@@ -83,17 +83,28 @@ class MockRotator:
         return az, el, 300.0
 
     # --- writes ------------------------------------------------------------
-    async def set_position(self, az: float, el: float) -> None:
+    async def set_position(self, az: float, el: float, guard=None) -> None:
+        if guard is not None:
+            guard()
         self._commanded = self.clamp(az, el)
 
     async def stop(self) -> None:
         self._commanded = (self._az, self._el)
 
-    def clamp(self, az: float, el: float) -> tuple[float, float]:
+    def limits(self) -> tuple[float, float, float, float]:
+        """The same intersection RotctldClient uses: compiled caps narrowed by
+        the configured station limits. Planning against the compiled range
+        alone puts start bearings outside what the rotator will accept."""
         return (
-            min(max(az, self.caps.min_az), self.caps.max_az),
-            min(max(el, self.caps.min_el), self.caps.max_el),
+            max(self.s.rot_limit_min_az, self.caps.min_az),
+            min(self.s.rot_limit_max_az, self.caps.max_az),
+            max(self.s.rot_limit_min_el, self.caps.min_el),
+            min(self.s.rot_limit_max_el, self.caps.max_el),
         )
+
+    def clamp(self, az: float, el: float) -> tuple[float, float]:
+        min_az, max_az, min_el, max_el = self.limits()
+        return (min(max(az, min_az), max_az), min(max(el, min_el), max_el))
 
     def _target(self) -> tuple[float, float]:
         """Follow the default satellite when it is up, else stay parked.

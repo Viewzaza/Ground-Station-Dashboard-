@@ -69,6 +69,24 @@ class ControlService:
         self._track_task: asyncio.Task | None = None
         self._last_command: str = ""
 
+        # The command journal. Every command this service *accepts* bumps
+        # command_seq and records who issued it; nothing else does. That is
+        # what lets autopilot tell, without guessing, whether anyone else has
+        # touched the antenna since it last did. Inferring it from the mode
+        # string cannot work: a track ended by a closing gate and one ended by
+        # an operator's STOP both leave mode "idle", and an operator parking
+        # after autopilot pre-positioned leaves it "manual" either way.
+        self.command_seq: int = 0
+        self.last_origin: str = "none"
+        # Incremented per track started, so a track can be named rather than
+        # inferred from "mode == track".
+        self.track_id: int = 0
+        self.track_end_reason: str = ""
+
+    def _journal(self, origin: str) -> None:
+        self.command_seq += 1
+        self.last_origin = origin
+
     # --- lease -------------------------------------------------------------
     @property
     def armed(self) -> bool:
@@ -92,10 +110,14 @@ class ControlService:
         log.info("control armed until %s", self._lease_expires.isoformat())
         return self.publish()
 
-    def release(self) -> ControlState:
+    def release(self, origin: str = "operator") -> ControlState:
         self._lease_expires = None
         self._stop_track()
         self._mode = "idle"
+        # Release revokes consent, so it is journaled: anything running on the
+        # strength of the old lease must notice, even if a new arm follows
+        # before it next looks.
+        self._journal(origin)
         log.info("control released")
         return self.publish()
 
@@ -155,6 +177,10 @@ class ControlService:
         state = self.state()
         payload = state.model_dump(mode="json")
         payload["last_command"] = self._last_command
+        payload["command_seq"] = self.command_seq
+        payload["last_origin"] = self.last_origin
+        payload["track_id"] = self.track_id
+        payload["track_end_reason"] = self.track_end_reason
         payload["can_park"] = bool(
             self.rotator.client.caps and self.rotator.client.caps.can_park
         )
@@ -162,15 +188,31 @@ class ControlService:
         return state
 
     # --- commands ----------------------------------------------------------
-    async def goto(self, az: float, el: float) -> ControlState:
+    def _guard(self) -> None:
+        """Re-check the interlock at the last possible moment.
+
+        Passed into the client and run *after* it takes the rotctld lock, just
+        before the command is written. A gate checked before queueing for that
+        lock can close during the wait — behind a slow poll that is seconds —
+        and this is the only check that cannot be stale when the bytes go out.
+        """
+        blocked = self.blocked_by()
+        if blocked:
+            raise ControlRefused(blocked, "gate closed while the command was queued")
+
+    async def goto(self, az: float, el: float,
+                   origin: str = "operator") -> ControlState:
         self._require_clear()
         self._stop_track()
-        await self._write(lambda: self.rotator.client.set_position(az, el),
-                          f"goto az={az:.1f} el={el:.1f}")
+        await self._write(
+            lambda: self.rotator.client.set_position(az, el, guard=self._guard),
+            f"goto az={az:.1f} el={el:.1f}",
+        )
         self._mode = "manual"
+        self._journal(origin)
         return self.publish()
 
-    async def stop(self) -> ControlState:
+    async def stop(self, origin: str = "operator") -> ControlState:
         """Halt motion.
 
         Stop is *not* gated. If the antenna is moving and an operator wants it
@@ -178,12 +220,13 @@ class ControlService:
         harmless: the worst case is stopping a rotator that was already still.
         """
         self._stop_track()
+        self._mode = "idle"
+        self._journal(origin)
         if self.rotator.verified:
             await self._write(self.rotator.client.stop, "stop")
-        self._mode = "idle"
         return self.publish()
 
-    async def park(self) -> ControlState:
+    async def park(self, origin: str = "operator") -> ControlState:
         """Send the antenna to the park position.
 
         Station 5024's SPID reports `Can Park: N`, so there is no park command
@@ -195,22 +238,28 @@ class ControlService:
         self._require_clear()
         self._stop_track()
         await self._write(
-            lambda: self.rotator.client.set_position(self.s.park_az, self.s.park_el),
+            lambda: self.rotator.client.set_position(
+                self.s.park_az, self.s.park_el, guard=self._guard),
             f"park az={self.s.park_az:.1f} el={self.s.park_el:.1f}",
         )
         self._mode = "manual"
+        self._journal(origin)
         return self.publish()
 
-    async def track(self, norad: int | None = None) -> ControlState:
+    async def track(self, norad: int | None = None,
+                    origin: str = "operator") -> ControlState:
         self._require_clear()
         norad = norad or self.s.default_norad
         if self.predictor.satellite(norad) is None:
             raise ControlRefused([], f"no elements for {norad}")
         self._stop_track()
+        self.track_id += 1
+        self.track_end_reason = ""
         self._target_norad = norad
         self._mode = "track"
-        self._track_task = asyncio.create_task(self._track_loop(norad))
-        log.info("tracking %s", norad)
+        self._track_task = asyncio.create_task(self._track_loop(norad, self.track_id))
+        self._journal(origin)
+        log.info("tracking %s (track %d, %s)", norad, self.track_id, origin)
         return self.publish()
 
     async def _write(self, fn, what: str) -> None:
@@ -229,7 +278,7 @@ class ControlService:
             self._track_task.cancel()
         self._track_task = None
 
-    async def _track_loop(self, norad: int) -> None:
+    async def _track_loop(self, norad: int, track_id: int = 0) -> None:
         """Follow the satellite until it sets, a gate closes, or we are stopped.
 
         Commands are only issued once the antenna is further than the deadband
@@ -243,10 +292,22 @@ class ControlService:
                 if blocked:
                     log.warning("track stopping, gate closed: %s", blocked)
                     self.on_state("control", "degraded", f"track stopped: {blocked}")
+                    self.track_end_reason = f"gate closed: {', '.join(blocked)}"
+                    # Consent gone — lease lapsed, or control switched off —
+                    # means the antenna should not keep finishing a move this
+                    # loop commanded, so stop it. Not for the SatNOGS gates:
+                    # there SatNOGS may be the one about to drive, and a stop
+                    # from us could fight it.
+                    if "armed" in blocked or "kill_switch" in blocked:
+                        try:
+                            await self.rotator.client.stop()
+                        except Exception:
+                            log.exception("could not stop after consent lapsed")
                     break
 
                 pos = self.predictor.position(norad)
                 if pos is None:
+                    self.track_end_reason = f"no position for {norad}"
                     break
                 if pos.el < TRACK_MIN_EL_DEG:
                     # Below the horizon: hold position rather than chase a
@@ -265,19 +326,31 @@ class ControlService:
                 target_az = self._unwrap(pos.az, sample.az_raw if sample else pos.az)
                 try:
                     await self._write(
-                        lambda: self.rotator.client.set_position(target_az, pos.el),
+                        lambda: self.rotator.client.set_position(
+                            target_az, pos.el, guard=self._guard),
                         f"track {norad} az={target_az:.1f} el={pos.el:.1f}",
                     )
-                except RotctldError:
-                    # A single refused write during a pass is not worth
-                    # abandoning the track; the poll loop reports the link.
+                except ControlRefused:
+                    # The gate closed while this write was queued; the next
+                    # iteration sees it and ends the track properly.
+                    pass
+                except (RotctldError, ConnectionError, OSError, asyncio.TimeoutError):
+                    # A failed write during a pass is not worth abandoning the
+                    # track for — the poll loop reports the link — and letting
+                    # a socket error kill this task would end the track with no
+                    # reason recorded.
                     pass
 
                 await asyncio.sleep(TRACK_STEP_S)
         except asyncio.CancelledError:
             raise
         finally:
-            if self._mode == "track":
+            # Only the *current* track may reset the mode. track() cancels the
+            # old task without awaiting it, so the old task's finally runs after
+            # the new track has already set mode = "track" — and used to reset
+            # it to idle while the new task carried on driving the antenna: a
+            # track nobody could see, still moving the rotator.
+            if self._track_task is asyncio.current_task() and self._mode == "track":
                 self._mode = "idle"
                 self._target_norad = None
                 self.publish()
@@ -294,7 +367,20 @@ class ControlService:
             best -= 360.0
         while best - current_az < -180.0:
             best += 360.0
-        caps = self.rotator.client.caps
-        if caps is not None and not (caps.min_az <= best <= caps.max_az):
+        limits = getattr(self.rotator.client, "limits", None)
+        if callable(limits):
+            min_az, max_az = limits()[:2]
+        else:
+            caps = self.rotator.client.caps
+            if caps is None:
+                return best
+            min_az, max_az = caps.min_az, caps.max_az
+        # The limits in force, not dump_caps's compiled range: on station 5024
+        # those are -90..450, and choosing a branch the clamp then moves
+        # silently undoes the unwrap.
+        if not (min_az <= best <= max_az):
+            for candidate in (best + 360.0, best - 360.0):
+                if min_az <= candidate <= max_az:
+                    return candidate
             return target_az
         return best

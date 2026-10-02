@@ -107,13 +107,22 @@ class RotctldClient:
         self._reader = self._writer = None
 
     # --- protocol ----------------------------------------------------------
-    async def _command(self, command: str) -> tuple[list[str], int]:
+    async def _command(self, command: str,
+                       guard=None) -> tuple[list[str], int]:
         """Send one extended-protocol command; return its records and RPRT code.
 
         Reads until the terminating `RPRT <n>` line, so a reply split across
         packets — or arriving one byte at a time — is reassembled correctly.
+
+        `guard`, if given, is called after the lock is taken and before a byte
+        is written, and may raise to abort. It exists for the interlock: a gate
+        checked before waiting on this lock can close during the wait — up to
+        COMMAND_TIMEOUT_S queued behind a slow poll, plus a reconnect — so the
+        only check that cannot go stale is one made here.
         """
         async with self._lock:
+            if guard is not None:
+                guard()
             await self.connect()
             assert self._reader and self._writer
 
@@ -219,7 +228,7 @@ class RotctldClient:
     # --- writes ------------------------------------------------------------
     # Everything below moves a physical antenna. Callers must have passed the
     # control interlock first; nothing here re-checks it.
-    async def set_position(self, az: float, el: float) -> None:
+    async def set_position(self, az: float, el: float, guard=None) -> None:
         """Command an absolute position, clamped to the rotator's real limits.
 
         "Real" is doing work in that sentence. dump_caps reports the Hamlib
@@ -232,7 +241,7 @@ class RotctldClient:
         See `limits` and GS_ROT_LIMIT_*.
         """
         az, el = self.clamp(az, el)
-        _, code = await self._command(f"set_pos {az:.2f} {el:.2f}")
+        _, code = await self._command(f"set_pos {az:.2f} {el:.2f}", guard=guard)
         if code != RPRT_OK:
             raise RotctldError(code, f"set_pos {az:.2f} {el:.2f}")
 

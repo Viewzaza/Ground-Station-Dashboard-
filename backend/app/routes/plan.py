@@ -38,15 +38,18 @@ def _executor(request: Request):
 async def plan(request: Request) -> dict:
     planner = _planner(request)
     if planner.plan is None:
-        # First request before the background build has run.
-        planner.rebuild()
+        # First request before the background build has run. Off the event
+        # loop and behind the planner's lock, like every other rebuild:
+        # building inline here used to stall the rotator poll and the gate
+        # checks for the length of a Skyfield search.
+        await planner.rebuild_async()
     return planner.snapshot()
 
 
 @router.post("/plan/rebuild")
 async def rebuild(request: Request) -> dict:
     planner = _planner(request)
-    planner.rebuild()
+    await planner.rebuild_async()
     return planner.snapshot()
 
 

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Literal
 
@@ -77,6 +77,10 @@ class Candidate:
     # Worst pointing error a rate-limited rotator would suffer chasing this
     # pass through the keyhole near zenith. 0 for anything below ~60°.
     keyhole_error_deg: float = 0.0
+    # For a planned pass: the exact, unwrapped bearing to meet it at — the one
+    # the plan's slew times were costed on. Autopilot drives here, so the
+    # executor and the plan cannot disagree about where the antenna will be.
+    start_bearing: float | None = None
 
     @property
     def duration_s(self) -> float:
@@ -108,6 +112,12 @@ class Plan:
     planned: list[Candidate] = field(default_factory=list)
     decisions: list[Decision] = field(default_factory=list)
     total_score: float = 0.0
+    # Whether SatNOGS's schedule had loaded when this plan was built. A plan
+    # built from an empty job list *before the first poll* has not been checked
+    # against SatNOGS at all — it is not a plan that happens to find no
+    # conflicts — and autopilot must not act on it.
+    schedule_known: bool = True
+    schedule_age_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -184,13 +194,10 @@ class SlewModel:
             best = min(valid, key=lambda a: (round(abs(a - from_az), 1), -margin(a)))
             return best, abs(best - from_az)
 
-        in_range = [a for a in reps if self.min_az <= a <= self.max_az]
-        if in_range:
-            best = min(in_range, key=lambda a: abs(a - from_az))
-            return best, abs(best - from_az) + 360.0
-        # A misconfigured range with no representation at all: assume the
-        # worst rather than the best.
-        return to_az, 360.0
+        # Nothing fits the sweep. Charging a notional "full unwind" here would
+        # make an unfollowable pass look merely slow; it is not reachable at
+        # all, and saying so lets the plan mark it infeasible.
+        return to_az, math.inf
 
 
 # --------------------------------------------------------------------------
@@ -369,14 +376,75 @@ def _overlaps(c: Candidate, r: Reservation, guard_s: float) -> bool:
     return c.aos < r.end + guard and c.los > r.start - guard
 
 
+def sweep_of(c: Candidate) -> float:
+    """The pass's unwrapped AOS-to-LOS azimuth change.
+
+    Measured by sampling the track when that was possible. When it was not —
+    no track available, or sampling failed — fall back to the short way from
+    AOS to LOS rather than to zero: a zero sweep claims the antenna finishes
+    the pass exactly where it started, and every turnaround after it is then
+    costed from the wrong side of the sky.
+    """
+    if c.az_sweep:
+        return c.az_sweep
+    return (c.los_az - c.aos_az + 180.0) % 360.0 - 180.0
+
+
+def branches(c: Candidate, slew: SlewModel) -> list[float]:
+    """Every unwrapped bearing from which this pass can be followed to LOS.
+
+    A SPID holds each compass bearing more than once, and which one the antenna
+    meets a pass at decides both where it ends up and how far the next slew
+    is. Only branches that keep the pass's whole sweep inside the limits count.
+    """
+    sweep = sweep_of(c)
+    out = []
+    for k in range(-3, 4):
+        a = c.aos_az + 360.0 * k
+        if (slew.min_az <= a <= slew.max_az
+                and slew.min_az <= a + sweep <= slew.max_az):
+            out.append(a)
+    return out
+
+
+def turn_s(slew: SlewModel, from_bearing: float, to_bearing: float) -> float:
+    """Time from one explicit unwrapped bearing to another, both on the horizon,
+    plus setup — with the turnaround floor. No branch choice is made here; the
+    DAG already made it."""
+    travel = abs(to_bearing - from_bearing)
+    moving = travel > 0.05
+    move = travel / slew.az_rate_deg_s + (slew.accel_margin_s if moving else 0.0)
+    return max(slew.min_turnaround_s, move + slew.setup_s)
+
+
+def _margin(a: float, sweep: float, slew: SlewModel) -> float:
+    lo, hi = min(a, a + sweep), max(a, a + sweep)
+    return min(lo - slew.min_az, slew.max_az - hi)
+
+
 def select(candidates: Iterable[Candidate], *, slew: SlewModel,
            reservations: Iterable[Reservation] = (), guard_s: float = 0.0,
-           floor_el: float = 0.0, now: datetime | None = None) -> Plan:
+           floor_el: float = 0.0, now: datetime | None = None,
+           origin_az: float | None = None) -> Plan:
     """The highest-scoring set of passes that the antenna can physically work.
 
-    Exact, not heuristic: a longest path through the DAG of compatible passes.
-    See the module docstring for why the textbook O(n log n) method does not
-    apply when the turnaround depends on the pair.
+    Exact, not heuristic: a longest path through a DAG whose nodes are
+    (pass, wrap branch) pairs. A node is a decision about *where* to meet the
+    pass as well as whether to work it, because on a rotator with overlap the
+    two are not separable — the branch chosen for one pass is where the
+    antenna is when the next one is due, after the pass's own sweep.
+
+    Planning over passes alone, and costing each turnaround from the compass
+    LOS bearing, under-estimates a slew by up to 320° after a wrapped pass:
+    the antenna is not at 170° but at 530°. That is a plan the rotator cannot
+    actually fly.
+
+    `origin_az` is where the antenna is now, unwrapped. If known, the first
+    pass must be reachable from it; if not, any branch may start the plan.
+
+    The objective is lexicographic: total score first, then least total slew,
+    then the branch with most room to spare from the end stops. The last two
+    only ever decide between plans of equal score.
     """
     now = now or datetime.now(timezone.utc)
     reservations = list(reservations)
@@ -392,6 +460,14 @@ def select(candidates: Iterable[Candidate], *, slew: SlewModel,
                 c, "low", f"peaks at {c.max_el:.1f}°, below the {floor_el:.0f}° threshold"
             )
             continue
+        if c.score <= 0:
+            # A zero-priority satellite is one an operator has said not to
+            # work. Left in the pool it would still be planned whenever it is
+            # the only pass on offer, because a plan of one beats a plan of none.
+            decisions[c.key] = Decision(
+                c, "low", "scores 0 — its priority is 0, so it is not worth working"
+            )
+            continue
 
         clash = next((r for r in reservations if _overlaps(c, r, guard_s)), None)
         if clash is not None:
@@ -405,37 +481,75 @@ def select(candidates: Iterable[Candidate], *, slew: SlewModel,
                     f"overlaps SatNOGS job {clash.job_id} for NORAD {clash.norad}",
                 )
             continue
+        if not branches(c, slew):
+            decisions[c.key] = Decision(
+                c, "infeasible",
+                f"its {abs(sweep_of(c)):.0f}° azimuth sweep does not fit the "
+                f"rotator's {slew.min_az:.0f}..{slew.max_az:.0f}° travel from any "
+                f"starting bearing",
+            )
+            continue
         pool.append(c)
 
-    # A pass already under way must start from wherever the antenna is, not be
-    # judged on whether it could be reached by its AOS; treat it as reachable.
-    n = len(pool)
-    best = [0.0] * n            # best total of a plan whose last pass is j
-    prev: list[int | None] = [None] * n
+    # --- nodes -----------------------------------------------------------------
+    nodes: list[tuple[int, float]] = []
+    for k, c in enumerate(pool):
+        for b in branches(c, slew):
+            nodes.append((k, b))
+    nodes.sort(key=lambda v: (pool[v[0]].aos, v[0], v[1]))
 
-    for j, cj in enumerate(pool):
-        best[j] = cj.score
-        for i in range(j):
-            ci = pool[i]
-            if not _compatible(ci, cj, slew):
+    NEG = (-math.inf, 0.0, 0.0)
+    value: list[tuple[float, float, float]] = [NEG] * len(nodes)
+    prev: list[int | None] = [None] * len(nodes)
+
+    for vi, (k, b) in enumerate(nodes):
+        c = pool[k]
+        margin = _margin(b, sweep_of(c), slew)
+
+        # Starting the plan here.
+        if origin_az is None:
+            value[vi] = (c.score, 0.0, margin)
+        elif c.aos <= now:
+            # Already under way: the antenna has to catch up wherever it is,
+            # and the cost of doing so is the slew.
+            value[vi] = (c.score, -abs(b - origin_az), margin)
+        elif (now + timedelta(seconds=turn_s(slew, origin_az, b))) <= c.aos:
+            value[vi] = (c.score, -abs(b - origin_az), margin)
+
+        # Following an earlier node.
+        for ui in range(vi):
+            uk, ub = nodes[ui]
+            if value[ui][0] == -math.inf:
                 continue
-            if best[i] + cj.score > best[j]:
-                best[j] = best[i] + cj.score
-                prev[j] = i
+            u = pool[uk]
+            if uk == k or u.los >= c.aos:
+                continue
+            gap = (c.aos - u.los).total_seconds()
+            end_bearing = ub + sweep_of(u)
+            if gap < turn_s(slew, end_bearing, b):
+                continue
+            cand = (value[ui][0] + c.score,
+                    value[ui][1] - abs(b - end_bearing),
+                    margin)
+            if cand > value[vi]:
+                value[vi] = cand
+                prev[vi] = ui
 
-    chosen: list[int] = []
-    if n:
-        j: int | None = max(range(n), key=lambda k: (best[k], -k))
-        while j is not None:
-            chosen.append(j)
-            j = prev[j]
-    chosen.reverse()
-    chosen_set = set(chosen)
-    planned = [pool[k] for k in chosen]
+    chosen_nodes: list[int] = []
+    reachable = [vi for vi in range(len(nodes)) if value[vi][0] > -math.inf]
+    if reachable:
+        vi: int | None = max(reachable, key=lambda v: (value[v], -v))
+        while vi is not None:
+            chosen_nodes.append(vi)
+            vi = prev[vi]
+    chosen_nodes.reverse()
+
+    planned = [replace(pool[nodes[vi][0]], start_bearing=nodes[vi][1])
+               for vi in chosen_nodes]
+    chosen_keys = {c.key for c in planned}
 
     for k, c in enumerate(pool):
-        if k in chosen_set:
-            decisions[c.key] = Decision(c, "planned", _why_planned(c))
+        if c.key in chosen_keys:
             continue
         # Explain the loss in terms of the plan, so an operator can see what a
         # pass was traded for rather than just that it was dropped.
@@ -448,20 +562,27 @@ def select(candidates: Iterable[Candidate], *, slew: SlewModel,
                 blocked_by=rival.key,
             )
             continue
-        neighbour = next(
-            (p for p in planned
-             if not _compatible(p, c, slew) or not _compatible(c, p, slew)),
-            None,
-        )
-        if neighbour is not None:
-            decisions[c.key] = Decision(
-                c, "infeasible",
-                f"not enough time to slew between this and "
-                f"{neighbour.name or neighbour.norad} at {neighbour.aos:%H:%M}Z",
-                blocked_by=neighbour.key,
-            )
+        before = next((p for p in reversed(planned) if p.los <= c.aos), None)
+        after = next((p for p in planned if p.aos >= c.los), None)
+        if not _fits_between(c, before, after, slew, now, origin_az):
+            neighbour = before or after
+            if neighbour is not None:
+                decisions[c.key] = Decision(
+                    c, "infeasible",
+                    f"not enough time to slew between this and "
+                    f"{neighbour.name or neighbour.norad} at {neighbour.aos:%H:%M}Z",
+                    blocked_by=neighbour.key,
+                )
+            else:
+                decisions[c.key] = Decision(
+                    c, "infeasible",
+                    "the antenna cannot reach where it rises before it rises",
+                )
         else:
             decisions[c.key] = Decision(c, "conflict", "a better combination excludes it")
+
+    for p in planned:
+        decisions[p.key] = Decision(p, "planned", _why_planned(p))
 
     ordered = sorted(decisions.values(), key=lambda d: (d.candidate.aos, d.candidate.key))
     return Plan(
@@ -473,20 +594,28 @@ def select(candidates: Iterable[Candidate], *, slew: SlewModel,
     )
 
 
+def _fits_between(c: Candidate, before: Candidate | None, after: Candidate | None,
+                  slew: SlewModel, now: datetime, origin_az: float | None) -> bool:
+    """Could c be slotted between its planned neighbours, on any branch?"""
+    for b in branches(c, slew):
+        if before is not None:
+            end = (before.start_bearing if before.start_bearing is not None
+                   else before.aos_az) + sweep_of(before)
+            if (c.aos - before.los).total_seconds() < turn_s(slew, end, b):
+                continue
+        elif origin_az is not None and c.aos > now:
+            if now + timedelta(seconds=turn_s(slew, origin_az, b)) > c.aos:
+                continue
+        if after is not None:
+            nb = after.start_bearing if after.start_bearing is not None else after.aos_az
+            if (after.aos - c.los).total_seconds() < turn_s(slew, b + sweep_of(c), nb):
+                continue
+        return True
+    return False
+
+
 def _time_overlap(a: Candidate, b: Candidate) -> bool:
     return a.aos < b.los and b.aos < a.los
-
-
-def _compatible(a: Candidate, b: Candidate, slew: SlewModel) -> bool:
-    """Can the antenna finish pass a, then be ready for pass b at its AOS?
-
-    The move is from where a sets to where b rises, both on the horizon, and b
-    has to be met at a bearing that leaves room for its whole sweep.
-    """
-    if b.aos <= a.los:
-        return False
-    gap = (b.aos - a.los).total_seconds()
-    return gap >= slew.turnaround(a.los_az, 0.0, b.aos_az, 0.0, b.az_sweep)
 
 
 def _why_planned(c: Candidate) -> str:
