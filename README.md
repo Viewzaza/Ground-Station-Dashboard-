@@ -616,11 +616,20 @@ overhead pass is about 10 dB closer than a 10° one. Priority multiplies rather
 than adds so that a middling KNACKSAT-2 pass beats a perfect pass of a
 satellite nobody here is responsible for.
 
+**Overhead passes score lower, on purpose.** An az/el mount's required azimuth
+rate near zenith goes as 1/cos(el) — about 6°/s at 80° for a 400 km pass, about
+60°/s at 89°. A SPID turning at 1.5–3°/s cannot keep up, so through TCA, the
+best part of the pass, the beam points well behind the satellite. The planner
+simulates a rate-limited rotator chasing each high pass and derates the score
+by the beam loss of its worst lag; on this hardware an 89° pass scores below a
+70° one. The simulation agrees with an independently computed table to within a
+few tenths of a degree, and `tests/test_planner.py` holds it there.
+
 ```ini
 GS_PLANNER_PRIORITIES=67683:10    # norad:weight, comma separated
 GS_PLANNER_INCLUDE_CATALOG=0      # 1 = plan the whole amateur catalogue too
-GS_ROTATOR_AZ_RATE_DEG_S=2.0      # conservative; overestimating the rotator
-GS_ROTATOR_EL_RATE_DEG_S=2.0      #   loses the first minute of every pass
+GS_ROTATOR_AZ_RATE_DEG_S=1.5      # the slowest plausible SPID; time a 180°
+GS_ROTATOR_EL_RATE_DEG_S=1.5      #   slew on site and raise these to match
 GS_PLANNER_SETUP_S=30             # retune and start recording between passes
 ```
 
@@ -641,12 +650,41 @@ tracks it from AOS, stops at LOS, and moves on. It is built to be timid:
 - **It never takes a lease.** It can only be engaged while an operator holds
   one (`POST /api/plan/autopilot {"enabled": true}`), and it disengages itself
   when that lease expires or is released. Re-engaging is a human decision.
-- **The operator always wins.** Pressing STOP, or driving the antenna by hand,
-  disengages autopilot rather than being fought by it. It stops only tracks it
-  started.
+- **The operator always wins.** Any command an operator issues — STOP, a goto,
+  a park, a track, a release — disengages autopilot and is left to stand.
+  Autopilot stops only motion it started, named by track id.
 - **A closed gate is not an operator.** If SatNOGS reconnects mid-pass the
   interlock stops the track; autopilot reports it is blocked and resumes when
   the gate reopens, within the same lease.
+- **Engaging is a handover.** From the moment it is engaged, the antenna is
+  autopilot's to drive — including away from a track the operator had running.
+  Engaging twice changes nothing.
+
+**How it knows who did what.** `ControlService` keeps a command journal: every
+command it *accepts* increments `command_seq` and records its origin
+(`operator` or `autopilot`), and nothing else does. "Has anyone else touched the
+antenna since autopilot last did?" is then exactly `command_seq != mine`. The
+first version inferred this from the control mode, and an adversarial review
+showed why that cannot work: a track ended by a closing gate and one ended by an
+operator's STOP both leave the mode `idle`, and an operator who parks after
+autopilot pre-positioned leaves it `manual` either way. Releasing is journaled
+too, so a release followed by a re-arm is still seen; extending a lease is not,
+so it does not disengage anything.
+
+**Where it meets each pass.** A SPID holds every bearing more than once, so the
+planner plans over (pass, wrap branch) pairs from where the antenna actually is,
+and each planned pass carries the exact bearing it was costed on. Autopilot
+drives there. Costing turnarounds from the compass LOS instead under-estimated a
+slew by up to 320° after a wrapped pass. Branches are checked against the
+**limits actually in force** — the configured station limits narrowed by what
+rotctld reports — which on station 5024 are −90…450, not the −180…540 that
+`dump_caps` claims.
+
+`tests/test_autopilot.py` runs all of this against the real `ControlService`
+and its real track loop, with a recording rotator client. Each test names the
+review scenario it pins, and they fail against the previous code. An earlier
+version tested against a hand-written fake of `ControlService`, and every bug
+the review found passed it.
 
 Like manual control, **autopilot has never commanded the real antenna**. The
 same precondition applies: eyes on the mast, and the station out of the SatNOGS
@@ -657,7 +695,7 @@ schedule.
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 204 tests
+.venv/Scripts/python -m pytest              # offline: 469 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
 
