@@ -72,6 +72,11 @@ class SatnogsService:
         self.station: dict | None = None
         self.jobs: list[dict] = []
         self.observations: list[dict] = []
+        # Observations SatNOGS is recording *right now*. /api/jobs/ filters on
+        # start >= now, so a job disappears from it the moment it starts — the
+        # one moment it matters most. Without this, a recording in progress is
+        # invisible to the interlock's pass gate and to the planner.
+        self.running: dict[int, dict] = {}
 
         # Monotonic stamps: the gate reasons about age, and wall-clock would let
         # an NTP step or a DST change silently authorise a move.
@@ -110,7 +115,9 @@ class SatnogsService:
         """
         now = now or datetime.now(timezone.utc)
         soonest: float | None = None
-        for job in self.jobs:
+        # commitments, not jobs: a job in progress is no longer in /api/jobs/,
+        # so reading jobs alone made the in-progress branch below unreachable.
+        for job in self.commitments:
             start = _parse_ts(job.get("start"))
             end = _parse_ts(job.get("end"))
             if start is None:
@@ -142,8 +149,38 @@ class SatnogsService:
         )
         # An empty job list is a real, meaningful answer — the station has
         # nothing scheduled — so it must stamp freshness like any other.
-        self.jobs = data if isinstance(data, list) else []
+        fresh = data if isinstance(data, list) else []
+        now = datetime.now(timezone.utc)
+        seen = {j.get("id") for j in fresh}
+        # A job that drops out of /api/jobs/ while inside its own window has
+        # not gone away — it has started. Keep it until it ends. A cancelled
+        # job is kept too, until its end time: holding a gate shut a few
+        # minutes too long is the right way to be wrong.
+        for job in self.jobs:
+            if job.get("id") in seen:
+                continue
+            start, end = _parse_ts(job.get("start")), _parse_ts(job.get("end"))
+            if start is not None and end is not None and start <= now < end:
+                self.running[job.get("id")] = job
+        self.jobs = fresh
+        self._prune_running(now)
         self._jobs_at = time.monotonic()
+
+    def _prune_running(self, now: datetime) -> None:
+        for key, job in list(self.running.items()):
+            end = _parse_ts(job.get("end"))
+            if end is None or end <= now:
+                self.running.pop(key, None)
+
+    @property
+    def commitments(self) -> list[dict]:
+        """Everything SatNOGS has claimed that has not yet ended: scheduled
+        jobs plus anything recording now. This, not `jobs`, is what anything
+        deciding whether the antenna is free must read."""
+        now = datetime.now(timezone.utc)
+        self._prune_running(now)
+        seen = {j.get("id") for j in self.jobs}
+        return list(self.jobs) + [j for k, j in self.running.items() if k not in seen]
 
     async def refresh_observations(self, client: httpx.AsyncClient) -> None:
         data, _ = await self._get(
@@ -152,6 +189,22 @@ class SatnogsService:
         if not isinstance(data, list):
             return
         self.observations = [self._summarise(o) for o in data[:FEED_LIMIT]]
+        # Read running observations from the whole page, not the truncated
+        # feed: the list is newest-start first, so on a busy station future
+        # observations fill the first FEED_LIMIT slots and a recording in
+        # progress falls off the end. This also covers a backend restart
+        # mid-recording, when there is no previous job list to carry over.
+        now = datetime.now(timezone.utc)
+        for o in data:
+            start, end = _parse_ts(o.get("start")), _parse_ts(o.get("end"))
+            if start is not None and end is not None and start <= now < end:
+                self.running[o.get("id")] = {
+                    "id": o.get("id"),
+                    "norad_cat_id": o.get("norad_cat_id"),
+                    "start": o.get("start"),
+                    "end": o.get("end"),
+                    "running": True,
+                }
 
     @staticmethod
     def _summarise(obs: dict) -> dict:
@@ -196,6 +249,11 @@ class SatnogsService:
                     "tle0": j.get("tle0"),
                 }
                 for j in self.jobs
+            ],
+            "running": [
+                {"id": j.get("id"), "norad": j.get("norad_cat_id"),
+                 "start": j.get("start"), "end": j.get("end")}
+                for j in self.running.values()
             ],
             "seconds_to_next_job": self.seconds_to_next_job(now),
             "observations": self.observations,
