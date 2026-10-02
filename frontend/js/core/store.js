@@ -21,6 +21,8 @@ export const store = {
   telemetry: null,     // most recent frames SatNOGS has for the tracked satellite
   rig: null,           // what the station's receiver is tuned to, live
   control: null,       // interlock state: gates, lease, mode
+  plan: null,          // the observation plan, with a reason for every pass
+  autopilot: null,     // whether the executor is working the plan, and why not
   cameras: [],
   cameraBridge: null,  // why the video bridge is or is not reachable
 };

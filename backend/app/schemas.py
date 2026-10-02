@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 ServerFrameType = Literal[
     "hello", "snapshot", "rotator", "satpos", "pass_next", "passes",
     "tle", "satnogs", "pointing", "control", "status", "log", "error",
-    "rig",
+    "rig", "plan", "autopilot",
 ]
 
 ClientFrameType = Literal[
@@ -128,7 +128,7 @@ class ControlState(BaseModel):
 class Status(BaseModel):
     component: Literal[
         "backend", "rotctld", "tle", "satnogs", "camera", "predictor", "control",
-        "rig",
+        "rig", "planner",
     ]
     state: ComponentState
     detail: str = ""

@@ -128,6 +128,14 @@ function handle(frame) {
       set('tle', frame.data);
       break;
 
+    case 'plan':
+      set('plan', frame.data);
+      break;
+
+    case 'autopilot':
+      set('autopilot', frame.data);
+      break;
+
     case 'satnogs':
       set('satnogs', frame.data);
       break;

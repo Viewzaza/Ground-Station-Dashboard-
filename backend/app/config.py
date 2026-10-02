@@ -98,6 +98,22 @@ class Settings(BaseSettings):
     park_az: float = 0.0
     park_el: float = 0.0
 
+    # --- observation planner ------------------------------------------------
+    # Slew rates are deliberately conservative. A plan that thinks the rotator
+    # is faster than it is starts every pass with the antenna still swinging
+    # into place, and loses the low, Doppler-heavy first minute.
+    rotator_az_rate_deg_s: float = 2.0
+    rotator_el_rate_deg_s: float = 2.0
+    planner_setup_s: int = 30           # retune, start the recorder, settle
+    planner_lead_s: int = 90            # start pre-positioning at least this early
+    planner_horizon_h: float = 24.0
+    planner_rebuild_s: int = 300
+    # "norad:weight,norad:weight". Priority multiplies a pass's score, so 10
+    # means a middling pass of that satellite beats a perfect pass of another.
+    planner_priorities: str = "67683:10"
+    planner_default_priority: float = 1.0
+    planner_include_catalog: bool = False
+
     # --- cameras ------------------------------------------------------------
     go2rtc_url: str = "http://video:1984"
     camera_host: str = "10.90.36.130"

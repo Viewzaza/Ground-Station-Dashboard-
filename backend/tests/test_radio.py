@@ -7,6 +7,8 @@ run offline and so the thing being asserted is visible in the test itself.
 from __future__ import annotations
 
 import io
+import tempfile
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -34,6 +36,11 @@ UHF = {
 
 
 def store(**overrides) -> TransmitterStore:
+    # A fresh, empty data directory per store. Settings otherwise inherits
+    # GS_DATA_DIR, and once the app has run against that directory it holds
+    # a real transmitters.json — so "nothing known" stops being true and the
+    # test reads the station's actual 400.63 MHz downlink back.
+    overrides.setdefault("data_dir", Path(tempfile.mkdtemp(prefix="gs-radio-")))
     return TransmitterStore(Settings(station_id=5024, **overrides))
 
 

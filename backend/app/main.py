@@ -14,7 +14,8 @@ from fastapi import FastAPI
 
 from .config import get_settings
 from .routes import (
-    cameras, control, health, passes, radio, rig, rotator, satellites, satnogs, ws,
+    cameras, control, health, passes, plan, radio, rig, rotator, satellites,
+    satnogs, ws,
 )
 from .scheduler import Scheduler
 from .services.predictor import Predictor
@@ -55,6 +56,8 @@ async def lifespan(app: FastAPI):
     app.state.satnogs = scheduler.satnogs
     app.state.control = scheduler.control
     app.state.rig = scheduler.rig
+    app.state.planner = scheduler.planner
+    app.state.executor = scheduler.executor
 
     await scheduler.start()
     try:
@@ -84,4 +87,5 @@ app.include_router(control.router, prefix="/api", tags=["control"])
 app.include_router(satnogs.router, prefix="/api", tags=["satnogs"])
 app.include_router(radio.router, prefix="/api", tags=["radio"])
 app.include_router(rig.router, prefix="/api", tags=["rig"])
+app.include_router(plan.router, prefix="/api", tags=["plan"])
 app.include_router(ws.router, tags=["ws"])

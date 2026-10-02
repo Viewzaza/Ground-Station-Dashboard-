@@ -15,6 +15,7 @@ from typing import Awaitable, Callable
 from .config import Settings
 from .hub import hub
 from .services.control import ControlService
+from .services.planner_service import PlanExecutor, PlannerService
 from .services.predictor import Predictor
 from .services.rig_service import RigService
 from .services.rotator_service import RotatorService
@@ -41,6 +42,14 @@ class Scheduler:
         self.control = ControlService(
             settings, self.rotator, self.satnogs, predictor, on_state=self.set_state
         )
+        # The planner only reads; the executor acts, and only through
+        # ControlService, so the interlock covers autopilot exactly as it
+        # covers an operator's hand on the panel.
+        self.planner = PlannerService(
+            settings, predictor, self.satnogs, getattr(predictor, 'tles', tles)
+        )
+        self.planner.rotator = self.rotator
+        self.executor = PlanExecutor(settings, self.planner, self.control, self.rotator)
 
     # --- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
@@ -55,6 +64,8 @@ class Scheduler:
         self._spawn("satnogs", self.satnogs.run)
         self._spawn("control", self._control_loop)
         self._spawn("rig", self.rig.run)
+        self._spawn("planner", self.planner.run)
+        self._spawn("autopilot", self.executor.run)
 
     async def stop(self) -> None:
         await self.rotator.stop()
