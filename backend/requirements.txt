@@ -9,3 +9,9 @@ Pillow==12.3.0
 requests==2.32.5
 rich==14.2.0
 satnogs-auto-scheduler @ git+https://gitlab.com/librespacefoundation/satnogs/satnogs-auto-scheduler.git@0f7ec01776dad49f5ba2e66f8678649451075bac
+# Declared because waterfall.py imports it directly, not because anything new
+# pulled it in: it was already here as skyfield's dependency, which is exactly
+# the kind of thing that holds until the day skyfield changes its mind. Every
+# other line in this file is pinned to the version the tests ran against and
+# this is no different.
+numpy==2.5.3

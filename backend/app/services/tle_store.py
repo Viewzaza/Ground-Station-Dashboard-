@@ -127,8 +127,18 @@ class TleStore:
                 log.error("Celestrak returned %s — not retrying: %s",
                           resp.status_code, resp.text[:200])
                 return {}
-            self._source = f"celestrak:{self.s.celestrak_group}"
-            return _parse_3le(resp.text)
+            sats = _parse_3le(resp.text)
+            if sats:
+                # Only once something actually parsed. A 200 proves an HTTP
+                # conversation happened, not that Celestrak was on the other
+                # end of it: a captive portal answers every request on the LAN
+                # with its own login page. Setting the provenance first meant a
+                # store still flying SatNOGS elements would report them as
+                # `celestrak:amateur` after a refresh that brought back
+                # nothing — the one field whose job is to say where the numbers
+                # under the antenna came from.
+                self._source = f"celestrak:{self.s.celestrak_group}"
+            return sats
         except httpx.HTTPError as exc:
             log.error("Celestrak unreachable: %s", exc)
             return {}
@@ -147,13 +157,48 @@ class TleStore:
                     )
                     if resp.status_code != 200:
                         continue
-                    for entry in resp.json():
-                        out[int(entry["norad_cat_id"])] = {
-                            # SatNOGS prefixes the name with the 3LE "0 " marker.
-                            "name": entry["tle0"].removeprefix("0 ").strip(),
-                            "tle1": entry["tle1"],
-                            "tle2": entry["tle2"],
-                        }
+                    # Everything below is defended per-record, and that is not
+                    # ordinary paranoia about JSON: this runs ONLY after
+                    # Celestrak has already failed, and the thing most likely
+                    # to have failed it — a captive portal, a DNS hijack, a
+                    # proxy demanding a login — intercepts the whole LAN rather
+                    # than one host. So the fallback meets the same fake 200,
+                    # and it used to raise straight out of refresh(): a
+                    # JSONDecodeError on an HTML page, or `TypeError: string
+                    # indices must be integers` on a dict envelope, because
+                    # iterating a dict yields its keys. refresh() is contracted
+                    # to return a bool and log its failures, and this is the
+                    # one path where it could not keep that promise.
+                    try:
+                        payload = resp.json()
+                    except ValueError:
+                        log.warning("SatNOGS DB answered 200 with a body that "
+                                    "is not JSON for %s", norad)
+                        continue
+                    if not isinstance(payload, list):
+                        log.warning("SatNOGS DB answered 200 with %s rather "
+                                    "than a list for %s",
+                                    type(payload).__name__, norad)
+                        continue
+                    for entry in payload:
+                        if not isinstance(entry, dict):
+                            continue
+                        try:
+                            norad_id = int(entry["norad_cat_id"])
+                            out[norad_id] = {
+                                # SatNOGS prefixes the name with the 3LE "0 "
+                                # marker.
+                                "name": str(entry["tle0"]).removeprefix("0 ").strip(),
+                                "tle1": entry["tle1"],
+                                "tle2": entry["tle2"],
+                            }
+                        except (KeyError, TypeError, ValueError):
+                            # One malformed record costs that satellite, not
+                            # the whole fallback — and the fallback is the last
+                            # thing standing between the station and no
+                            # elements at all.
+                            log.warning("SatNOGS DB record for %s is not a TLE",
+                                        norad)
         except httpx.HTTPError as exc:
             log.error("SatNOGS DB unreachable: %s", exc)
             return {}

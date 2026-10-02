@@ -34,6 +34,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
+import numpy as np
 from PIL import Image, ImageChops, ImageOps
 
 from ..config import Settings
@@ -189,50 +190,72 @@ class WaterfallStore:
 
 def find_plot_box(im: Image.Image) -> tuple[int, int, int, int] | None:
     """Bounding box of the spectrogram, excluding axes and colourbar."""
-    w, h = im.size
-    px = im.load()
+    # This was 84 of the 286 ms a pass costs, and almost none of it was the
+    # work: `px[x, y]` on an 832x1603 figure is about 400k bound-method calls
+    # and 400k tuple unpackings to answer a question that is one comparison
+    # per pixel. Everything below is the same arithmetic as the loops it
+    # replaces — same stride, same strictly-greater test against WHITE, same
+    # threshold, same three-column merge, same first-wins tie between equally
+    # wide runs — done once across the array instead of a pixel at a time.
+    #
+    # The old implementation is kept in `tests/test_waterfall.py` and both are
+    # run against every figure shape the scan can meet, because the only
+    # definition of "right" this function has is what it used to say. There is
+    # no independent statement of where the plot is, so "close enough" cannot
+    # be checked and would not be good enough anyway: two pixels of drift is
+    # two pixels of axis inside the crop, on a display nobody looks at closely.
+    #
+    # Not converting first was a real bug for about an hour: `np.asarray` on
+    # an L-mode image gives a 2-D array and the channel reduction below raises
+    # on it, and on RGBA it would quietly fold alpha into the background test.
+    # The loop this replaces refused both by failing to unpack three values,
+    # which is the same outcome for `render_signal` — it converts already —
+    # and a dead panel for anyone who calls this directly.
+    arr = np.asarray(im if im.mode == "RGB" else im.convert("RGB"))
 
-    def column_ink(x: int) -> float:
-        n = hit = 0
-        for y in range(0, h, SAMPLE_STEP):
-            r, g, b = px[x, y]
-            n += 1
-            if not (r > WHITE and g > WHITE and b > WHITE):
-                hit += 1
-        return hit / max(1, n)
-
-    runs: list[tuple[int, int]] = []
-    start = prev = None
-    for x in range(w):
-        if column_ink(x) > INK_FRACTION:
-            if start is None:
-                start = prev = x
-            elif x - prev <= 3:
-                prev = x
-            else:
-                runs.append((start, prev))
-                start = prev = x
-    if start is not None:
-        runs.append((start, prev))
-    if not runs:
+    # Background is over WHITE on every channel, so ink is that negated: at
+    # least one channel that is not. Tested only on the pixels the pass
+    # actually samples, which is what the loop did and is worth saying out
+    # loud — the first draft built one background mask for the whole figure
+    # and then read a sixth of it, and that single reduction over 1.3
+    # megapixels cost 20 ms of the 50 the rewrite was meant to save. The
+    # sampling is not a detail to apply at the end; it is most of the win.
+    #
+    # `np.all(... > WHITE, axis=2)` and not `min(axis=2) > WHITE`: they say
+    # the same thing about integers, and the min is half as fast again on
+    # uint8, which is not somewhere anybody would think to look.
+    sampled = ~np.all(arr[::SAMPLE_STEP] > WHITE, axis=2)
+    inky = sampled.sum(axis=0) / max(1, sampled.shape[0]) > INK_FRACTION
+    xs = np.flatnonzero(inky)
+    if xs.size == 0:
         return None
+
+    # A run ends where the next inked column is more than three away. That is
+    # the distance between surviving columns and not the width of the gap, so
+    # two blank columns still merge and three do not — slack for a gridline
+    # drawn across the spectrogram, not for a dead band.
+    breaks = np.flatnonzero(np.diff(xs) > 3)
+    starts = np.concatenate(([xs[0]], xs[breaks + 1]))
+    ends = np.concatenate((xs[breaks], [xs[-1]]))
 
     # Widest run is the spectrogram; the colourbar is a ~20 px strip beside it.
-    x0, x1 = max(runs, key=lambda r: r[1] - r[0])
+    # `argmax` takes the first maximum, which is what `max` over the run list
+    # did, and it is load-bearing: it is the whole of what puts a colourbar
+    # exactly as wide as the plot on the losing side of the tie.
+    widest = int(np.argmax(ends - starts))
+    x0, x1 = int(starts[widest]), int(ends[widest])
 
-    def row_ink(y: int) -> float:
-        n = hit = 0
-        for x in range(x0, x1, SAMPLE_STEP):
-            r, g, b = px[x, y]
-            n += 1
-            if not (r > WHITE and g > WHITE and b > WHITE):
-                hit += 1
-        return hit / max(1, n)
-
-    rows = [y for y in range(h) if row_ink(y) > INK_FRACTION]
-    if not rows:
+    # Half-open on x1, as the `range(x0, x1, SAMPLE_STEP)` it replaces was, so
+    # the run's last column is never sampled by the row pass. For a run one
+    # column wide that leaves nothing to sample at all — and the empty slice,
+    # divided by the max(1, ...) below, is exactly what makes a figure of empty
+    # axes answer None rather than a box with no rows inside it.
+    band = ~np.all(arr[:, x0:x1:SAMPLE_STEP] > WHITE, axis=2)
+    lit = band.sum(axis=1) / max(1, band.shape[1]) > INK_FRACTION
+    rows = np.flatnonzero(lit)
+    if rows.size == 0:
         return None
-    return (x0, rows[0], x1 + 1, rows[-1] + 1)
+    return (x0, int(rows[0]), x1 + 1, int(rows[-1]) + 1)
 
 
 def render_signal(png_bytes: bytes) -> bytes | None:
@@ -249,8 +272,16 @@ def render_signal(png_bytes: bytes) -> bytes | None:
     plot = im.crop(box)
 
     width = plot.width
-    keep = max(8, int(width * CENTRE_FRACTION))
-    left = (width - keep) // 2
+    # Never wider than the plot it is cropping. The floor of 8 used to win on a
+    # box only a few pixels across, which made `left` negative — and PIL pads a
+    # crop that runs off the edge with BLACK rather than refusing it. Black is
+    # 128 under the G-B+128 discriminator below, against a real noise floor's
+    # ~18, so the padding did not merely survive the percentile stretch, it
+    # outranked the sky: the panel drew a bright bar down each edge that read
+    # as signal. Measured at row means of 187 at the edges against 74 in the
+    # middle. Reachable from any upload whose widest non-white run is 2-7 px.
+    keep = min(width, max(8, int(width * CENTRE_FRACTION)))
+    left = max(0, (width - keep) // 2)
     plot = plot.crop((left, 0, left + keep, plot.height))
 
     # Viridis runs dark blue -> teal -> green as power rises, so G-B increases
