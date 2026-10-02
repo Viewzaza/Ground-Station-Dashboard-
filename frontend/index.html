@@ -99,6 +99,48 @@
 
   </aside>
 
+  <!-- ─────────────────────────── observation plan ───────────────────────── -->
+  <!-- Which passes the one antenna will work, and why the others will not be.
+       It sits under the rotator, in the same column, because it is the rest
+       of that column's question: the rotator panel is what the antenna is
+       doing, this is what it is going to do — and ENGAGE only means anything
+       once ARM, just above it, has been pressed. The strip and the list are
+       one set drawn twice; the list is where the reasons are. -->
+  <section class="panel plan" id="plan-panel" style="grid-area:plan">
+    <h2>Observation plan
+      <span class="hint" id="plan-hint">—</span>
+      <button class="pl-rebuild" id="plan-rebuild" type="button"
+              title="re-run the planner now rather than at its next interval">rebuild</button>
+    </h2>
+    <div class="pl-body">
+      <div class="pl-head">
+        <!-- Shown only when the plan was built without SatNOGS's schedule, so
+             it cannot have left SatNOGS's observations alone. role=status so
+             the warning is announced when it appears, not only seen. -->
+        <div class="pl-warn" id="plan-warn" role="status" hidden></div>
+        <div class="pl-next" id="plan-next">
+          <span class="pl-next-label" id="plan-next-label">NEXT PLANNED AOS</span>
+          <b id="plan-next-cd">--:--:--</b>
+          <span class="pl-next-what" id="plan-next-what">awaiting the planner</span>
+        </div>
+        <!-- aria-hidden: every block on it is a row in the list below, which
+             is the version that carries the reasons in text. -->
+        <div class="pl-strip" id="plan-strip" aria-hidden="true"></div>
+        <div class="pl-auto" id="plan-auto">
+          <span class="muted">autopilot state unknown</span>
+        </div>
+      </div>
+      <div class="pl-main">
+        <ul class="pl-list" id="plan-list" aria-label="upcoming passes and the planner's decision on each">
+          <li class="pl-empty">awaiting the planner</li>
+        </ul>
+        <!-- Watched satellites the planner cannot see at all — no elements —
+             so they are in neither the strip nor the list above. -->
+        <div class="pl-blind" id="plan-blind" hidden></div>
+      </div>
+    </div>
+  </section>
+
   <!-- ─────────────────────────────── radio ──────────────────────────────── -->
   <section class="panel" style="grid-area:radio">
     <h2>Radio <span class="hint" id="radio-hint">—</span></h2>

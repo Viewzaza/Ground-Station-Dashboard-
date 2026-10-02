@@ -528,3 +528,197 @@ a.tlm-row:focus-visible { outline: 2px solid var(--track); outline-offset: -2px;
   .tlm-head { margin-left: 0; flex-basis: 100%; }
   .tlm-rows { max-height: 50vh; }
 }
+
+/* ── observation plan ─────────────────────────────────────────────────────
+   Which passes the one antenna works, and why not the rest. Top to bottom:
+   the countdown to the next planned AOS, a strip of the day, the autopilot
+   switch, and the list — which is the part that matters, because it is the
+   only place the reasons are written down.
+
+   Colour follows the three data hues and nothing else. A planned pass is the
+   path we will take, so --track. A pass SatNOGS has scheduled is the station
+   working it on its own, so --observer — and hatched as well, so it does not
+   depend on telling two hues apart across a room. Everything the planner
+   turned down is ink, dimmed by how close it came. "Now" is --contact, the
+   palette's happening-now. */
+.pl-body { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; }
+.pl-head { display: flex; flex-direction: column; gap: 6px; flex: none; min-width: 0; }
+/* The list's wrapper has to be a bounded flex column too. As a plain block it
+   grew to the list's full height, the panel's overflow:hidden clipped it, and
+   the list's own overflow-y never had anything to scroll: rows past the edge
+   were simply unreachable, and the NOT PLANNABLE line went with them. */
+.pl-main { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; min-width: 0; }
+.pl-blind { flex: none; }
+
+.plan h2 .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The same quiet link-weight as Grafana's "open full": it is the least urgent
+   thing on the panel, and the planner rebuilds by itself anyway. */
+.pl-rebuild {
+  background: none; border: 0; padding: 0; font: inherit; cursor: pointer;
+  font-size: 10px; letter-spacing: 0; font-weight: 400; color: var(--ink-4);
+  white-space: nowrap; flex: none;
+}
+.pl-rebuild:hover:not(:disabled) {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  text-decoration: underline;
+}
+.pl-rebuild:disabled { cursor: default; }
+.pl-rebuild:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
+
+/* Same colours as the header's NEXT AOS, and the same thresholds, so the two
+   countdowns turn amber and green together when they are counting to the same
+   pass — and visibly do not when the plan is working something else. */
+.pl-next { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
+.pl-next-label { font-size: 9px; letter-spacing: .16em; color: var(--ink-3); flex: none; }
+.pl-next b { font-size: 15px; font-weight: 500; color: var(--accent); flex: none; }
+.pl-next.imminent b { color: var(--warn); }
+.pl-next.in-pass b { color: var(--ok); }
+.pl-next-what {
+  font-size: 11px; color: var(--ink-2); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+/* A readout, not a window onto the sky, so a --sunk well like the frame list.
+   Two lanes: the upper for passes someone will work, the lower, thinner one
+   for passes the plan turned down. Hour labels sit below both. */
+.pl-strip {
+  position: relative; flex: none; height: 46px; overflow: hidden;
+  background: var(--sunk); border: 1px solid var(--rule-soft); border-radius: var(--radius);
+}
+.pl-tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--rule); }
+.pl-tick span {
+  position: absolute; bottom: 1px; left: 3px;
+  font-size: 9px; line-height: 1; color: var(--ink-3); white-space: nowrap;
+  font-variant-numeric: tabular-nums; font-style: normal;
+}
+.pl-tick.day { border-left-color: var(--ink-4); }
+.pl-tick.day span { color: var(--ink-2); font-weight: 600; }
+
+.pl-blk {
+  position: absolute; top: 4px; height: 18px; min-width: 3px;
+  border-radius: 2px; cursor: help;
+}
+.pl-blk.s-planned { background: var(--track); }
+.pl-blk.s-satnogs {
+  background: var(--observer);
+  background: repeating-linear-gradient(
+    135deg, var(--observer) 0 3px,
+    color-mix(in srgb, var(--observer) 40%, var(--panel)) 3px 6px);
+}
+.pl-blk.lose  { top: 26px; height: 6px; background: var(--ink-4); opacity: .6; }
+.pl-blk.s-low { top: 26px; height: 6px; background: var(--ink-4); opacity: .22; }
+/* The pass autopilot is working towards, and — on hover in the list — the row's
+   own pass and the one that beat it. Rings, not fills, so the status colour
+   underneath still reads. */
+.pl-blk.cur     { box-shadow: 0 0 0 1px var(--sunk), 0 0 0 2px var(--ink); }
+.pl-blk.hot     { box-shadow: 0 0 0 1px var(--sunk), 0 0 0 2px var(--track); opacity: 1; z-index: 1; }
+.pl-blk.blocker { box-shadow: 0 0 0 1px var(--sunk), 0 0 0 2px var(--ink-2); z-index: 1; }
+.pl-now {
+  position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+  background: var(--contact); pointer-events: none; z-index: 2;
+}
+
+/* ── autopilot ── */
+.pl-auto { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.pl-auto-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; }
+.pl-label { font-size: 9px; letter-spacing: .16em; color: var(--ink-3); flex: none; }
+/* The phase is the backend's word, shown as given. Each has its own register,
+   and none is --bad: autopilot standing behind a shut gate is it working as
+   designed, not a fault. Positioning is --track rather than --contact because
+   --contact and --warn are the same ink, and "moving into place" must not
+   look like "blocked". */
+.pl-phase {
+  flex: none; font-size: 10px; letter-spacing: .06em; line-height: 1.5;
+  padding: 0 6px; border-radius: 3px;
+  border: 1px solid var(--rule); background: var(--panel); color: var(--ink-3);
+}
+.pl-phase.ph-waiting,
+.pl-phase.ph-idle        { color: var(--ink-2); border-color: var(--ink-4); }
+.pl-phase.ph-positioning { color: var(--track); border-color: var(--track); }
+.pl-phase.ph-tracking    { color: var(--ok); border-color: var(--ok); }
+.pl-phase.ph-blocked     { color: var(--warn); border-color: var(--warn); }
+.pl-detail {
+  flex: 1 1 auto; min-width: 0; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pl-engage { flex: none; display: inline-flex; }
+.pl-engage .ctl-btn { flex: none; padding: 3px 12px; }
+
+/* ── decisions ── */
+.pl-list {
+  list-style: none; margin: 0; padding: 2px;
+  flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto;
+  background: var(--sunk); border: 1px solid var(--rule-soft); border-radius: var(--radius);
+}
+.pl-empty { font-size: 11px; color: var(--ink-3); padding: 6px; }
+
+/* Two lines per pass on the wall: the facts, then the reason, indented under
+   the name so the eye runs down the times without tripping over prose. The
+   reason wraps rather than truncating — it is the point of the row. */
+.pl-row {
+  display: grid; grid-template-columns: 5.2em minmax(0, 1fr) 2.6em 2.8em 5.8em;
+  column-gap: 8px; align-items: baseline;
+  padding: 3px 6px; border-radius: 3px; border-bottom: 1px solid var(--rule-soft);
+  font-size: 11px; color: var(--ink); cursor: default;
+}
+.pl-row:last-child { border-bottom: 0; }
+/* Upwards to the page on hover, as on the frame list — darker on a well reads
+   as pressed. */
+.pl-row:hover { background: var(--panel); }
+.pl-time { font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; }
+.pl-time i { font-style: normal; font-size: 9px; color: var(--ink-3); margin-right: 3px; }
+.pl-name { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-el, .pl-dur {
+  text-align: right; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.pl-st { text-align: right; font-size: 10px; letter-spacing: .06em; color: var(--ink-3); white-space: nowrap; }
+.pl-why { grid-column: 2 / -1; font-size: 10px; line-height: 1.35; color: var(--ink-3); }
+
+/* The edge marker is an inset shadow, as on the selector and the frame list,
+   so the text does not move by 2px between row kinds. */
+.pl-row.s-planned { box-shadow: inset 2px 0 0 var(--track); }
+.pl-row.s-planned .pl-time,
+.pl-row.s-planned .pl-name { color: var(--ink); }
+.pl-row.s-planned .pl-st {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  font-weight: 600;
+}
+.pl-row.s-satnogs { box-shadow: inset 2px 0 0 var(--observer); }
+.pl-row.s-satnogs .pl-st { color: var(--observer); }
+.pl-row.lose .pl-time,
+.pl-row.lose .pl-name,
+.pl-row.lose .pl-el,
+.pl-row.lose .pl-dur { color: var(--ink-3); }
+.pl-row.s-low > :not(.pl-why) { color: var(--ink-4); }
+
+/* The mission's own spacecraft, in the selector's pinned-star vocabulary. It
+   comes after the dimming rules on purpose: KNACKSAT-2 losing a pass is the
+   row an operator most needs to find, so it never fades with the rest. */
+.pl-row.home .pl-name { color: var(--ink); font-weight: 600; }
+.pl-row.home .pl-name::before { content: "★ "; color: var(--warn); }
+.pl-row.live .pl-time { color: var(--contact); font-weight: 600; }
+.pl-row.cur { outline: 1px solid var(--track); outline-offset: -1px; }
+.pl-row.blocker { background: var(--panel); outline: 1px dashed var(--ink-3); outline-offset: -1px; }
+
+/* Laptop: the plan is a full-width row there, short and wide, so the head and
+   the list go side by side and each pass gets one line — the reason runs on to
+   the end of it and gives up its tail, which its tooltip carries in full. */
+@media (min-width: 1001px) and (max-width: 1400px) {
+  .pl-body {
+    display: grid; gap: var(--gap);
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .pl-row { grid-template-columns: 5.2em minmax(5em, 9em) 2.6em 2.8em 5.8em minmax(0, 1fr); }
+  .pl-why { grid-column: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+}
+
+/* Phone: the panel is as tall as its content, so the list needs a ceiling of
+   its own or a busy catalogue day would be the whole page. The narrower gap
+   is what lets "★ KNACKSAT-2" fit whole at 330px instead of ellipsizing. */
+@media (max-width: 1000px) {
+  .pl-list { max-height: 60vh; }
+  .pl-row { column-gap: 5px; padding: 3px 4px; }
+}

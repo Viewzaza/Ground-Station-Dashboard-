@@ -20,6 +20,7 @@ import { mountPasses } from './panels/passes.js';
 import { mountGrafana } from './panels/grafana.js';
 import { mountSatnogs } from './panels/satnogs.js';
 import { mountControl, tickControl } from './panels/control.js';
+import { mountPlan, tickPlan } from './panels/plan.js';
 import { mountRadio } from './panels/radio.js';
 import { mountTelemetry } from './panels/telemetry.js';
 
@@ -47,6 +48,7 @@ async function boot() {
   mountPasses();
   mountSatnogs();
   mountControl();
+  mountPlan();
   mountRadio();
   mountTelemetry();
 
@@ -138,6 +140,7 @@ function tick() {
   globe?.updateGlobe(orbit);
   paintRotatorReadout();
   tickControl();
+  tickPlan();
 }
 
 function debounce(fn, ms) {

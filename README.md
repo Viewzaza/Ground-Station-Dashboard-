@@ -53,6 +53,7 @@ Light paper chrome, dark instrument windows — see
 | Decoded frames — the most recent frames SatNOGS demodulated | done, **no token needed** |
 | Observation planner — which passes to work when they compete | done, verified against the live SatNOGS schedule |
 | Autopilot — works the plan through the interlock | done, **never yet run against the hardware** |
+| Observation plan panel — strip, reasons, ENGAGE / DISENGAGE | done, verified in the browser against the mock rotator |
 
 The rotator control path has been exercised against the station's own rotctld
 and correctly **refused** every command, because satnogs-client was connected.
@@ -690,12 +691,29 @@ Like manual control, **autopilot has never commanded the real antenna**. The
 same precondition applies: eyes on the mast, and the station out of the SatNOGS
 schedule.
 
+### The plan panel
+
+The "Observation plan" panel sits under the rotator, because ENGAGE only means
+anything once ARM above it has been pressed. It shows the next planned AOS, a
+timeline strip of the plan's horizon in station time, and every pass with the
+planner's own reason for working it or not — what it lost to, that SatNOGS has
+it, that it peaks too low. Hovering a row lights the pass and the pass that
+beat it.
+
+ENGAGE follows `/api/control`: it is greyed out until control is enabled and an
+operator holds a lease, and its tooltip says which. DISENGAGE is always there
+while autopilot is engaged. A refusal is shown as the backend worded it. On
+every reconnect the panel re-reads the plan and autopilot state from the API,
+and the executor publishes its state when it starts, so a wall display that
+outlives a backend restart shows the new process's "off" rather than the old
+one's "engaged".
+
 ## Tests
 
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 530 tests
+.venv/Scripts/python -m pytest              # offline: 533 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
 

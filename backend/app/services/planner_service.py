@@ -462,6 +462,7 @@ class PlanExecutor:
         self._owned: Candidate | None = None    # the pass whose track we started
         self._owned_track_id: int | None = None
         self._positioned_for: Candidate | None = None
+        self._shown: tuple | None = None        # (phase, detail, current) last published
         self._lock = asyncio.Lock()
 
     # --- journal ------------------------------------------------------------
@@ -602,6 +603,7 @@ class PlanExecutor:
         self._publish()
 
     def _publish(self) -> None:
+        self._shown = (self.state.phase, self.state.detail, self.state.current)
         try:
             hub.publish("autopilot", {
                 "enabled": self.state.enabled,
@@ -615,6 +617,11 @@ class PlanExecutor:
 
     # --- loop ---------------------------------------------------------------
     async def run(self) -> None:
+        # Say where we stand once, at start. Everything else publishes only on
+        # a change, so a freshly started process — after a deploy or a crash —
+        # had no autopilot frame for the hub's snapshot, and a wall display
+        # that reconnected went on showing the old process's "engaged" state.
+        self._publish()
         while True:
             try:
                 async with self._lock:
@@ -750,7 +757,12 @@ class PlanExecutor:
 
     # --- helpers ------------------------------------------------------------
     def _set(self, phase: str, detail: str) -> None:
-        if (phase, detail) != (self.state.phase, self.state.detail):
+        # `current` counts as a change too: a rebuild can re-key the pass being
+        # tracked (its AOS refined across a second boundary) without changing
+        # the phase or the "until LOS" detail, and the panel then lost track of
+        # which pass was ours for the rest of it.
+        shown = (phase, detail, self.state.current)
+        if shown != self._shown:
             self.state.phase, self.state.detail = phase, detail
             self._publish()
 

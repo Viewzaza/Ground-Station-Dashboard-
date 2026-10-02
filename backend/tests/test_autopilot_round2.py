@@ -618,3 +618,60 @@ async def test_a_command_cancelled_mid_read_drops_the_connection():
         await client.close()
         server.close()
         await asyncio.wait_for(server.wait_closed(), timeout=5)
+
+
+# --------------------------------------------------------------------------
+# 10. a wall display reconnecting must learn the executor's real state
+# --------------------------------------------------------------------------
+
+def _autopilot_frames(conn):
+    out = []
+    while not conn.queue.empty():
+        f = conn.queue.get_nowait()
+        if f.type == "autopilot":
+            out.append(f)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_executor_publishes_its_state_at_start(make_rig):
+    """After a deploy or a crash the new process starts disengaged, but it only
+    published on a change, so the hub's snapshot had no autopilot frame and a
+    reconnecting display went on showing the old process's "engaged"."""
+    from app.hub import hub
+
+    rig = make_rig([])
+    conn = hub.register()
+    try:
+        task = asyncio.create_task(rig.ex.run())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        frames = _autopilot_frames(conn)
+        assert frames and frames[0].data["enabled"] is False
+        assert any(f["type"] == "autopilot" for f in hub.snapshot().data["frames"])
+    finally:
+        hub.unregister(conn)
+
+
+def test_a_rekeyed_pass_is_published_though_phase_and_detail_are_unchanged(make_rig):
+    """A rebuild can re-key the pass being tracked without changing "tracking"
+    or its "until LOS" detail; the panel then lost which pass was autopilot's."""
+    from app.hub import hub
+
+    rig = make_rig([])
+    rig.ex.state.enabled = True
+    rig.ex.state.current = "67683-1000"
+    rig.ex._set("tracking", "KNACKSAT-2 until 10:00:00Z")
+    conn = hub.register()
+    try:
+        rig.ex.state.current = "67683-1001"
+        rig.ex._set("tracking", "KNACKSAT-2 until 10:00:00Z")
+        frames = _autopilot_frames(conn)
+        assert frames and frames[-1].data["current"] == "67683-1001"
+        # Nothing changed: nothing sent.
+        rig.ex._set("tracking", "KNACKSAT-2 until 10:00:00Z")
+        assert _autopilot_frames(conn) == []
+    finally:
+        hub.unregister(conn)

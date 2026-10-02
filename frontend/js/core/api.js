@@ -14,11 +14,16 @@ async function get(path, params) {
   return resp.json();
 }
 
-/** A refusal from the control interlock, carrying the gates that are shut. */
+/** A refusal from the control interlock, carrying the gates that are shut.
+
+    `reason` is the backend's own sentence for the refusal, where it gives one.
+    An interlock refusal names gates and has none; an autopilot refusal has no
+    gates to name — "arm control first" — and this is all it carries. */
 export class Refused extends Error {
-  constructor(message, blockedBy) {
+  constructor(message, blockedBy, reason) {
     super(message);
     this.blockedBy = blockedBy || [];
+    this.reason = reason || '';
   }
 }
 
@@ -33,7 +38,7 @@ async function post(path, body) {
     // The interlock refusing is an ordinary, expected answer, so it is modelled
     // as a typed result the panel can render rather than an unexpected failure.
     const detail = payload?.detail || {};
-    throw new Refused(detail.error || 'refused', detail.blocked_by);
+    throw new Refused(detail.error || 'refused', detail.blocked_by, detail.detail);
   }
   if (!resp.ok) {
     throw new Error(`${resp.status} ${path}: ${JSON.stringify(payload).slice(0, 160)}`);
@@ -65,4 +70,11 @@ export const api = {
   park:         ()            => post('/api/control/park'),
   track:        (norad)       => post('/api/control/track', { norad }),
   stopRotator:  ()            => post('/api/control/stop'),
+
+  // Reading the plan is always safe; engaging autopilot is refused with a 409
+  // unless an operator already holds a lease, which arrives as a Refused.
+  plan:         ()            => get('/api/plan'),
+  planRebuild:  ()            => post('/api/plan/rebuild'),
+  autopilot:    ()            => get('/api/plan/autopilot'),
+  setAutopilot: (enabled)     => post('/api/plan/autopilot', { enabled: Boolean(enabled) }),
 };
