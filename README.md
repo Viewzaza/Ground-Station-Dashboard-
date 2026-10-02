@@ -811,7 +811,7 @@ MIT — see `LICENSE`. The `sgoudelis/ground-station` suite referenced in
 from it is present in this repository.
 
 `satnogs-auto-scheduler` (AGPL-3.0-or-later) is a pip dependency of the backend
-image and is invoked as a **separate process**, never imported  see
+image and is invoked as a **separate process**, never imported — see
 [Station Schedule](#station-schedule) for why that boundary is deliberate. No
 code from it is present in this repository either. Note this is a different
 project from the `autoscheduler` package vendored under
