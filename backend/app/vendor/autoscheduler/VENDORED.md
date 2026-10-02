@@ -266,16 +266,74 @@ one, and a local editable install would break the Docker build context
     `tests/test_campaign_selection.py` and `tests/test_campaign_network.py`;
     24 deliberate mutations, all caught.
 
+18. **`network_client.py`: calendars from `/api/jobs/`, and a refused batch
+    costs one POST per culprit station, not one per item.** Five changes, all
+    in service of the full-network campaign (~222 calendars, ~600 bookings):
+    - `future_bookings(station_id, now=None, source="auto")` reads the
+      station's calendar from `GET /api/jobs/?ground_station=N` first, the
+      read the official auto-scheduler itself uses. JobView has no
+      `throttle_classes` and serves the whole `start__gte=now()` queryset as
+      one plain JSON list (1147 live answers for 5024, none paginated, no
+      429). The `/api/observations/` walk it replaces costs ~1.2-1.33 pages a
+      station against a 240/hour token budget, so a 222-station preview
+      needed more than an hour's budget, and every looped commit round
+      re-spent it. On any failure of the jobs read (HTTP error, 429, our own
+      ceiling, unparseable JSON or rows) `"auto"` falls back to the old walk,
+      unchanged; `"jobs"` and `"observations"` force one source. Rows are
+      filtered (start >= now, and `ground_station` when present), not walked
+      to a stop. A new `calendar_sources` Counter says which source answered
+      each call, and the campaign payloads publish it.
+    - The jobs read goes through a separate, **anonymous** session
+      (`jobs_session`: no token, ever). With the owner's token, JobView treats
+      `/api/jobs/?ground_station=<own station>` as that station's client
+      polling for work and stamps `last_seen=now` - reading 5024's calendar
+      with our token would mark it alive whether it is or not. Its gate key
+      carries no token either, so the whole process shares one budget.
+    - `RateLimitedSession` has a new `"jobs"` scope (checked before
+      `"/observations"`, so a jobs read is never charged to that budget) with
+      `JOBS_LIST_PER_HOUR = 1200` - a courtesy ceiling of our own, since the
+      server publishes none - and `JOBS_TIMEOUT_S = 30` instead of the 90 s
+      sized for `?norad_cat_id=` queries.
+    - `JOBS_BYPASS_AFTER_FAILURES = 3`: after three jobs failures in a row a
+      client reads the rest of its calendars from `/observations/` directly.
+      Each failed jobs read costs its retries and backoff before the fallback
+      starts (~96 s when the endpoint times out), which over ~222 stations
+      would add hours to a preview only to end on the same fallback. A success
+      resets the count; the next client (one per preview, commit and verify)
+      tries `/jobs/` again.
+    - `schedule()`: a batch refused with HTTP 409 "One or more observations of
+      station N overlap ..." sends only station N's items one at a time and
+      resubmits the rest as a batch, repeating while 409s keep naming stations
+      (bounded at distinct stations + 1 batch attempts). A batch refused with
+      HTTP 400 "No permission to schedule observations on station(s): ..."
+      records the listed stations' items as refused WITHOUT resending them -
+      the server lists every such station in the batch, and the verdict
+      depends only on the account and the station - and resubmits the rest
+      the same way. Both are safe because the server validates every item
+      before it saves any, so a refused batch created nothing. The old rule
+      sent every item on its own after any refusal: one stale slot in 600
+      items meant ~600 sequential POSTs, and on 2026-10-02, with our own
+      station offline (an account that owns no Online station may not book
+      anyone else's), a refused batch of 100 cost 101 POSTs where it now costs
+      one. Any other refusal, or a permission list that cannot be read in full,
+      keeps the old one-at-a-time fallback. `accepted_items` and
+      `uncertain_items` are re-sorted into input order and stay the very dicts
+      passed in, so callers can still map them back by identity.
+    Pinned by `tests/test_jobs_calendar.py`, `tests/test_booking_writes.py`
+    and `tests/test_transport_safety.py`.
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this
   vendored copy with a normal dependency (submodule or pinned pip package).
-- Upstream patches 1-6, 8-11, 14 and 16 above to that repo. 7, 12, 13, 15 and
-  17 are `campaign.py`, which upstream does not have (see 7), so they are not
-  upstream material. 8 in particular is a plain bug for any consumer that
+- Upstream patches 1-6, 8-11, 14, 16 and 18 above to that repo. 7, 12, 13, 15
+  and 17 are `campaign.py`, which upstream does not have (see 7), so they are
+  not upstream material. 8 in particular is a plain bug for any consumer that
   books on a station it does not own; 11 and 16 matter to any consumer that
   reads more than a few dozen times an hour; 14 matters to any consumer that
-  books at all.
+  books at all. 18's anonymous `/api/jobs/` read matters to any consumer that
+  reads a calendar of a station its token owns (the heartbeat side effect),
+  and its 409/permission pruning to any consumer that books in batches.
 - `cache.py`'s module docstring still says the SatNOGS APIs are "public and
   slow rather than rate-limited". That was never quite true and is now
   actively misleading — see patch 11 for the published rates. Left alone here

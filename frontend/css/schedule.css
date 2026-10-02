@@ -493,6 +493,21 @@
 
 .sched-cell-bad { color: var(--bad); }
 
+/* "Our own station is not Online, so SatNOGS will refuse everything." The
+   one notice in this tab that says nothing can be booked at all, whatever the
+   caps say - so it is the .sched-notice.error band, but in the --bad ink and
+   weight of a warning rather than the grey of a hint, or it reads as one more
+   line of copy above a plan that looks perfectly bookable. Two classes, not
+   one: .sched-notice is defined further down this file and would otherwise
+   win back the colour and size at equal specificity. */
+.sched-notice.sched-own-station-warn {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--bad);
+}
+
 /* Distinguishes an unattended timer-triggered run from one a human
    confirmed - reuses the .rx-tag sizing, .sched-prio-mode's two-tone
    auto/manual palette for the same underlying idea (system-decided vs
@@ -1043,6 +1058,16 @@ button.sched-prio-tx.is-editing { color: var(--track); }
 .sched-auto-add[hidden] { display: none; }
 .sched-auto-add input[type="time"],
 .sched-auto-add input[type="number"] { width: 8em; }
+
+/* The chained worldwide campaign. Wraps, because its label is a full sentence
+   and the hint after it must drop to the next line on a phone rather than
+   squeeze the label into a column. */
+.sched-auto-chain {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  margin: 6px 0;
+}
+.sched-auto-chain[hidden] { display: none; }
+.sched-auto-chain .sched-auto-toggle { min-width: 0; }
 
 /* Times as removable chips rather than a comma-separated text field: the set
    is small, and a chip makes "18:00 is in the list" unambiguous. */

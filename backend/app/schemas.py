@@ -230,6 +230,10 @@ class ScheduleConfigUpdate(BaseModel):
     # still sends auto_run_dry_run gets a 422 from extra="forbid", and nothing
     # is saved.
     auto_run_enabled: bool | None = None
+    # A plain bool like auto_run_enabled. On: every auto-run slot that fires
+    # also runs the worldwide KNACKSAT-2 Network Campaign under the campaign's
+    # own caps - see ScheduleService.auto_run_chain_campaign().
+    auto_run_chain_campaign: bool | None = None
     auto_run_mode: Literal["times", "interval"] | None = None
     auto_run_times: list[str] | None = None
     auto_run_interval_min: int | None = Field(default=None, ge=5, le=1440)
@@ -377,6 +381,20 @@ class CampaignTransmitterSummary(BaseModel):
 # response_model, the payloads go out as the plain dicts CampaignService
 # builds. extra="allow" keeps them honest in the one direction that matters -
 # validating a real payload against them never fails over a field added later.
+class CampaignOwnStation(BaseModel):
+    """CampaignService.own_station_state(): whether our own station's SatNOGS
+    status rules out booking other people's stations. Only a FRESH status
+    other than "Online" blocks; unknown or stale never does."""
+    model_config = ConfigDict(extra="allow")
+
+    station_id: int | None = None
+    status: str | None = None
+    last_seen: str | None = None
+    age_s: float | None = None
+    fresh: bool = False
+    blocks_booking: bool = False
+
+
 class CampaignPreview(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -398,6 +416,8 @@ class CampaignPreview(BaseModel):
     # {"jobs": n, "observations": n} - which SatNOGS feed answered each
     # calendar read. Only "observations" reads spend the token's budget.
     calendar_sources: dict[str, int] = Field(default_factory=dict)
+    # Absent on previews cached before it existed.
+    own_station: CampaignOwnStation | None = None
     error: str | None = None
 
 
@@ -410,8 +430,11 @@ class CampaignCommitRequest(BaseModel):
 class CampaignCommitResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    status: Literal["ok", "ok_with_warnings", "error", "running"]
-    trigger: Literal["manual", "auto"] = "manual"
+    # "blocked": the own-station gate stopped it and nothing was sent - see
+    # stopped_reason and own_station.
+    status: Literal["ok", "ok_with_warnings", "error", "running", "blocked"]
+    # "chained": run straight after a Station Schedule auto-run slot.
+    trigger: Literal["manual", "auto", "chained"] = "manual"
     generated_utc: str | None = None
     submitted: int = 0
     accepted: int = 0
@@ -426,17 +449,40 @@ class CampaignCommitResult(BaseModel):
     # Sent, but SatNOGS never gave a reliable answer: they may or may not be
     # booked. Never resubmitted - cross-check the calendars first.
     uncertain_items: list[dict] = Field(default_factory=list)
-    # Items never sent because SatNOGS became unreachable part-way through.
+    # Items never sent because SatNOGS became unreachable, or refused us
+    # permission, part-way through.
     not_sent: int = 0
+    # A whole POST came back "No permission to schedule observations" and the
+    # commit stopped there (the own-station gate could not see the outage).
+    no_permission: bool = False
+    own_station: CampaignOwnStation | None = None
     calendar_sources: dict[str, int] = Field(default_factory=dict)
 
 
 class CampaignHistoryEntry(BaseModel):
     generated_utc: str | None = None
-    trigger: Literal["manual", "auto"] = "manual"
+    trigger: Literal["manual", "auto", "chained"] = "manual"
     status: str | None = None
     submitted: int = 0
     accepted: int = 0
     rejected: int = 0
+    uncertain: int = 0
     rounds: int = 1
     stations_booked: int = 0
+
+
+class CampaignVerifyResult(BaseModel):
+    """POST /schedule/campaign/verify. Documentation, like the models above."""
+    model_config = ConfigDict(extra="allow")
+
+    status: Literal["ok", "nothing_to_check", "running"]
+    generated_utc: str | None = None
+    run_generated_utc: str | None = None
+    stations_checked: int = 0
+    stations_read: int = 0
+    # Stations that needed a read but never got one because the read budget
+    # ran out; their future items are "unknown". stopped_reason says why.
+    stations_unread: int = 0
+    stopped_reason: str | None = None
+    calendar_sources: dict[str, int] = Field(default_factory=dict)
+    items: list[dict] = Field(default_factory=list)

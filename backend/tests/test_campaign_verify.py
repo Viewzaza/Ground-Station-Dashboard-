@@ -25,6 +25,8 @@ Nothing here touches the network.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -32,7 +34,7 @@ import pytest
 
 from app.config import Settings
 from app.services.campaign_service import CampaignService
-from app.vendor.autoscheduler.network_client import Booking
+from app.vendor.autoscheduler.network_client import Booking, RateLimitedError
 
 MISSION = 67683
 OTHER_SAT = 25544
@@ -41,13 +43,18 @@ OTHER_SAT = 25544
 class StubNetwork:
     """Just the one method build/verify actually calls."""
 
-    def __init__(self, by_station: dict[int, list[Booking]], fail: set[int] | None = None):
+    def __init__(self, by_station: dict[int, list[Booking]], fail: set[int] | None = None,
+                 throttle: set[int] | None = None):
         self.by_station = by_station
         self.fail = fail or set()
+        self.throttle = throttle or set()
         self.calls: list[int] = []
 
     def future_bookings(self, station_id: int, now=None) -> list[Booking]:
         self.calls.append(station_id)
+        if station_id in self.throttle:
+            raise RateLimitedError("observation-list budget spent; next slot in 900s",
+                                   status=429)
         if station_id in self.fail:
             raise RuntimeError("station unreachable")
         return self.by_station.get(station_id, [])
@@ -233,3 +240,122 @@ def test_only_the_accepted_half_of_a_partial_batch_is_recorded(service, monkeypa
     assert [r["station_id"] for r in result["accepted_items"]] == [26]
     # The rejected one must not be recorded as booked anywhere.
     assert all(r["station_id"] != 39 for r in result["accepted_items"])
+
+
+# --- what the cross-check reads, and when it stops reading ----------------------------
+
+def test_a_station_whose_bookings_have_all_started_is_not_read(service, monkeypatch):
+    """The feed only lists observations that have not started, so reading
+    such a station could confirm nothing - verified the day after a 600-item
+    run, that would be ~200 reads to learn nothing."""
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(hours=3)
+    network = StubNetwork({27: [booking(1, future)]})
+
+    result = run_with(service, network, [
+        item(26, now - timedelta(hours=2)), item(26, now - timedelta(minutes=30)),
+        item(27, future),
+    ], monkeypatch)
+
+    assert network.calls == [27]
+    assert [r["state"] for r in result["items"]] == ["started", "started", "on_schedule"]
+    assert result["stations_checked"] == 2 and result["stations_read"] == 1
+
+
+def test_a_throttle_stops_the_cross_check_and_the_rest_is_unknown(service, monkeypatch):
+    """A rate limit is about the budget, not the station: every later read
+    would be refused too. Stop, and report the unread as unknown - never as
+    missing, and never at the cost of another ~200 refused reads."""
+    now = datetime.now(timezone.utc)
+    start = now + timedelta(hours=3)
+    network = StubNetwork({1: [booking(11, start)], 3: [booking(33, start)]}, throttle={2})
+
+    result = run_with(service, network, [
+        item(1, start),
+        item(2, start),
+        item(3, start),
+        item(4, now - timedelta(minutes=20)),   # already under way: needs no read
+        item(4, start + timedelta(hours=1)),
+    ], monkeypatch)
+
+    assert network.calls == [1, 2], "stations 3 and 4 must not be read at all"
+    states = [(r["station_id"], r["state"]) for r in result["items"]]
+    assert states == [(1, "on_schedule"), (2, "unknown"), (3, "unknown"),
+                      (4, "started"), (4, "unknown")]
+    for row in result["items"]:
+        if row["state"] == "unknown":
+            assert row["detail"] == (
+                "not read: the SatNOGS read budget ran out (rate limited) - "
+                "run the cross-check again later")
+    assert result["stations_unread"] == 3
+    assert result["stations_read"] == 1
+    assert "rate-limiting" in result["stopped_reason"]
+    assert "3 station(s) not read" in result["stopped_reason"]
+
+
+def test_one_flaky_station_does_not_stop_the_cross_check(service, monkeypatch):
+    start = datetime.now(timezone.utc) + timedelta(hours=3)
+    network = StubNetwork({s: [booking(s, start)] for s in (1, 3, 4)}, fail={2})
+
+    result = run_with(service, network, [item(s, start) for s in (1, 2, 3, 4)], monkeypatch)
+
+    assert network.calls == [1, 2, 3, 4]
+    assert [r["state"] for r in result["items"]] == [
+        "on_schedule", "unknown", "on_schedule", "on_schedule"]
+    assert result["stations_unread"] == 0
+    assert "stopped_reason" not in result
+
+
+# --- the cross-check shares the preview/commit single-flight guard ---------------------
+
+async def _until(predicate) -> None:
+    for _ in range(500):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition never became true")
+
+
+async def test_a_cross_check_waits_for_a_commit_in_flight(service, monkeypatch):
+    """A verify mid-commit reads calendars the commit is booking onto, and
+    checks the previous run's record while the next one is being written."""
+    release = threading.Event()
+    monkeypatch.setattr(service, "_commit_sync",
+                        lambda items, trigger: (release.wait(5), {"status": "ok"})[1])
+    verify_reads: list = []
+    monkeypatch.setattr(service, "_verify_sync", lambda: verify_reads.append(1) or {})
+
+    commit = asyncio.create_task(service.commit_campaign(items=[], trigger="manual"))
+    await _until(service.is_running)
+    try:
+        assert await service.verify_last_run() == {"status": "running"}
+        assert verify_reads == []
+    finally:
+        release.set()
+        await commit
+
+    # Once the commit is done the cross-check runs as normal.
+    await service.verify_last_run()
+    assert verify_reads == [1]
+
+
+async def test_a_commit_or_preview_waits_for_a_cross_check_in_flight(service, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(service, "_verify_sync",
+                        lambda: (release.wait(5), {"status": "ok", "items": []})[1])
+    commits: list = []
+    monkeypatch.setattr(service, "_commit_sync",
+                        lambda items, trigger: commits.append(trigger) or {"status": "ok"})
+    previews: list = []
+    monkeypatch.setattr(service, "_preview_sync", lambda: previews.append(1) or {"items": []})
+
+    verify = asyncio.create_task(service.verify_last_run())
+    await _until(service.is_running)
+    try:
+        assert await service.commit_campaign(items=[], trigger="manual") == {"status": "running"}
+        assert await service.preview_campaign() == {"status": "running"}
+        assert commits == [] and previews == []
+    finally:
+        release.set()
+        assert (await verify)["status"] == "ok"
+    assert service.is_running() is False, "and the guard is released afterwards"

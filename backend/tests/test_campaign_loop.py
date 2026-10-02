@@ -16,6 +16,10 @@ empty. The properties that matter:
   observation budget (682 pages for a 4-round commit that needed 175);
 * a build cut short by the read limit is reported as such, never as "no
   bookings left";
+* a round goes out one transmitter uuid per POST, at most CAMPAIGN_POST_CHUNK
+  items each (a mixed POST can fail whole on SatNOGS's 2 s DB lookup; a huge
+  one can die mid-save), uncertain items are reported apart and never resent,
+  and nothing more is sent once SatNOGS is unreachable;
 * the timer does not fire a cycle at startup when one ran recently - every
   uvicorn --reload used to fire a full real preview.
 
@@ -556,3 +560,105 @@ async def test_with_no_recent_preview_the_timer_still_starts_at_once(monkeypatch
     events = await _run_campaign_loop(monkeypatch, delay_s=0.0)
 
     assert events == ["cycle", ("sleep", 86400)]
+
+
+# --- POSTs: one transmitter each, at most CAMPAIGN_POST_CHUNK items -------------------
+
+class RecordingNetwork(StubNetwork):
+    """Keeps every POST body, and answers each through `answer(items)` - by
+    default "all accepted"."""
+
+    def __init__(self, answer=None):
+        super().__init__()
+        self.posts: list[list[dict]] = []
+        self.answer = answer
+
+    def schedule(self, items, execute=False):
+        assert execute
+        self.posts.append(list(items))
+        self.batches.append(len(items))
+        if self.answer is not None:
+            return self.answer(list(items))
+        return ScheduleResult(submitted=len(items), accepted=len(items),
+                              accepted_items=list(items))
+
+
+def tx_item(station_id: int, uuid: str, n: int = 0) -> dict:
+    row = item(station_id, n)
+    row["transmitter_uuid"] = uuid
+    return row
+
+
+def test_a_round_is_posted_one_transmitter_at_a_time_in_chunks_of_at_most_50(
+        tmp_path, monkeypatch):
+    """A POST mixing two uuids makes SatNOGS fetch the whole DB transmitter
+    list on a 2 s timeout, which fails the entire batch; and a POST big enough
+    to outlast gunicorn's 30 s timeout dies mid-save with an unknown outcome."""
+    network = RecordingNetwork()
+    svc = make_service(tmp_path, monkeypatch, loop=False, network=network)
+    # Interleaved, and the digipeater first, as a preview sorted by start would be.
+    items = [tx_item(sid, DIGIPEATER if sid % 2 else TELEMETRY) for sid in range(1, 131)]
+
+    result = svc._commit_sync(items, "manual")
+
+    assert [len({row["transmitter_uuid"] for row in post}) for post in network.posts] == [1] * 4
+    assert [(post[0]["transmitter_uuid"], len(post)) for post in network.posts] == [
+        (TELEMETRY, 50), (TELEMETRY, 15), (DIGIPEATER, 50), (DIGIPEATER, 15),
+    ], "primary first, then the fallback, each split at CAMPAIGN_POST_CHUNK"
+    assert cs.CAMPAIGN_POST_CHUNK == 50
+    assert sorted(p["ground_station"] for post in network.posts for p in post) == list(range(1, 131))
+    assert result["submitted"] == 130 and result["accepted"] == 130
+    assert [(t["uuid"], t["bookings"]) for t in result["accepted_by_transmitter"]] == [
+        (TELEMETRY, 65), (DIGIPEATER, 65)]
+
+
+def test_uncertain_items_are_surfaced_never_resubmitted_and_count_against_the_cap(
+        tmp_path, monkeypatch):
+    """No reliable answer means possibly booked: reported apart from accepted,
+    kept out of every later round, and counted towards the station's cap."""
+    def answer(posted):
+        sure = [p for p in posted if p["ground_station"] != 2]
+        unsure = [p for p in posted if p["ground_station"] == 2]
+        return ScheduleResult(submitted=len(posted), accepted=len(sure), accepted_items=sure,
+                              uncertain_items=unsure,
+                              errors=["OUTCOME UNKNOWN for station 2. Do NOT resubmit"])
+    network = RecordingNetwork(answer)
+    svc = make_service(tmp_path, monkeypatch, loop=True, network=network)
+    seen: list[dict] = []
+
+    def build(network, db, auto_settings, booked_counts=None, calendar_cache=None):
+        seen.append(dict(booked_counts or {}))
+        return {"items": []}
+    monkeypatch.setattr(svc, "_build_items", build)
+
+    result = svc._commit_sync([item(1, 0), item(2, 0)], "manual")
+
+    assert [r["station_id"] for r in result["uncertain_items"]] == [2]
+    assert result["uncertain_items"][0]["start"] == item(2, 0)["start"]
+    assert [r["station_id"] for r in result["accepted_items"]] == [1]
+    assert seen == [{1: 1, 2: 1}], "the uncertain booking uses up station 2's allowance"
+    # And its window stays occupied for later previews, so it is never resent.
+    recent = svc._recent_bookings_by_station(datetime.now(timezone.utc))
+    assert datetime.fromisoformat(item(2, 0)["start"]) in [s for s, _e in recent[2]]
+
+    svc._append_history(result)
+    assert svc.get_history()[-1]["uncertain"] == 1
+    assert svc.get_history()[-1]["rejected"] == 0, "possibly booked is not rejected"
+
+
+def test_no_more_posts_once_satnogs_is_unreachable(tmp_path, monkeypatch):
+    network = RecordingNetwork(lambda posted: ScheduleResult(
+        submitted=len(posted),
+        errors=[f"could not reach SatNOGS to submit {len(posted)} item(s): boom. "
+                "Nothing was booked."]))
+    svc = make_service(tmp_path, monkeypatch, loop=True, network=network)
+    items = [tx_item(1, "tx-a"), tx_item(2, "tx-b"), tx_item(3, "tx-b"), tx_item(4, "tx-c")]
+
+    result = svc._commit_sync(items, "manual")
+
+    assert len(network.posts) == 1
+    assert result["not_sent"] == 3
+    assert any("3 more item(s) in 2 later POST(s) were not sent" in e for e in result["errors"])
+    assert result["stopped_reason"] == "round 1 lost its connection to SatNOGS"
+    recent = svc._recent_bookings_by_station(datetime.now(timezone.utc))
+    assert set(recent) == {1}, "only what was actually sent is held back from the next run"

@@ -428,3 +428,113 @@ def test_an_unknown_rebatch_is_never_sent_again():
     assert any("OUTCOME UNKNOWN for all 3" in e and "Do NOT resubmit" in e
                for e in result.errors), result.errors
     assert server.duplicates() == 0
+
+
+# satnogs-network checks scheduling permission for the whole batch at once
+# (NewObservationListSerializer.validate -> check_schedule_perms_per_station)
+# and answers HTTP 400 {"non_field_errors": [...]} listing EVERY station in it
+# the account may not book. The answer depends only on the account and the
+# station, so resending a listed station's items alone can only be refused the
+# same way. On 2026-10-02, with our own station offline, every station was
+# listed: the one-at-a-time rule turned one refused POST of 100 into 101 POSTs.
+
+def no_permission_400(stations) -> requests.Response:
+    stations = sorted(stations)
+    text = (f"No permission to schedule observations on station: {stations[0]}"
+            if len(stations) == 1
+            else f"No permission to schedule observations on stations: {stations}")
+    return response(400, {"non_field_errors": [text]})
+
+
+class PermissionServer(CalendarServer):
+    """CalendarServer behind satnogs-network's permission check: a POST with
+    any item on a station in `barred` is refused, listing every barred station
+    it contains, before anything else is looked at."""
+
+    def __init__(self, barred, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.barred = set(barred)
+
+    def request(self, method, url, json=None, **kwargs):
+        named = {item["ground_station"] for item in json or []} & self.barred
+        if named:
+            self.batches.append([key(item) for item in json])
+            return no_permission_400(named)
+        return super().request(method, url, json=json, **kwargs)
+
+
+def test_a_batch_refused_for_permission_on_every_station_costs_one_post():
+    batch = plan({101: 2, 102: 1, 103: 2})
+    server = PermissionServer(barred={101, 102, 103})
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    assert server.sizes() == [5], "a listed station's items were sent again on their own"
+    assert result.submitted == 5 and result.accepted == 0 and not result.uncertain_items
+    assert len(result.errors) == 5
+    for item, error in zip(batch, result.errors):
+        assert error.startswith(f"station {item['ground_station']} {item['start']} transmitter TX-U: HTTP 400 ")
+        assert f"No permission to schedule observations on station: {item['ground_station']}" in error
+    assert server.rows == []
+
+
+def test_only_the_listed_stations_are_held_back_and_the_rest_rebatched():
+    """One station flipped to unavailable between our read and the POST: its
+    items are refused, everything else goes back as one batch."""
+    batch = plan({101: 2, 102: 2, 103: 1})
+    server = PermissionServer(barred={102})
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    assert server.sizes() == [5, 3]
+    assert result.accepted_items == [item for item in batch if item["ground_station"] != 102]
+    assert [e.split()[1] for e in result.errors] == ["102", "102"]
+    assert all("No permission to schedule observations on station: 102" in e
+               for e in result.errors)
+    assert server.duplicates() == 0
+
+
+def test_the_singular_form_names_its_one_station():
+    batch = plan({101: 3})
+    server = PermissionServer(barred={101})
+
+    result = client_on(server).schedule(batch, execute=True)
+
+    assert server.sizes() == [3]
+    assert result.accepted == 0 and len(result.errors) == 3
+
+
+@pytest.mark.parametrize("body", [
+    # http.py keeps 2000 characters of a body: a list cut off mid-number must
+    # not be read as naming a station ("10" of "1011") that was never in it.
+    {"non_field_errors": ["No permission to schedule observations on stations: [101, 10"]},
+    "No permission to schedule observations on stations: 101 and others",
+], ids=["truncated-list", "unrecognised-shape"])
+def test_a_permission_refusal_that_cannot_be_read_in_full_goes_one_at_a_time(body):
+    class Server(CalendarServer):
+        def request(self, method, url, json=None, **kw):
+            if len(json) > 1:
+                self.batches.append([key(item) for item in json])
+                return response(400, body)
+            return super().request(method, url, json=json, **kw)
+
+    server = Server()
+    result = client_on(server).schedule(plan({101: 1, 10: 1, 102: 1}), execute=True)
+
+    assert server.sizes() == [3, 1, 1, 1], "the pre-existing one-at-a-time fallback"
+    assert result.accepted == 3
+
+
+def test_a_permission_refusal_listing_no_station_we_sent_goes_one_at_a_time():
+    class Server(CalendarServer):
+        def request(self, method, url, json=None, **kw):
+            if len(json) > 1:
+                self.batches.append([key(item) for item in json])
+                return no_permission_400({999})
+            return super().request(method, url, json=json, **kw)
+
+    server = Server()
+    result = client_on(server).schedule(plan({101: 1, 102: 1}), execute=True)
+
+    assert server.sizes() == [2, 1, 1]
+    assert result.accepted == 2

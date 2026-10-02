@@ -45,7 +45,28 @@ class Scheduler:
             settings, self.rotator, self.satnogs, predictor, on_state=self.set_state
         )
         self.schedule_service = ScheduleService(settings, on_state=self.set_state)
-        self.campaign_service = CampaignService(settings, self.schedule_service, on_state=self.set_state)
+        self.campaign_service = CampaignService(
+            settings, self.schedule_service, on_state=self.set_state,
+            own_station=self._own_station,
+        )
+
+    def _own_station(self) -> dict | None:
+        """Our own station as SatnogsService last polled it (every ~60 s), for
+        CampaignService's own-station gate - SatNOGS refuses bookings on other
+        people's stations while none of ours is Online. Reuses that poll
+        rather than reading again: it is already the dashboard's one source
+        for this station's status. None until the first poll lands (and
+        always under GS_OFFLINE, where the poller does not run), which the
+        gate reads as "unknown" and never blocks on."""
+        station = self.satnogs.station
+        if station is None:
+            return None
+        return {
+            "id": station.get("id", self.s.station_id),
+            "status": station.get("status"),
+            "last_seen": station.get("last_seen"),
+            "age_s": self.satnogs.station_age_s,
+        }
 
     # --- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
@@ -177,6 +198,11 @@ class Scheduler:
         browser takes effect immediately instead of at the end of a multi-hour
         sleep. That is what makes a restart API unnecessary; the supervisor has
         none.
+
+        After a slot that ran, `_after_auto_run` may chain the worldwide
+        Network Campaign (its own opt-in toggle). It is awaited in line, so
+        the next slot is computed only once that finishes - minutes, against
+        slots hours apart.
         """
         while True:
             due = self.schedule_service.next_auto_run()
@@ -220,6 +246,43 @@ class Scheduler:
                     self._AUTO_RUN_BUSY_RETRY_S,
                 )
                 await asyncio.sleep(self._AUTO_RUN_BUSY_RETRY_S)
+            else:
+                # Only a slot that really ran gets the chain - the busy path
+                # above has not happened yet and will come round again.
+                await self._after_auto_run(result)
+
+    async def _after_auto_run(self, result: dict) -> None:
+        """After a Station Schedule auto-run slot: if the operator has
+        auto_run_chain_campaign on, book KNACKSAT-2 on community stations
+        worldwide too (CampaignService.run_chained_cycle).
+
+        Runs whatever the station run's own outcome was: 5024's run failing
+        says nothing about the community stations, and when 5024 is Offline
+        the campaign's own-station gate turns the commit into "blocked"
+        anyway. It never touches the slot mark - the slot is already marked
+        and fired, so a campaign failure is never retried or re-fired, and
+        nothing new happens at startup. And it never raises: a campaign
+        failure must not take the station's own booking loop down with it.
+        """
+        try:
+            if not self.schedule_service.auto_run_chain_campaign():
+                return
+            log.info("auto-run: chaining the worldwide KNACKSAT-2 campaign "
+                     "(station run status %s)", result.get("status"))
+            outcome = await self.campaign_service.run_chained_cycle()
+        except Exception:
+            log.exception("auto-run: the chained campaign failed; the station "
+                          "schedule is unaffected and the slot is not retried")
+            return
+        status = outcome.get("status")
+        if status == "running":
+            log.info("auto-run: a campaign preview/commit/cross-check was already "
+                     "running, so this slot's chain was skipped")
+        elif status == "skipped":
+            log.info("auto-run: chained campaign skipped: %s", outcome.get("reason"))
+        else:
+            log.info("auto-run: chained campaign %s - %s booked; %s", status,
+                     outcome.get("accepted", 0), outcome.get("stopped_reason") or "")
 
     async def _campaign_loop(self) -> None:
         """Keep the ~48h network-campaign booking window full on a timer.

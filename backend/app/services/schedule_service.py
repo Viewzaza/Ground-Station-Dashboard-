@@ -61,6 +61,10 @@ _CONFIG_FIELDS: dict[str, tuple] = {
     # means "back to GS_CAMPAIGN_TRANSMITTER_POLICY", like the caps above.
     "campaign_transmitter_policy": (str, True),
     "auto_run_enabled": (bool, False),
+    # Stored literally like auto_run_enabled: it books on community stations
+    # unattended, so OFF has to persist as False - a cleared key that fell
+    # back to some default would be a switch that might not stay off.
+    "auto_run_chain_campaign": (bool, False),
     "auto_run_mode": (str, False),
     "auto_run_times": (normalize_times, False),
     "auto_run_interval_min": (int, True),
@@ -269,6 +273,18 @@ class ScheduleService:
         """Defaults to False: a fresh install must not book unattended."""
         return bool(self._config.get("auto_run_enabled", False))
 
+    def auto_run_chain_campaign(self) -> bool:
+        """Whether each auto-run slot that fires also runs the worldwide
+        KNACKSAT-2 Network Campaign (scheduler.Scheduler._after_auto_run).
+
+        Off by default, like every unattended booking switch here. This is
+        the operator's whole consent for that trigger - campaign_auto_commit_
+        enabled is not consulted (see CampaignService.run_chained_cycle).
+        Only the flag lives here; what the campaign books is the campaign's
+        business, under its own caps. The station's own run is unchanged.
+        """
+        return bool(self._config.get("auto_run_chain_campaign", False))
+
     def _auto_run_interval_min(self) -> int:
         # GS_SCHEDULE_POLL_S is only a seed for a fresh config; once the
         # operator has set an interval, this is authoritative.
@@ -361,6 +377,7 @@ class ScheduleService:
                 "campaign_fallback_transmitter_uuids": self.s.campaign_fallback_uuids,
                 # --- station auto run ---
                 "auto_run_enabled": self.auto_run_enabled(),
+                "auto_run_chain_campaign": self.auto_run_chain_campaign(),
                 "auto_run_mode": self._config.get("auto_run_mode") or "times",
                 # _cfg, not `or`: an emptied list is a real setting meaning
                 # "never fire", and `[] or [...]` would hand the panel back

@@ -10,8 +10,8 @@ cannot work that way: if `campaign_auto_commit_enabled=False` cleared the key,
 then every time the operator turned unattended campaign booking OFF the next
 read would find no key, fall back to the default, and turn it back ON. The same
 trap sits under `min_culmination_deg=0` - the horizon is a real elevation, not
-an absence - and under `start_lead_minutes=0`, `auto_run_enabled=False` and an
-emptied `auto_run_times`. Which half of that
+an absence - and under `start_lead_minutes=0`, `auto_run_enabled=False`,
+`auto_run_chain_campaign=False` and an emptied `auto_run_times`. Which half of that
 split a key belongs to is one entry in one dict literal, invisible at every
 call site, so these tests name each key explicitly.
 
@@ -337,6 +337,89 @@ async def test_get_config_never_echoes_a_token_back(tmp_path):
         "the panel still has to be able to say a credential is present - that "
         "is what the booleans are for, and they are all it may say"
     )
+
+
+# --- campaign and chain settings --------------------------------------------
+async def test_chaining_the_campaign_is_off_until_switched_on_and_off_sticks(tmp_path):
+    """auto_run_chain_campaign books on community stations unattended at every
+    auto-run slot, so it ships off and OFF must persist literally."""
+    svc = make_service(tmp_path)
+    assert (await svc.get_config())["auto_run_chain_campaign"] is False
+    assert svc.auto_run_chain_campaign() is False
+
+    on = await svc.save_config(
+        **ScheduleConfigUpdate(auto_run_chain_campaign=True).model_dump(exclude_unset=True))
+    assert on["auto_run_chain_campaign"] is True
+    assert make_service(tmp_path).auto_run_chain_campaign() is True, "survives a restart"
+
+    off = await svc.save_config(auto_run_chain_campaign=False)
+    assert off["auto_run_chain_campaign"] is False
+    assert svc._config["auto_run_chain_campaign"] is False, (
+        "stored as False, not cleared - a cleared key is a switch that can come back on")
+    assert make_service(tmp_path).auto_run_chain_campaign() is False
+
+
+async def test_saving_another_setting_leaves_the_chain_toggle_alone(tmp_path):
+    svc = make_service(tmp_path)
+    await svc.save_config(auto_run_chain_campaign=True)
+
+    await svc.save_config(**ScheduleConfigUpdate(auto_run_times=["11:00"]).model_dump(
+        exclude_unset=True))
+
+    assert svc.auto_run_chain_campaign() is True
+
+
+async def test_the_downlink_policy_round_trips_and_clears_to_its_seed(tmp_path):
+    svc = make_service(tmp_path)
+    assert (await svc.get_config())["campaign_transmitter_policy"] == "preferred"
+
+    saved = await svc.save_config(campaign_transmitter_policy="pinned")
+    assert saved["campaign_transmitter_policy"] == "pinned"
+    assert make_service(tmp_path).campaign_transmitter_policy() == "pinned"
+
+    cleared = await svc.save_config(campaign_transmitter_policy="")
+    assert cleared["campaign_transmitter_policy"] == "preferred", "back to the GS_ seed"
+
+    # The primary and the fallbacks are reported so the panel can say what a
+    # policy means - read-only, from the environment.
+    assert saved["campaign_transmitter_uuid"] == "UatCXtfDnoBPeVBGHgj4Bc"
+    assert saved["campaign_fallback_transmitter_uuids"] == ["JR28wAEjmpuDQ4FrPWAiwf"]
+
+
+def test_an_unrecognised_stored_policy_falls_back_and_never_widens(tmp_path):
+    svc = make_service(tmp_path)
+    svc._config["campaign_transmitter_policy"] = "everything"
+    assert svc.campaign_transmitter_policy() == "preferred", "the seed"
+
+    seeded_badly = make_service(tmp_path / "b", campaign_transmitter_policy="bogus")
+    seeded_badly._config["campaign_transmitter_policy"] = "everything"
+    assert seeded_badly.campaign_transmitter_policy() == "pinned", (
+        "a typo may shrink a campaign onto telemetry only, never widen it")
+
+
+@pytest.mark.parametrize("body", [
+    {"campaign_transmitter_policy": "everything"},
+    {"campaign_max_total": 2001},
+    {"campaign_max_total": -1},
+    {"campaign_max_per_station": 13},
+    {"campaign_max_per_station": -1},
+    {"auto_run_chain_campaign": "maybe"},
+])
+def test_campaign_settings_out_of_range_are_refused(body):
+    with pytest.raises(ValidationError):
+        ScheduleConfigUpdate.model_validate(body)
+
+
+@pytest.mark.parametrize("body", [
+    {"campaign_transmitter_policy": "any"},
+    {"campaign_max_total": 0},      # the "clear to default" sentinel
+    {"campaign_max_total": 2000},
+    {"campaign_max_per_station": 0},
+    {"campaign_max_per_station": 12},
+    {"auto_run_chain_campaign": False},
+])
+def test_campaign_settings_in_range_are_accepted(body):
+    assert ScheduleConfigUpdate.model_validate(body).model_dump(exclude_unset=True) == body
 
 
 # --- only real runs ------------------------------------------------------------

@@ -127,6 +127,21 @@ THROTTLE_BACKOFF_BASE_S = 5.0
 # nothing. See schedule().
 _OVERLAP_409 = re.compile(r"observations of station (\d+) overlap", re.IGNORECASE)
 
+# What satnogs-network's NewObservationListSerializer.validate() answers, as
+# HTTP 400 {"non_field_errors": [...]}, for the stations in a POST the
+# requesting account may not schedule on (base/perms.py
+# raise_permission_errors_for_stations): "No permission to schedule
+# observations on station: 40" for one, "... on stations: [40, 41]" for
+# several. It lists EVERY such station in the batch, and the verdict depends
+# only on the account and that station - so each listed station's items would
+# get the same answer sent on their own. Both forms are matched only with
+# their closing delimiter (the JSON string's quote, the list's bracket):
+# http.py keeps 2000 characters of a body, and a list cut off mid-number must
+# not name a station that was never in it.
+_NO_PERMISSION_ONE = re.compile(r"No permission to schedule observations on station: (\d+)\"")
+_NO_PERMISSION_MANY = re.compile(
+    r"No permission to schedule observations on stations: \[(\d+(?:\s*,\s*\d+)*)\]")
+
 
 class RateLimitedError(SatnogsHTTPError):
     """The Network API is rate-limiting us, or is about to be.
@@ -761,6 +776,15 @@ class NetworkClient:
           run out after at most one batch per station; a hard cap of
           (distinct stations + 1) batch attempts is enforced as well, falling
           back to one at a time past it, so no edit can turn this into a loop.
+        * HTTP 400 "No permission to schedule observations on station(s): ...":
+          the items on the stations it lists are recorded as refused WITHOUT
+          being sent again, and the rest (if any) go back as a batch, under the
+          same bound. SatNOGS lists every such station in the batch, and the
+          verdict depends only on our account and that station, so a resend
+          alone could only be refused the same way. The case that matters is
+          our own station going offline (2026-10-02): the account then may not
+          book anyone else's station, every station of the batch is listed, and
+          this costs one POST where the one-at-a-time rule cost 1 + N.
         * Any other refusal (a 400, a 409 that names no station): every item
           still pending is sent one at a time, as before.
         * No reliable answer (SatnogsOutcomeUnknown), for a batch or a single
@@ -844,7 +868,29 @@ class NetworkClient:
                         break
                     pending = rest
                     continue
-                # Not a 409 that names a station we sent (or the bound is
+                refused = _permission_refused_stations(exc) if batches_left > 0 else set()
+                barred = [item for item in pending if _station_of(item) in refused]
+                if barred:
+                    # The answer for these is already in: see the docstring.
+                    # Recorded in the per-item shape, so a run's report and
+                    # CampaignService's permission backstop read them exactly
+                    # like refusals that were sent one at a time.
+                    rest = [item for item in pending if _station_of(item) not in refused]
+                    log.warning(
+                        "the batch of %d was refused for permission on %d station(s); "
+                        "recording their %d item(s) as refused without resending, and "
+                        "sending the other %d as a batch again",
+                        len(pending), len(refused), len(barred), len(rest),
+                    )
+                    for item in barred:
+                        result.errors.append(
+                            f"{_where(item)}: HTTP {exc.status} No permission to schedule "
+                            f"observations on station: {_station_of(item)} "
+                            "(refused in its batch; not resent alone)"
+                        )
+                    pending = rest
+                    continue
+                # Not a refusal that names stations we sent (or the bound is
                 # spent): no telling which items are at fault, so each one
                 # still pending is tried alone - the pre-existing rule.
                 log.warning("the batch was rejected (%s); retrying one at a time", exc.status)
@@ -873,8 +919,7 @@ class NetworkClient:
         caller must send nothing more.
         """
         for position, item in enumerate(queue):
-            where = (f"station {item.get('ground_station')} {item['start']} "
-                     f"transmitter {item['transmitter_uuid']}")
+            where = _where(item)
             try:
                 request(self.session, "POST", url, json_body=[item])
             except SatnogsOutcomeUnknown as single:
@@ -912,20 +957,44 @@ def _station_of(item: dict) -> int | None:
         return None
 
 
+def _where(item: dict) -> str:
+    # How every per-item error starts. The panel parses this shape back apart
+    # (schedule.js CAMPAIGN_ERROR_V2_RE) to group a run's refusals, so keep it.
+    return (f"station {item.get('ground_station')} {item['start']} "
+            f"transmitter {item['transmitter_uuid']}")
+
+
 def _overlap_station(exc: SatnogsHTTPError) -> int | None:
     """The station an overlap 409 names, or None for any other refusal.
 
-    Only a 409 counts: it is the one refusal known to name the station at
-    fault among items that are otherwise fine. A 400 can be anything from one
-    item's field error to "Error in DB API connection" for the whole batch.
-    Even the 400 that reads much the same - "Observations of station N
-    overlap", from the within-batch check - means two of OUR items collide,
-    which build_campaign never plans; the one-at-a-time path sorts that out.
+    Only a 409 counts here: it is the one overlap refusal that names the
+    station at fault among items that are otherwise fine. A 400 can be
+    anything from one item's field error to "Error in DB API connection" for
+    the whole batch. Even the 400 that reads much the same - "Observations of
+    station N overlap", from the within-batch check - means two of OUR items
+    collide, which build_campaign never plans; the one-at-a-time path sorts
+    that out. (The other refusal that names stations, for permission, is
+    _permission_refused_stations'.)
     """
     if exc.status != 409:
         return None
     match = _OVERLAP_409.search(exc.body or "")
     return int(match.group(1)) if match else None
+
+
+def _permission_refused_stations(exc: SatnogsHTTPError) -> set[int]:
+    """The stations a 400 "No permission to schedule observations" lists, or
+    an empty set for any other refusal - including one whose list cannot be
+    read in full (see _NO_PERMISSION_ONE), which then takes the one-at-a-time
+    path like any unrecognised refusal."""
+    if exc.status != 400:
+        return set()
+    body = exc.body or ""
+    many = _NO_PERMISSION_MANY.search(body)
+    if many:
+        return {int(part) for part in many.group(1).split(",")}
+    one = _NO_PERMISSION_ONE.search(body)
+    return {int(one.group(1))} if one else set()
 
 
 def to_schedule_item(station_id: int, transmitter_uuid: str,

@@ -301,6 +301,23 @@
             <span class="hint">minutes</span>
           </div>
 
+          <!-- The worldwide KNACKSAT-2 campaign, chained onto every slot this
+               timer fires - the one control here that books OTHER people's
+               stations. Its own switch on purpose: it is not "Book
+               automatically" from the Network Campaign tab, and it books even
+               while that one is off, so ticking it asks first. Saved by this
+               section's SAVE, exactly like Enabled. Hidden until a config
+               that carries auto_run_chain_campaign has loaded: the config
+               route refuses unknown keys (extra="forbid"), so against an
+               older backend sending it would make every SAVE here fail. -->
+          <div class="sched-auto-chain" id="auto-run-chain-row" hidden>
+            <label class="sched-auto-toggle" for="auto-run-chain-campaign">
+              <input type="checkbox" id="auto-run-chain-campaign">
+              <span>After each auto-run, also book KNACKSAT-2 worldwide (Network Campaign)</span>
+            </label>
+            <span class="hint">uses the Network Campaign caps; books community stations</span>
+          </div>
+
           <button class="sched-notices-toggle" id="schedule-runopts-toggle" type="button"
                   aria-expanded="false" aria-controls="schedule-runopts">Run options ▾</button>
           <div id="schedule-runopts" class="sched-runopts" hidden>
@@ -450,6 +467,15 @@
           <p id="campaign-token-hint" class="sched-notice" hidden>
             Set a Network token in ⚙ settings before Network Campaign can run.
           </p>
+          <!-- Why nothing CAN be booked right now, when that is the reason.
+               SatNOGS only lets a user schedule on other people's stations
+               while one of their own stations is Online; the day station 5024
+               went offline (a power/network outage at the station), an
+               automatic campaign sent 100 bookings and got 100 "No permission
+               to schedule observations" back. Filled from the newer of the
+               last preview's own_station and the last submit (status
+               "blocked"), next to the results it explains. -->
+          <p id="campaign-own-station-warn" class="sched-notice error sched-own-station-warn" hidden></p>
           <p id="campaign-status-live" class="sr-only" role="status" aria-live="polite"></p>
           <div id="campaign-preview-result"><p class="muted">
             No preview yet — run PREVIEW to see exactly which stations and

@@ -217,14 +217,16 @@ async def campaign_history(request: Request) -> dict:
     return {"history": _campaign(request).get_history()}
 
 
-# Read-only, and deliberately not behind the preview/commit single-flight
-# guard: checking what is on the calendar is exactly what an operator wants
-# to do while a long run is in flight. At most one live read per station in
-# the last run's accepted set - none for a station whose bookings have all
-# started, since the feed no longer lists those - and never the campaign's
-# calendar cache, because a read-back that trusts the cache would only be
-# checking our own earlier read. Reads are serial at ~1.7 s each (measured
-# on /jobs/), so on a ~200-station run this request stays open for minutes.
+# Read-only, but behind the same single-flight guard as preview and commit:
+# it answers {"status": "running"} while either is in flight, and they answer
+# the same while it is (CampaignService.verify_last_run says why). At most one
+# live read per station in the last run's accepted set - none for a station
+# whose bookings have all started, since the feed no longer lists those - and
+# never the campaign's calendar cache, because a read-back that trusts the
+# cache would only be checking our own earlier read. A throttle stops it
+# early with the rest reported "unknown" (stations_unread, stopped_reason).
+# Reads are serial at ~1.7 s each (measured on /jobs/), so on a ~200-station
+# run this request stays open for minutes.
 @router.post("/schedule/campaign/verify")
 async def campaign_verify(request: Request) -> dict:
     return await _campaign(request).verify_last_run()

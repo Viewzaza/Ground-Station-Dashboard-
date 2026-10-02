@@ -57,6 +57,21 @@ let lastPreviewCapableStations = null;  // stations the last preview found usabl
 let lastPreviewStoppedEarly = null;     // the last preview's stopped_early, or null if it was complete
 let lastPreviewParams = null;           // the inputs the last preview was built from (preview.params)
 let lastPreviewAt = null;               // generated_utc (ms) of the preview the three above describe
+// The last RENDERED preview's own_station (null if it had none), for
+// one-click's hold. Only a preview computed in this session sets it - the
+// same rule as campaignPreviewItems - so a stale file on disk can neither
+// stop nor wave through a run.
+let lastPreviewOwnStation = null;
+// The newest thing known about whether SatNOGS will let us book other
+// people's stations at all: {at, source, blocks, text}. See noteOwnStation().
+let ownStationEvidence = null;
+// campaign_max_total / campaign_max_per_station as last LOADED or SAVED - not
+// the sliders, which can hold unsaved moves (and clamp a saved value above
+// their max). The auto-run chain's consent prompt quotes these, because the
+// chained campaign books with the saved caps.
+let campaignSavedTotal = null;
+let campaignSavedPer = null;
+let configStationId = null;   // the configured station id, for the no-permission note
 // One-click and MAX COVERAGE share one in-flight flag. updateCampaignGate()
 // re-derives both buttons from the token alone, and it runs on every
 // max-total slider move and every loadConfig() - so without this, touching a
@@ -1135,13 +1150,16 @@ async function loadConfig() {
       cfg.db_token_set ? 'saved (hidden) — leave blank to keep' : 'unchanged';
     document.getElementById('schedule-cfg-network-token').placeholder =
       cfg.network_token_set ? 'saved (hidden) — leave blank to keep' : 'unchanged';
+    configStationId = cfg.station_id || null;
     const maxTotalInput = document.getElementById('campaign-max-total');
-    maxTotalInput.value = cfg.campaign_max_total || 150;
+    campaignSavedTotal = Number(cfg.campaign_max_total) || 150;
+    maxTotalInput.value = campaignSavedTotal;
     document.getElementById('campaign-max-total-value').textContent = maxTotalInput.value;
     campaignLoop = !!cfg.campaign_loop_until_exhausted;
     document.getElementById('campaign-loop').checked = campaignLoop;
     const maxPerInput = document.getElementById('campaign-max-per-station');
-    maxPerInput.value = cfg.campaign_max_per_station || 2;
+    campaignSavedPer = Number(cfg.campaign_max_per_station) || 2;
+    maxPerInput.value = campaignSavedPer;
     document.getElementById('campaign-max-per-station-value').textContent = maxPerInput.value;
     campaignPolicy = CAMPAIGN_POLICY_TEXT[cfg.campaign_transmitter_policy]
       ? cfg.campaign_transmitter_policy : 'pinned';
@@ -1177,6 +1195,8 @@ async function loadConfig() {
 function mountAutoRun() {
   document.getElementById('schedule-auto-enabled')
     .addEventListener('change', () => { autoDirty = true; paintAutoRun(); });
+  document.getElementById('auto-run-chain-campaign')
+    .addEventListener('change', onChainCampaignChange);
   document.getElementById('schedule-auto-mode-times')
     .addEventListener('click', () => setAutoMode('times'));
   document.getElementById('schedule-auto-mode-interval')
@@ -1218,6 +1238,7 @@ function renderAutoRun(cfg, { keepEdits = false } = {}) {
   autoDirty = false;
   autoTimes = Array.isArray(cfg.auto_run_times) ? [...cfg.auto_run_times] : [];
   document.getElementById('schedule-auto-enabled').checked = !!cfg.auto_run_enabled;
+  document.getElementById('auto-run-chain-campaign').checked = !!cfg.auto_run_chain_campaign;
   document.getElementById('schedule-auto-interval').value = cfg.auto_run_interval_min || 180;
   document.getElementById('schedule-opt-hours').value = cfg.schedule_hours ?? 24;
   document.getElementById('schedule-opt-culmination').value = cfg.min_culmination_deg ?? 3;
@@ -1266,9 +1287,17 @@ function paintAutoRun() {
     + 'normally skip. If the station marks that limit as hard, SatNOGS keeps the '
     + 'higher of the two and this value is ignored.';
 
+  document.getElementById('auto-run-chain-row').hidden = !chainCampaignSupported();
+
   const status = document.getElementById('schedule-auto-status');
   if (document.getElementById('schedule-auto-enabled').checked) {
-    status.textContent = 'Unattended runs will BOOK real observations.';
+    // The chain changes WHOSE hardware an unattended slot books, so the one
+    // line that warns about unattended booking has to say so too.
+    status.textContent = chainCampaignSupported()
+      && document.getElementById('auto-run-chain-campaign').checked
+      ? 'Unattended runs will BOOK real observations - on this station, then '
+        + 'KNACKSAT-2 on community stations worldwide.'
+      : 'Unattended runs will BOOK real observations.';
     status.classList.add('sched-status-danger');
   } else {
     status.textContent = autoDirty ? 'unsaved changes' : '';
@@ -1356,6 +1385,10 @@ async function saveAutoRun() {
         autoRunCfg?.max_observation_minutes ?? 30,
       ),
       only_priority: document.getElementById('schedule-opt-onlyprio').checked,
+      // Only to a backend that has the setting - see chainCampaignSupported().
+      ...(chainCampaignSupported()
+        ? { auto_run_chain_campaign: document.getElementById('auto-run-chain-campaign').checked }
+        : {}),
     });
     renderAutoRun(cfg);
     renderNextAutoRun(cfg.auto_run_next_utc);
@@ -1367,6 +1400,78 @@ async function saveAutoRun() {
     btn.disabled = false;
     btn.textContent = 'SAVE';
   }
+}
+
+/* Whether the loaded config carries auto_run_chain_campaign at all. The
+   config route refuses keys it does not know (extra="forbid"), so a panel
+   that sent the field to an older backend would turn every auto-run SAVE into
+   an error - and a checkbox that saves nothing is worse than none. */
+function chainCampaignSupported() {
+  return !!autoRunCfg && Object.prototype.hasOwnProperty.call(autoRunCfg, 'auto_run_chain_campaign');
+}
+
+/* Ticking the chain ON asks first; unticking does not. Same rule as the
+   Network Campaign's "Book automatically": turning on unattended booking of
+   other people's stations is the decision worth a prompt, turning it off is
+   always safe. A cancelled prompt leaves the box - and autoDirty - exactly as
+   they were, so it neither books nor shows a phantom unsaved change. */
+function onChainCampaignChange(ev) {
+  const box = ev.target;
+  if (box.checked && !window.confirm(chainCampaignConsentText())) {
+    box.checked = false;
+    return;
+  }
+  autoDirty = true;
+  paintAutoRun();
+}
+
+/* The chain's consent prompt. It names what the chained campaign will
+   actually do, from the values it will actually use: the auto-run slots as
+   they stand in this form (they are saved by the same SAVE), and the Network
+   Campaign's SAVED caps - not its sliders, which may hold moves nobody saved
+   (the backend plans from the saved config only). "Up to N stations" is the
+   per-round bound - a round books at most N bookings, so at most N stations;
+   with loop on the slot keeps going, and the prompt says so rather than
+   quote N as a ceiling it is not. */
+function chainCampaignConsentText() {
+  const cfg = autoRunCfg || {};
+  const total = campaignSavedTotal ?? '?';
+  const per = campaignSavedPer ?? '?';
+  const tz = cfg.timezone ? ` (${cfg.timezone})` : '';
+  let slots;
+  if (cfg.auto_run_mode === 'interval') {
+    const every = numberOr(document.getElementById('schedule-auto-interval').value,
+      cfg.auto_run_interval_min ?? 180);
+    slots = `every ${every} minutes`;
+  } else {
+    slots = autoTimes.length
+      ? `at ${autoTimes.join(', ')}${tz}`
+      : 'at the configured times (none are set yet, so nothing fires until one is added)';
+  }
+  const autoRunOff = !document.getElementById('schedule-auto-enabled').checked;
+  return 'After every Station Schedule auto-run, also book KNACKSAT-2 on community '
+    + 'stations worldwide?\n\n'
+    + `Every auto-run slot - ${slots} - will, right after this station's own run, `
+    + 'compute a Network Campaign plan and SUBMIT it with nobody watching: real '
+    + `observations booked on up to ${total} community station(s) each time.\n\n`
+    + 'It uses the Network Campaign caps as saved:\n'
+    + `  • Up to ${total} bookings per round\n`
+    + `  • At most ${per} per station in the 48 h window (counting KNACKSAT-2 `
+    + 'observations already booked on it)\n'
+    + `  • Downlink: ${CAMPAIGN_POLICY_TEXT[campaignPolicy] || campaignPolicy}\n`
+    + (campaignLoop
+      ? '  • Loop ON - each slot keeps booking further rounds until nothing is left, '
+        + `so one slot can book well above ${total}.\n`
+      : '  • Loop off - one round per slot.\n')
+    + (campaignConfigDirty
+      ? '\nThe Network Campaign tab has unsaved changes; the chain books with the '
+        + 'SAVED caps listed here, not those.\n'
+      : '')
+    + '\nThis switch is its own consent: it books even while "Book automatically, '
+    + 'without asking" in the Network Campaign tab is off.'
+    + (autoRunOff ? ' Auto run itself is off, so nothing fires until it is enabled.' : '')
+    + '\n\nThese are other operators\' ground stations, and accepted bookings cannot '
+    + 'be undone from this dashboard. Nothing changes until you press SAVE.';
 }
 
 /* NORAD -> the last run's complaint about it.
@@ -1775,6 +1880,149 @@ function transmitterChips(rows) {
   }));
 }
 
+/* Who started a campaign run. AUTO is the campaign's own timer; AUTO-RUN
+   CHAIN is the campaign booked right after a Station Schedule auto-run slot
+   (auto-run-chain-campaign). Both are unattended, but they answer to
+   different switches, so the history must say which one to turn off. An
+   unknown trigger keeps the old fallback: MANUAL, unstyled. */
+const CAMPAIGN_TRIGGER_TAGS = {
+  auto: { label: 'AUTO', cls: '', title: 'fired by the Network Campaign timer' },
+  chained: { label: 'AUTO-RUN CHAIN', cls: '', title: 'booked right after a Station Schedule auto-run' },
+  manual: { label: 'MANUAL', cls: 'manual', title: '' },
+};
+
+function campaignTriggerTag(trigger) {
+  const known = CAMPAIGN_TRIGGER_TAGS[trigger];
+  const tag = document.createElement('span');
+  tag.className = `sched-run-trigger ${known?.cls || ''}`.trim();
+  tag.textContent = known ? known.label : 'MANUAL';
+  if (known?.title) tag.title = known.title;
+  return tag;
+}
+
+/* ── can we book other people's stations at all? ────────────────────────────
+
+   SatNOGS only accepts a booking on someone else's station from a user who
+   owns at least one station that is Online. When ours is not, every booking
+   comes back "No permission to schedule observations", and the backend now
+   refuses to send anything (a "blocked" run). Two payloads carry the fact:
+   a preview's own_station (blocks_booking, fresh, status, last_seen) and a
+   last run whose status is "blocked" - or that carries no_permission, the
+   backend's backstop for when the gate could not see the outage and SatNOGS
+   refused a whole POST itself. Whichever is NEWER decides, so a later
+   preview that finds the station Online clears an older "blocked" run's
+   warning, and a later run that booked something clears a blocked preview's.
+   A payload that predates the gate carries neither and is no evidence either
+   way - it never clears or raises the warning. */
+function ownStationFromPreview(preview) {
+  const own = preview?.own_station;
+  if (!own || typeof own !== 'object') return null;
+  // A stale or unknown status never blocks (the backend fails open on it), but
+  // it does not show the station is back either - so it must not clear an
+  // older "blocked" run's warning. Only a FRESH non-blocking status does.
+  if (!own.blocks_booking && own.fresh !== true) return null;
+  return {
+    at: Date.parse(preview.generated_utc),
+    source: 'preview',
+    blocks: !!own.blocks_booking,
+    text: own.blocks_booking ? ownStationBlockedText(own) : '',
+  };
+}
+
+function ownStationFromRun(run) {
+  const at = Date.parse(run?.generated_utc);
+  if (run?.status === 'blocked') {
+    return { at, source: 'submit', blocks: true, text: blockedRunText(run) };
+  }
+  // The backend's backstop fired: SatNOGS itself answered "No permission to
+  // schedule observations" for a whole POST, so by the END of this run it was
+  // refusing us - whatever earlier POSTs got accepted. Checked before the
+  // accepted case below, which would otherwise read a run that lost
+  // permission part-way (the station dropping off mid-run) as proof that all
+  // is well and clear the warning.
+  if (run?.no_permission) {
+    return { at, source: 'submit', blocks: true, text: noPermissionRunText() };
+  }
+  // A run that got bookings accepted proves SatNOGS was letting us book then.
+  // One that booked nothing proves nothing about the station either way.
+  if ((run?.status === 'ok' || run?.status === 'ok_with_warnings') && (run.accepted ?? 0) > 0) {
+    return { at, source: 'submit', blocks: false, text: '' };
+  }
+  return null;
+}
+
+function noteOwnStation(evidence) {
+  if (!evidence) return;
+  const current = ownStationEvidence;
+  if (current) {
+    // Undated evidence never displaces dated evidence; older never displaces newer.
+    if (!Number.isFinite(evidence.at)) return;
+    if (Number.isFinite(current.at) && evidence.at < current.at) return;
+  }
+  ownStationEvidence = evidence;
+  paintOwnStationWarning();
+}
+
+function paintOwnStationWarning() {
+  const el = document.getElementById('campaign-own-station-warn');
+  if (!el) return;
+  const ev = ownStationEvidence;
+  if (!ev || !ev.blocks) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  // When it was checked, because this warning outlives the moment: nothing
+  // re-checks until the next preview or submit, and "is Offline" with no date
+  // reads as live.
+  const when = Number.isFinite(ev.at)
+    ? ` (As of the ${ev.source === 'preview' ? 'last preview' : 'last submit'}, `
+      + `${shortDateTime(new Date(ev.at).toISOString(), 'UTC')} UTC.)`
+    : '';
+  el.textContent = `${ev.text}${when}`;
+  el.hidden = false;
+}
+
+/* The contract's sentence, from an own_station-shaped object. */
+function ownStationBlockedText(own) {
+  return `Station ${own.station_id ?? own.id ?? configStationId ?? '?'} is ${own.status || 'not Online'} `
+    + `(last seen ${lastSeenText(own.last_seen)}). SatNOGS won't accept bookings on `
+    + 'other stations until it is Online again.';
+}
+
+/* A "blocked" run carries the station's state only inside stopped_reason
+   ("station <id> is <status> (last seen <when>) - SatNOGS refuses ..."), so
+   it is read back out of that sentence to say it the same way the preview's
+   warning does. Anything unrecognised is shown as the backend wrote it. */
+function blockedRunText(run) {
+  if (run.own_station && typeof run.own_station === 'object') {
+    return ownStationBlockedText(run.own_station);
+  }
+  const reason = String(run.stopped_reason || '');
+  const m = /^station\s+(\S+)\s+is\s+(.+?)\s+\(last seen\s+(.*?)\)/i.exec(reason);
+  if (m) return ownStationBlockedText({ station_id: m[1], status: m[2], last_seen: m[3] });
+  return `The last submit sent nothing: ${reason || 'it was blocked before sending'}.`;
+}
+
+/* The warning for a run SatNOGS refused for permission. That run carries no
+   station status (the gate let it through because the status was unknown or
+   stale - SatNOGS only marks a station Offline about an hour after it goes
+   quiet), so it says what SatNOGS said and the likely cause, not a status it
+   never read. */
+function noPermissionRunText() {
+  return 'SatNOGS refused the last submit with "No permission to schedule observations" '
+    + `- most likely station ${configStationId ?? '?'} is not Online. SatNOGS won't accept `
+    + 'bookings on other stations until it is Online again.';
+}
+
+function lastSeenText(raw) {
+  const text = String(raw ?? '').trim();
+  // Python's f-string of a missing value is "None"; neither it nor an empty
+  // value is a time, and "last seen None" reads like a station name.
+  if (!text || text === 'None' || text === 'null') return 'unknown';
+  return Number.isFinite(Date.parse(text)) ? `${shortDateTime(text, 'UTC')} UTC` : text;
+}
+
 function mountCampaign() {
   document.getElementById('campaign-preview-btn').addEventListener('click', runCampaignPreview);
   document.getElementById('campaign-commit-btn').addEventListener('click', confirmCampaign);
@@ -1857,7 +2105,7 @@ async function saveCampaignConfig() {
   btn.disabled = true;
   status.textContent = 'saving…';
   try {
-    await api.saveScheduleConfig({
+    const cfg = await api.saveScheduleConfig({
       campaign_max_total: sent.total,
       campaign_max_per_station: sent.per,
       campaign_loop_until_exhausted: sent.loop,
@@ -1865,6 +2113,10 @@ async function saveCampaignConfig() {
     });
     campaignLoop = sent.loop;
     campaignPolicy = sent.policy;
+    // From the response, not from `sent`: 0 means "back to the default", and
+    // only the backend knows what that default is.
+    campaignSavedTotal = Number(cfg?.campaign_max_total) || sent.total || campaignSavedTotal;
+    campaignSavedPer = Number(cfg?.campaign_max_per_station) || sent.per || campaignSavedPer;
     // Only "clean" if the controls still show what was sent. A slider moved
     // while the request was in flight is unsaved, and clearing the flag
     // regardless would let one-click - or MAX COVERAGE, which hands straight
@@ -1901,19 +2153,19 @@ async function runCampaignPreview() {
     const started = await api.runCampaignPreview();
     if (started?.status === 'running') {
       box.replaceChildren(alertNote(
-        'A campaign run (preview or submit) is already in progress — wait for it '
-        + 'to finish, then try again.'));
+        'A campaign run (preview, submit or cross-check) is already in progress — '
+        + 'wait for it to finish, then try again.'));
       announceCampaign('A campaign run is already in progress.');
       return 'busy';
     }
     const deadline = Date.now() + CAMPAIGN_POLL_TIMEOUT_MS;
-    let finished = false;
+    let finished = null;
     while (Date.now() < deadline) {
       await sleep(POLL_MS);
       const preview = await api.campaignPreview();
       if (preview?.status && preview.status !== 'running' && preview.generated_utc !== before) {
         renderCampaignPreview(preview);
-        finished = true;
+        finished = preview;
         break;
       }
     }
@@ -1924,7 +2176,11 @@ async function runCampaignPreview() {
       announceCampaign('Preview still computing after 20 minutes. Nothing booked.');
       return 'timeout';
     }
-    return 'ready';
+    // A preview that FAILED is written to disk like any other, so it ends the
+    // poll above - but it is not "ready". Returning 'ready' for it sent
+    // one-click on to report "the preview completed and found no free
+    // passes" directly under "preview failed: ...".
+    return finished.status === 'error' ? 'error' : 'ready';
   } catch (err) {
     console.error('[schedule] campaign preview', err);
     box.replaceChildren(alertNote(`Could not compute preview: ${err}`, 'error'));
@@ -1940,10 +2196,20 @@ function renderCampaignPreview(preview) {
   const box = document.getElementById('campaign-preview-result');
   box.replaceChildren();
 
+  // Before anything else is drawn: if SatNOGS is going to refuse the whole
+  // plan because our own station is not Online, that outranks every count
+  // below. The warning itself sits above this box (paintOwnStationWarning).
+  // Taken from a FAILED preview too - the backend reads the gate separately
+  // from the build, so its verdict on the station still holds.
+  noteOwnStation(ownStationFromPreview(preview));
+
   if (preview.status === 'error') {
-    box.appendChild(note(`preview failed: ${preview.error}`));
+    box.appendChild(alertNote(`Preview failed: ${preview.error}`, 'error'));
     return;
   }
+
+  lastPreviewOwnStation = preview.own_station && typeof preview.own_station === 'object'
+    ? preview.own_station : null;
 
   const items = preview.items || [];
   const stationCount = new Set(items.map((it) => it.station_id)).size;
@@ -1968,6 +2234,15 @@ function renderCampaignPreview(preview) {
     stats.push(`calendars: ${preview.calendars_read ?? 0} read`
       + (sources ? ` (${sources})` : '')
       + (Number.isFinite(preview.calendars_cached) ? `, ${preview.calendars_cached} cached` : ''));
+  }
+  // What the booking gate saw. Said even when it is fine, so "Online" is a
+  // checked fact on screen rather than an absence of warnings - and a stale
+  // status (which never blocks, see own_station_state) is visibly stale.
+  const own = lastPreviewOwnStation;
+  if (own) {
+    stats.push(`our station ${own.station_id ?? configStationId ?? '?'}: `
+      + `${own.status || 'status unknown'}`
+      + (own.fresh === false ? ' (status stale - not used to block)' : ''));
   }
   if (stats.length) {
     const line = document.createElement('p');
@@ -2102,6 +2377,14 @@ function previewCapableStations(preview, items) {
 async function loadCampaignPreviewStats() {
   try {
     const preview = await api.campaignPreview();
+    // The station warning is taken from any preview on disk, ahead of the
+    // checks below: the auto timer previews every cycle, and its verdict that
+    // our station is Offline is exactly what an operator opening the panel
+    // after an unattended run needs to see first. noteOwnStation() keeps
+    // whichever evidence is newer, so this cannot override a fresher one.
+    if (preview?.status === 'ok' || preview?.status === 'error') {
+      noteOwnStation(ownStationFromPreview(preview));
+    }
     if (preview?.status !== 'ok' || !Number.isFinite(preview.stations_reachable)) return;
     const at = Date.parse(preview.generated_utc);
     if (!Number.isFinite(at)) return;
@@ -2151,6 +2434,17 @@ function renderCampaignVerify(result) {
     box.appendChild(note('the last run booked nothing, so there is nothing to cross-check.'));
     return;
   }
+  // The cross-check shares the campaign's one-at-a-time guard: it reads
+  // calendars, and doing that in the middle of a submit's own reads and
+  // bookings would report a half-finished run as "missing". Nothing was read.
+  if (result.status === 'running') {
+    box.appendChild(alertNote(
+      'Not checked — a campaign preview or submit is in progress, and the '
+      + 'cross-check waits for it rather than reading calendars in the middle of '
+      + 'it. Nothing was read. Try again once it has finished.'));
+    announceCampaign('Cross-check not started: a campaign run is in progress.');
+    return;
+  }
 
   const items = result.items || [];
   const counts = items.reduce((acc, it) => {
@@ -2161,10 +2455,26 @@ function renderCampaignVerify(result) {
   const meta = document.createElement('p');
   meta.className = 'muted sched-meta';
   meta.textContent = `Checked ${items.length} booking(s) across `
-    + `${result.stations_checked} station(s) · `
-    + `${counts.on_schedule || 0} confirmed on schedule`
-    + (counts.missing ? `, ${counts.missing} not found` : '');
+    + `${result.stations_checked ?? '?'} station(s)`
+    + (Number.isFinite(result.stations_read) ? ` (${result.stations_read} read)` : '')
+    + ` · ${counts.on_schedule || 0} confirmed on schedule`
+    + (counts.missing ? `, ${counts.missing} not found` : '')
+    + (counts.unknown ? `, ${counts.unknown} unknown` : '')
+    + (counts.started ? `, ${counts.started} already under way` : '');
   box.appendChild(meta);
+
+  // A cross-check cut short by SatNOGS's read limit has not looked at the
+  // rest, and must not read as if it had: the unread stations' bookings are
+  // UNKNOWN, which is a different instruction from NOT FOUND ("check again
+  // later", not "they were cancelled").
+  if (result.stopped_reason) {
+    const unread = Number.isFinite(result.stations_unread)
+      ? `${result.stations_unread} station(s) were not read`
+      : 'Some stations were not read';
+    box.appendChild(alertNote(
+      `Cross-check stopped early: ${result.stopped_reason}. ${unread}, so their `
+      + 'bookings show UNKNOWN — not missing. Run CROSS-CHECK again later.'));
+  }
 
   // "Not found" is the one an operator has to act on, so it is called out
   // rather than left to be spotted among the confirmed rows.
@@ -2212,8 +2522,11 @@ function renderCampaignVerify(result) {
   box.appendChild(scrollableTable(
     table, `Cross-check of the last run, ${items.length} row(s)`));
 
-  announceCampaign(`Cross-check complete: ${counts.on_schedule || 0} of ${items.length} `
-    + 'booking(s) confirmed on the stations\' schedules.');
+  announceCampaign(result.stopped_reason
+    ? `Cross-check stopped early: ${counts.on_schedule || 0} of ${items.length} booking(s) `
+      + `confirmed, ${counts.unknown || 0} unknown - not every station was read.`
+    : `Cross-check complete: ${counts.on_schedule || 0} of ${items.length} `
+      + 'booking(s) confirmed on the stations\' schedules.');
 }
 
 /* Short status text for screen readers only. Deliberately not wrapped around
@@ -2234,8 +2547,17 @@ async function confirmCampaign() {
   // click that spends other people's antenna time cannot be a stray one. It
   // names the numbers rather than asking "are you sure?".
   const stationCount = new Set(campaignPreviewItems.map((it) => it.station_id)).size;
+  // Asked, not refused, unlike one-click: the operator has read this plan and
+  // the backend checks our station again at submit time with a fresher poll -
+  // if it is back Online by then the plan goes through, and if not the
+  // backend sends nothing. The prompt just must not hide the likely outcome.
+  const blocked = lastPreviewOwnStation?.blocks_booking
+    ? `WARNING: when this plan was computed, ${ownStationBlockedText(lastPreviewOwnStation)} `
+      + 'Unless it is back Online now, nothing will be sent.\n\n'
+    : '';
   const ok = window.confirm(
-    `Book ${campaignPreviewItems.length} observation(s) on ${stationCount} community `
+    blocked
+    + `Book ${campaignPreviewItems.length} observation(s) on ${stationCount} community `
     + `station(s)${fallbackPhrase(campaignPreviewItems)} via SatNOGS Network?\n\n`
     + (campaignLoop
       ? 'Loop is ON: after this batch the campaign is recomputed and the next '
@@ -2271,12 +2593,13 @@ async function submitPreviewedItems() {
     const before = (await api.campaignLastRun())?.generated_utc;
     const started = await api.commitCampaign(campaignPreviewItems);
     if (started?.status === 'running') {
-      // Preview and commit share one "is a campaign op running" flag on the
-      // backend, so a still-running preview silently blocks this - nothing
-      // was submitted. Say so instead of quietly discarding the click.
+      // Preview, commit and the cross-check share one "is a campaign op
+      // running" flag on the backend, so a still-running preview (or
+      // cross-check) silently blocks this - nothing was submitted. Say so
+      // instead of quietly discarding the click.
       box.prepend(alertNote(
-        'Not submitted — a campaign preview or submit is already running. Nothing '
-        + 'was sent. Wait for it to finish, then click CONFIRM & SUBMIT again.'));
+        'Not submitted — a campaign preview, submit or cross-check is already running. '
+        + 'Nothing was sent. Wait for it to finish, then click CONFIRM & SUBMIT again.'));
       announceCampaign('Not submitted: a campaign run is already in progress.');
       return;
     }
@@ -2425,6 +2748,21 @@ async function runCampaignOneClick({ preset = null } = {}) {
       announceCampaign(`One-click stopped: the preview ${outcome === 'busy'
         ? 'could not start because another campaign run is in progress'
         : outcome === 'timeout' ? 'did not finish in time' : 'failed'}. Nothing was submitted.`);
+      return;
+    }
+    // First of the holds, ahead of "nothing to book": when our own station is
+    // not Online SatNOGS refuses every booking on other people's stations,
+    // whatever the plan holds. The backend would send nothing anyway (and
+    // record a "blocked" run); stopping here is so the operator is told why
+    // in words, on the plan they were about to submit, instead of finding a
+    // run that booked nothing. Only the preview just computed counts - never
+    // older evidence - so a station that came back Online is not held up.
+    if (lastPreviewOwnStation?.blocks_booking) {
+      box.prepend(alertNote(
+        `Not submitted — ${ownStationBlockedText(lastPreviewOwnStation)} Nothing was `
+        + 'sent. Run this again once the station is back Online.', 'error'));
+      announceCampaign('One-click stopped: our own station is not Online, so SatNOGS '
+        + 'would refuse every booking. Nothing submitted.');
       return;
     }
     if (!campaignPreviewItems || !campaignPreviewItems.length) {
@@ -2692,6 +3030,7 @@ async function loadCampaignLastRun() {
 function renderCampaignLastRun(run) {
   if (!run || run.status === 'never_run' || run.status === 'running') return;
   const box = document.getElementById('campaign-preview-result');
+  noteOwnStation(ownStationFromRun(run));
 
   // Built as one block and prepended once. The previous version prepended the
   // rejection list and the summary line separately, which put them at the top
@@ -2702,11 +3041,9 @@ function renderCampaignLastRun(run) {
   const meta = document.createElement('p');
   meta.className = 'muted sched-meta';
   let unknownNote = null;
+  let refusedNote = null;
 
-  const trigger = document.createElement('span');
-  trigger.className = `sched-run-trigger ${run.trigger === 'manual' ? 'manual' : ''}`.trim();
-  trigger.textContent = run.trigger === 'auto' ? 'AUTO' : 'MANUAL';
-  meta.appendChild(trigger);
+  meta.appendChild(campaignTriggerTag(run.trigger));
 
   if (run.status === 'error') {
     const text = document.createElement('span');
@@ -2717,6 +3054,18 @@ function renderCampaignLastRun(run) {
     detail.textContent = run.error || 'no detail reported';
     meta.appendChild(detail);
     announceCampaign(`Submit failed: ${run.error || 'no detail reported'}`);
+  } else if (run.status === 'blocked') {
+    // Nothing was sent at all - not "0 booked, 0 rejected", which reads as a
+    // run that found nothing to do. The reason (our station is not Online)
+    // is the whole message; the warning above the results says it in full.
+    const text = document.createElement('span');
+    text.className = 'sched-stat bad';
+    text.textContent = 'NOTHING SENT';
+    meta.appendChild(text);
+    const detail = document.createElement('span');
+    detail.textContent = run.stopped_reason || 'blocked before anything was sent';
+    meta.appendChild(detail);
+    announceCampaign(`Submit blocked, nothing sent: ${run.stopped_reason || 'no detail reported'}`);
   } else {
     const submitted = run.submitted ?? 0;
     const accepted = run.accepted ?? 0;
@@ -2744,6 +3093,16 @@ function renderCampaignLastRun(run) {
       unknownStat.className = 'sched-stat warn';
       unknownStat.textContent = `${uncertainItems.length} outcome unknown`;
       meta.appendChild(unknownStat);
+    }
+    // Planned but never sent, because SatNOGS became unreachable or refused
+    // us permission part-way (not_sent). Not in "submitted" at all, so
+    // without its own count a run that stopped after one POST of 50 out of
+    // 600 reads as "50 submitted" - as if 50 was the whole plan.
+    if (Number(run.not_sent) > 0) {
+      const notSentStat = document.createElement('span');
+      notSentStat.className = 'sched-stat warn';
+      notSentStat.textContent = `${run.not_sent} not sent`;
+      meta.appendChild(notSentStat);
     }
     const ofText = document.createElement('span');
     ofText.textContent = `of ${submitted} submitted`
@@ -2776,11 +3135,36 @@ function renderCampaignLastRun(run) {
         + 'accepted them. Do NOT resubmit them: check these stations\' schedules on '
         + `SatNOGS first (station ${shown}). This run did not retry them either.`);
     }
+
+    // The station-offline failure as SatNOGS itself reports it, for when the
+    // gate did not catch it (a stale or unknown status never blocks): every
+    // booking refused with "No permission to schedule observations", one
+    // line per item and a different station number in each, so the grouped
+    // report below says what happened but not why. Runs from before the gate
+    // existed look exactly like this too. run.no_permission is the backend
+    // saying it stopped sending on that refusal, which can also happen after
+    // earlier POSTs were accepted - the station dropping off mid-run.
+    const ours = configStationId ? `station ${configStationId}` : 'ours';
+    if (accepted === 0 && (run.no_permission || allRefusedPermission(run.errors))) {
+      refusedNote = alertNote(
+        'SatNOGS refused every booking with "No permission to schedule observations". '
+        + 'It only lets us book other people\'s stations while one of our own stations '
+        + `is Online, so most likely ${ours} is not. Nothing was booked; these are safe `
+        + 'to submit again once it is back Online.', 'error');
+    } else if (run.no_permission) {
+      refusedNote = alertNote(
+        'SatNOGS began refusing with "No permission to schedule observations" partway '
+        + `through, so the rest were not sent - most likely ${ours} stopped being Online `
+        + `during the run. The ${accepted} accepted booking(s) stand; the refused and `
+        + 'unsent ones were not booked and are safe to submit again once it is back Online.',
+        'error');
+    }
   }
   wrap.appendChild(meta);
   if (unknownNote) wrap.appendChild(unknownNote);
+  if (refusedNote) wrap.appendChild(refusedNote);
 
-  if (run.status !== 'error') {
+  if (run.status !== 'error' && run.status !== 'blocked') {
     if (Array.isArray(run.accepted_by_transmitter) && run.accepted_by_transmitter.length) {
       wrap.appendChild(chipRow('Booked by downlink', transmitterChips(run.accepted_by_transmitter)));
     }
@@ -2849,13 +3233,36 @@ function parseCampaignError(raw) {
       return { reason: UNKNOWN_REASON, detail: `${where} — outcome unknown` };
     }
     const reason = extractRejectionReason(body) || `HTTP ${status}`;
-    return { reason: `HTTP ${status} · ${reason}`, detail: `${where} — ${reason}` };
+    return { reason: `HTTP ${status} · ${reasonKey(reason)}`, detail: `${where} — ${reason}` };
   }
   const m = CAMPAIGN_ERROR_RE.exec(raw);
   if (!m) return { reason: raw, detail: raw };
   const [, start, , status, body] = m;
   const reason = extractRejectionReason(body) || `HTTP ${status}`;
-  return { reason: `HTTP ${status} · ${reason}`, detail: `${rejectionTime(start)} — ${reason}` };
+  return { reason: `HTTP ${status} · ${reasonKey(reason)}`, detail: `${rejectionTime(start)} — ${reason}` };
+}
+
+/* One reason, not one per station. SatNOGS names the station inside its own
+   sentences ("No permission to schedule observations on station: 40", "One or
+   more observations of station 40 overlap with the already scheduled ones"),
+   so grouping on the raw sentence split the day our station was offline -
+   100 identical refusals - into 100 one-item groups, the opposite of what
+   this report is for. Only the group key is generalised; each item's detail
+   line keeps its station. */
+function reasonKey(reason) {
+  return reason.replace(/\b(stations?:?\s*)\d+\b/gi, '$1<id>');
+}
+
+/* Every booking SatNOGS answered was refused for permission - the signature
+   of our own station not being Online. Lines that are not an HTTP answer
+   (the "were not sent" summaries the backend appends) are neither evidence
+   for it nor against it. */
+const NO_PERMISSION_RE = /No permission to schedule observations/i;
+
+function allRefusedPermission(errors) {
+  const answered = (Array.isArray(errors) ? errors : [])
+    .filter((e) => /HTTP\s+\d{3}/.test(e) || NO_PERMISSION_RE.test(e));
+  return answered.length > 0 && answered.every((e) => NO_PERMISSION_RE.test(e));
 }
 
 /* new Date("2026-09-20 04:12:00") is read as *local* time by every engine that
@@ -3011,10 +3418,7 @@ function renderCampaignHistory(history) {
     const tdTime = document.createElement('td');
     tdTime.textContent = run.generated_utc ? shortTime(run.generated_utc, 'UTC') : '—';
     const tdTrigger = document.createElement('td');
-    const tag = document.createElement('span');
-    tag.className = `sched-run-trigger ${run.trigger === 'manual' ? 'manual' : ''}`.trim();
-    tag.textContent = run.trigger === 'auto' ? 'AUTO' : 'MANUAL';
-    tdTrigger.appendChild(tag);
+    tdTrigger.appendChild(campaignTriggerTag(run.trigger));
     const tdBooked = document.createElement('td');
     tdBooked.textContent = String(run.accepted ?? 0);
     // Breadth, next to depth: 600 booked on 220 stations and 600 on 120 are
@@ -3031,7 +3435,10 @@ function renderCampaignHistory(history) {
     tdRounds.textContent = String(run.rounds ?? 1);
     const tdStatus = document.createElement('td');
     tdStatus.textContent = run.status || '—';
-    if (run.status === 'error') tdStatus.className = 'sched-cell-bad';
+    // "blocked" in red with "error": both are runs that booked nothing for a
+    // reason that has to be fixed first (here, our station being offline),
+    // not a quiet run that found nothing to book.
+    if (run.status === 'error' || run.status === 'blocked') tdStatus.className = 'sched-cell-bad';
 
     tr.append(tdTime, tdTrigger, tdBooked, tdStations, tdRejected, tdRounds, tdStatus);
     tbody.appendChild(tr);
