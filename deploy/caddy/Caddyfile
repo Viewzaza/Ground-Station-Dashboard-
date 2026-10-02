@@ -1,0 +1,59 @@
+# One origin for everything, so the browser sees no cross-origin requests and
+# the camera credentials never leave the server.
+#
+# LAN: `tls internal` mints a cert from Caddy's own CA. Install that CA on the
+# operator machines once (it is printed in the caddy container's data volume).
+# Tailnet: `tailscale serve https / http://localhost:8080` in front of this.
+
+{
+	admin :2019
+}
+
+:80, :443 {
+	tls internal
+
+	encode gzip
+
+	# --- backend API and WebSocket -----------------------------------------
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+	handle /ws* {
+		reverse_proxy backend:8000
+	}
+
+	# --- go2rtc: WebRTC signalling, MSE, HLS, MJPEG, snapshots --------------
+	# flush_interval -1 disables response buffering, without which MJPEG and
+	# SSE responses stall in the proxy instead of streaming.
+	handle /video/* {
+		uri strip_prefix /video
+		reverse_proxy video:1984 {
+			flush_interval -1
+		}
+	}
+
+	# --- reference ground-station suite (optional, `--profile sdr`) ---------
+	handle /sdr/* {
+		uri strip_prefix /sdr
+		reverse_proxy groundstation:7000 {
+			flush_interval -1
+		}
+	}
+
+	# --- static frontend ---------------------------------------------------
+	handle {
+		root * /srv
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
