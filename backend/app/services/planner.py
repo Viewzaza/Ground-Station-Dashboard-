@@ -45,7 +45,7 @@ Status = Literal[
     "planned",          # chosen; this station will work it
     "satnogs",          # SatNOGS already has it scheduled; nothing for us to do
     "reserved",         # overlaps a SatNOGS job for a different satellite
-    "conflict",         # lost to a better-scoring overlapping pass
+    "conflict",         # overlaps a pass that is part of a better plan overall
     "infeasible",       # cannot slew there in time from the pass before it
     "low",              # peaks below the station's culmination threshold
     "past",             # already over
@@ -417,6 +417,43 @@ def turn_s(slew: SlewModel, from_bearing: float, to_bearing: float) -> float:
     return max(slew.min_turnaround_s, move + slew.setup_s)
 
 
+def reach_s(slew: SlewModel, from_bearing: float, to_bearing: float) -> float:
+    """Time for the antenna to get from where it *is* to where a pass rises.
+
+    Travel only. turn_s's 60 s floor and setup charge are the cost of one
+    observation following another; the first leg from the antenna's current
+    position follows nothing. Charging them here meant that once autopilot had
+    pre-positioned and a rebuild landed in the last minute before AOS, the
+    pass sitting exactly where the antenna already pointed was judged
+    unreachable — dropped from the plan, and missed.
+    """
+    travel = abs(to_bearing - from_bearing)
+    return travel / slew.az_rate_deg_s + (slew.accel_margin_s if travel > 0.05 else 0.0)
+
+
+def _interval_distance(b: float, sweep: float, x: float) -> float:
+    lo, hi = min(b, b + sweep), max(b, b + sweep)
+    return max(0.0, lo - x, x - hi)
+
+
+def _live_branches(c: Candidate, slew: SlewModel, now: datetime,
+                   origin_az: float | None) -> list[float]:
+    """The branches the plan may use for this pass.
+
+    A pass already under way can only be on one branch: the one the antenna is
+    following. ControlService's track unwraps toward the antenna's current
+    reading, so whatever branch the plan picked, the antenna stays on the one
+    nearest it — and planning the next turnaround from a different branch
+    costs a slew from somewhere the antenna will never be.
+    """
+    options = branches(c, slew)
+    if origin_az is None or c.aos > now or not options:
+        return options
+    sweep = sweep_of(c)
+    return [min(options, key=lambda b: (_interval_distance(b, sweep, origin_az),
+                                        abs(b - origin_az)))]
+
+
 def _margin(a: float, sweep: float, slew: SlewModel) -> float:
     lo, hi = min(a, a + sweep), max(a, a + sweep)
     return min(lo - slew.min_az, slew.max_az - hi)
@@ -494,7 +531,7 @@ def select(candidates: Iterable[Candidate], *, slew: SlewModel,
     # --- nodes -----------------------------------------------------------------
     nodes: list[tuple[int, float]] = []
     for k, c in enumerate(pool):
-        for b in branches(c, slew):
+        for b in _live_branches(c, slew, now, origin_az):
             nodes.append((k, b))
     nodes.sort(key=lambda v: (pool[v[0]].aos, v[0], v[1]))
 
@@ -513,7 +550,7 @@ def select(candidates: Iterable[Candidate], *, slew: SlewModel,
             # Already under way: the antenna has to catch up wherever it is,
             # and the cost of doing so is the slew.
             value[vi] = (c.score, -abs(b - origin_az), margin)
-        elif (now + timedelta(seconds=turn_s(slew, origin_az, b))) <= c.aos:
+        elif (now + timedelta(seconds=reach_s(slew, origin_az, b))) <= c.aos:
             value[vi] = (c.score, -abs(b - origin_az), margin)
 
         # Following an earlier node.
@@ -555,31 +592,39 @@ def select(candidates: Iterable[Candidate], *, slew: SlewModel,
         # pass was traded for rather than just that it was dropped.
         rival = next((p for p in planned if _time_overlap(c, p)), None)
         if rival is not None:
-            decisions[c.key] = Decision(
-                c, "conflict",
-                f"overlaps {rival.name or rival.norad} at {rival.aos:%H:%M}Z, "
-                f"which scores {rival.score:.2f} to this pass's {c.score:.2f}",
-                blocked_by=rival.key,
-            )
+            if rival.score >= c.score:
+                why = (f"overlaps {rival.name or rival.norad} at {rival.aos:%H:%M}Z, "
+                       f"which scores {rival.score:.2f} to this pass's {c.score:.2f}")
+            else:
+                # The rival is worse on its own, but working it is part of a
+                # better plan overall. Say that, rather than implying the
+                # rival simply outscored this pass.
+                why = (f"overlaps {rival.name or rival.norad} at {rival.aos:%H:%M}Z "
+                       f"(score {rival.score:.2f}); this pass scores {c.score:.2f}, "
+                       f"but the plan with {rival.name or rival.norad} scores more in total")
+            decisions[c.key] = Decision(c, "conflict", why, blocked_by=rival.key)
             continue
         before = next((p for p in reversed(planned) if p.los <= c.aos), None)
         after = next((p for p in planned if p.aos >= c.los), None)
-        if not _fits_between(c, before, after, slew, now, origin_az):
-            neighbour = before or after
-            if neighbour is not None:
-                decisions[c.key] = Decision(
-                    c, "infeasible",
-                    f"not enough time to slew between this and "
-                    f"{neighbour.name or neighbour.norad} at {neighbour.aos:%H:%M}Z",
-                    blocked_by=neighbour.key,
-                )
-            else:
-                decisions[c.key] = Decision(
-                    c, "infeasible",
-                    "the antenna cannot reach where it rises before it rises",
-                )
-        else:
+        fits, blocker = _fits_between(c, before, after, slew, now, origin_az)
+        if fits:
             decisions[c.key] = Decision(c, "conflict", "a better combination excludes it")
+        elif blocker == "origin":
+            decisions[c.key] = Decision(
+                c, "infeasible",
+                "the antenna cannot get from where it is to where this rises in time",
+            )
+        else:
+            names = {
+                "before": [before], "after": [after], "both": [before, after],
+            }[blocker]
+            names = [n for n in names if n is not None]
+            what = " and ".join(f"{n.name or n.norad} at {n.aos:%H:%M}Z" for n in names)
+            decisions[c.key] = Decision(
+                c, "infeasible",
+                f"not enough time to slew between this and {what}",
+                blocked_by=names[0].key if names else None,
+            )
 
     for p in planned:
         decisions[p.key] = Decision(p, "planned", _why_planned(p))
@@ -595,23 +640,42 @@ def select(candidates: Iterable[Candidate], *, slew: SlewModel,
 
 
 def _fits_between(c: Candidate, before: Candidate | None, after: Candidate | None,
-                  slew: SlewModel, now: datetime, origin_az: float | None) -> bool:
-    """Could c be slotted between its planned neighbours, on any branch?"""
-    for b in branches(c, slew):
+                  slew: SlewModel, now: datetime,
+                  origin_az: float | None) -> tuple[bool, str]:
+    """Could c be slotted between its planned neighbours, on any branch?
+
+    Returns (fits, blocker) where blocker names which side rules it out —
+    "before", "after", "both" or "origin" — so the explanation names the pass
+    that is actually in the way, not merely the nearest one.
+    """
+    fails_before = fails_after = fails_origin = True
+    for b in _live_branches(c, slew, now, origin_az):
+        ok_before = True
         if before is not None:
             end = (before.start_bearing if before.start_bearing is not None
                    else before.aos_az) + sweep_of(before)
-            if (c.aos - before.los).total_seconds() < turn_s(slew, end, b):
-                continue
-        elif origin_az is not None and c.aos > now:
-            if now + timedelta(seconds=turn_s(slew, origin_az, b)) > c.aos:
-                continue
+            ok_before = (c.aos - before.los).total_seconds() >= turn_s(slew, end, b)
+        ok_origin = True
+        if before is None and origin_az is not None and c.aos > now:
+            ok_origin = now + timedelta(seconds=reach_s(slew, origin_az, b)) <= c.aos
+        ok_after = True
         if after is not None:
             nb = after.start_bearing if after.start_bearing is not None else after.aos_az
-            if (after.aos - c.los).total_seconds() < turn_s(slew, b + sweep_of(c), nb):
-                continue
-        return True
-    return False
+            ok_after = (after.aos - c.los).total_seconds() >= turn_s(slew, b + sweep_of(c), nb)
+        if ok_before and ok_origin and ok_after:
+            return True, ""
+        fails_before &= not ok_before
+        fails_after &= not ok_after
+        fails_origin &= not ok_origin
+    if fails_before and fails_after:
+        return False, "both"
+    if fails_before:
+        return False, "before"
+    if fails_after:
+        return False, "after"
+    if fails_origin:
+        return False, "origin"
+    return False, "both"
 
 
 def _time_overlap(a: Candidate, b: Candidate) -> bool:

@@ -215,10 +215,11 @@ def test_the_lease_expires():
     assert "armed" in service.blocked_by()
 
 
-def test_release_disarms():
+@pytest.mark.asyncio
+async def test_release_disarms():
     service = build()
     service.arm()
-    service.release()
+    await service.release()
     assert not service.armed
 
 
@@ -369,7 +370,7 @@ async def test_releasing_control_stops_a_track():
     service = build(pred=FakePredictor(az=180.0, el=45.0))
     service.arm()
     await service.track(67683)
-    service.release()
+    await service.release()
     await asyncio.sleep(0.05)
     assert service._track_task is None
 

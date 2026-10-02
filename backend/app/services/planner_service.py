@@ -461,7 +461,7 @@ class PlanExecutor:
         self._seq: int | None = None            # journal position after our last command
         self._owned: Candidate | None = None    # the pass whose track we started
         self._owned_track_id: int | None = None
-        self._positioned_for: str | None = None
+        self._positioned_for: Candidate | None = None
         self._lock = asyncio.Lock()
 
     # --- journal ------------------------------------------------------------
@@ -476,20 +476,68 @@ class PlanExecutor:
 
         A refusal is not a crash: the interlock closed under the rotctld lock,
         or the rotator link is down. Report it and try again next step.
+
+        Which journal entry is ours is decided by position, never by reading
+        the journal after the await. ControlService journals every command
+        synchronously at the moment it accepts it, before any await, so if
+        this command was accepted its entry is exactly `before + 1` — nothing
+        can run between this call starting and that entry being written.
+        Reading `command_seq` after the await instead credited autopilot with
+        whatever an operator did while the write was in flight: a STOP pressed
+        during a pre-position slew became autopilot's own entry, and autopilot
+        carried on to track the pass.
+
+        An accepted command whose write then failed still journaled, and that
+        entry is still ours — or the next step would read autopilot's own
+        failed stop as someone else taking control.
         """
         from .control import ControlRefused
         from .rotctld_client import RotctldError
 
+        # Re-check for intervention before *every* command, not only at the
+        # top of a step. One step can issue two — the LOS stop of one pass,
+        # then the goto for the next — and an operator's command can land
+        # during the first one's await. Checking only at step start let the
+        # second command override it within the same second.
+        if self._seq is not None and self._journal() != self._seq:
+            who = getattr(self.control, "last_origin", "someone")
+            what = getattr(self.control, "_last_command", "") or "a command"
+            await self._disable(f"{who} took control ({what})", stop_motion=False)
+            return False
+
+        before = self._journal()
+        problem: tuple[str, str] | None = None
         try:
             await fn(*args, origin="autopilot")
         except ControlRefused as exc:
-            self._set("blocked", f"refused: {exc}")
-            return False
+            problem = ("blocked", f"refused: {exc}")
         except (RotctldError, *_TRANSIENT) as exc:
-            self._set("blocked", f"rotator write failed: {exc}")
+            problem = ("blocked", f"rotator write failed: {exc}")
+
+        origin_of = getattr(self.control, "origin_of", None)
+        if callable(origin_of):
+            if origin_of(before + 1) == "autopilot":
+                self._seq = before + 1
+        elif problem is None:
+            self._seq = self._journal()        # a control with no origin record
+
+        if problem is not None:
+            self._set(*problem)
             return False
-        self._seq = self._journal()
         return True
+
+    @staticmethod
+    def _same_pass(a: Candidate | None, b: Candidate | None) -> bool:
+        """The same physical pass: same satellite, overlapping in time.
+
+        Not the key. A pass's key is built from its AOS to the second, and a
+        rebuild's search refines AOS by half a second from a moving start —
+        so the same pass flips between two keys across rebuilds. Matching on
+        the key made autopilot read its own pass as "dropped from the plan"
+        and stop the antenna mid-pass, every second or third rebuild.
+        """
+        return (a is not None and b is not None and a.norad == b.norad
+                and a.aos < b.los and b.aos < a.los)
 
     # --- switching ----------------------------------------------------------
     def enable(self) -> ExecutorState:
@@ -619,13 +667,17 @@ class PlanExecutor:
             return
 
         plan = self.planner.plan
-        planned_keys = {c.key for c in plan.planned} if plan else set()
 
         # 3. A track we own ends at its LOS — or as soon as the plan no longer
         #    contains it, because a rebuild found a reason not to work it.
+        #    "Contains it" means the same physical pass, not the same key.
         if self._owned is not None:
+            match = next((c for c in (plan.planned if plan else [])
+                          if self._same_pass(c, self._owned)), None)
+            if match is not None:
+                self._owned = match        # keep LOS current across rebuilds
             over = now >= self._owned.los
-            dropped = self._owned.key not in planned_keys
+            dropped = match is None
             if over or dropped:
                 st = control.state()
                 if st.mode == "track" and getattr(control, "track_id", None) == self._owned_track_id:
@@ -667,7 +719,7 @@ class PlanExecutor:
             ours = (st.mode == "track"
                     and getattr(control, "track_id", None) == self._owned_track_id
                     and st.target_norad == nxt.norad
-                    and self._owned is not None and self._owned.key == nxt.key)
+                    and self._same_pass(self._owned, nxt))
             if not ours:
                 if not await self._command(control.track, nxt.norad):
                     return
@@ -678,10 +730,14 @@ class PlanExecutor:
 
         # 7. Before the pass: get to where it rises, in good time.
         if now >= nxt.aos - timedelta(seconds=self._lead_s(nxt)):
-            if self._positioned_for != nxt.key:
-                if not await self._command(control.goto, self._start_bearing(nxt), 0.0):
+            target = self._start_bearing(nxt)
+            done = self._positioned_for
+            already = (self._same_pass(done, nxt) and done is not None
+                       and abs(self._start_bearing(done) - target) < 0.5)
+            if not already:
+                if not await self._command(control.goto, target, 0.0):
                     return
-                self._positioned_for = nxt.key
+                self._positioned_for = nxt
                 # A goto ends any track; nothing is ours to stop any more.
                 self._owned = None
                 self._owned_track_id = None

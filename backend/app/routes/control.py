@@ -68,7 +68,7 @@ async def arm(request: Request) -> dict:
 
 @router.post("/control/release")
 async def release(request: Request) -> dict:
-    return _service(request).release().model_dump(mode="json")
+    return (await _service(request).release()).model_dump(mode="json")
 
 
 @router.post("/control/goto")

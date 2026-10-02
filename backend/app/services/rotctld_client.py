@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
 
@@ -97,6 +98,16 @@ class RotctldClient:
         )
         log.info("rotctld connected: %s:%s", self.host, self.port)
 
+    def _abandon(self) -> None:
+        """Drop the connection without waiting: its framing is unknown."""
+        writer = self._writer
+        self._reader = self._writer = None
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
     async def close(self) -> None:
         if self._writer is not None:
             self._writer.close()
@@ -114,37 +125,55 @@ class RotctldClient:
         Reads until the terminating `RPRT <n>` line, so a reply split across
         packets — or arriving one byte at a time — is reassembled correctly.
 
-        `guard`, if given, is called after the lock is taken and before a byte
-        is written, and may raise to abort. It exists for the interlock: a gate
-        checked before waiting on this lock can close during the wait — up to
-        COMMAND_TIMEOUT_S queued behind a slow poll, plus a reconnect — so the
-        only check that cannot go stale is one made here.
+        `guard`, if given, is called with the lock held, after any reconnect
+        and immediately before a byte is written, and may raise to abort. It
+        exists for the interlock: a gate checked before waiting on this lock
+        can close during the wait — up to COMMAND_TIMEOUT_S queued behind a
+        slow poll, plus up to CONNECT_TIMEOUT_S reconnecting — so the only
+        check that cannot go stale is the one made last.
+
+        Any exit after the command is written but before its reply is fully
+        read — cancellation, timeout, EOF, a malformed terminator — drops the
+        connection. The reply is still on its way, and on a persistent socket
+        the next command would read it as its own: a STOP answered with the
+        previous set_pos's "RPRT 0", and the STOP's real error then surfacing
+        as a failed position poll. Reconnecting costs a TCP handshake;
+        misframing the interlock's replies costs the truth about what the
+        rotator did.
         """
         async with self._lock:
-            if guard is not None:
-                guard()
             await self.connect()
             assert self._reader and self._writer
+            if guard is not None:
+                guard()
 
-            self._writer.write(f"+\\{command}\n".encode())
-            await self._writer.drain()
+            try:
+                self._writer.write(f"+\\{command}\n".encode())
+                await self._writer.drain()
 
-            records: list[str] = []
-            while True:
-                raw = await asyncio.wait_for(
-                    self._reader.readline(), COMMAND_TIMEOUT_S
-                )
-                if not raw:
-                    raise ConnectionError("rotctld closed the connection")
-                line = raw.decode(errors="replace").strip()
-                if not line:
-                    continue
-                if line.startswith("RPRT"):
-                    try:
-                        return records, int(line.split()[1])
-                    except (IndexError, ValueError):
-                        raise RotctldError(RPRT_EINVAL, f"malformed terminator: {line!r}")
-                records.append(line)
+                records: list[str] = []
+                while True:
+                    raw = await asyncio.wait_for(
+                        self._reader.readline(), COMMAND_TIMEOUT_S
+                    )
+                    if not raw:
+                        raise ConnectionError("rotctld closed the connection")
+                    line = raw.decode(errors="replace").strip()
+                    if not line:
+                        continue
+                    if line.startswith("RPRT"):
+                        try:
+                            return records, int(line.split()[1])
+                        except (IndexError, ValueError):
+                            raise RotctldError(
+                                RPRT_EINVAL, f"malformed terminator: {line!r}")
+                    records.append(line)
+            except BaseException:
+                # BaseException, not Exception: CancelledError is the common
+                # case here — ControlService cancels a track task whose
+                # set_pos is mid-reply on every stop, goto and new track.
+                self._abandon()
+                raise
 
     @staticmethod
     def _fields(records: list[str]) -> dict[str, str]:
@@ -240,6 +269,10 @@ class RotctldClient:
         pass an el of 150 straight through to a rotator that cannot reach it.
         See `limits` and GS_ROT_LIMIT_*.
         """
+        if not (math.isfinite(az) and math.isfinite(el)):
+            # The last place a NaN can be caught before it is a rotator
+            # command. Every caller upstream should already have refused it.
+            raise RotctldError(RPRT_EINVAL, f"non-finite position az={az!r} el={el!r}")
         az, el = self.clamp(az, el)
         _, code = await self._command(f"set_pos {az:.2f} {el:.2f}", guard=guard)
         if code != RPRT_OK:

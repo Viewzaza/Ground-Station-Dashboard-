@@ -467,7 +467,7 @@ async def test_release_then_rearm_between_steps_disengages(make_rig):
     rig = make_rig([cand("p", NORAD_A, aos)])
     rig.control.arm()
     rig.ex.enable()
-    rig.control.release()
+    await rig.control.release()
     rig.control.arm()
     await rig.ex.step(NOW)
     assert not rig.ex.state.enabled

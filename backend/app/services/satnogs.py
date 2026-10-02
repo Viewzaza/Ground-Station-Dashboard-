@@ -149,7 +149,17 @@ class SatnogsService:
         )
         # An empty job list is a real, meaningful answer — the station has
         # nothing scheduled — so it must stamp freshness like any other.
-        fresh = data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            # Unknown is not permission. A paginated envelope, a proxy's error
+            # object or a schema change used to read as "nothing scheduled" and
+            # stamp the schedule fresh — which opened the no-imminent-pass gate
+            # with an observation two minutes out. Keep the last schedule and
+            # leave it unstamped, so the gate ages out closed like the station
+            # and observation feeds already do.
+            log.warning("SatNOGS /jobs/ returned %s, not a list; keeping the "
+                        "last schedule unstamped", type(data).__name__)
+            return
+        fresh = [j for j in data if isinstance(j, dict)]
         now = datetime.now(timezone.utc)
         seen = {j.get("id") for j in fresh}
         # A job that drops out of /api/jobs/ while inside its own window has

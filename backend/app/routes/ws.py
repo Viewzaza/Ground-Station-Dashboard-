@@ -138,7 +138,7 @@ async def _handle_control(ws: WebSocket, frame: ClientFrame) -> None:
         if frame.type == "arm_control":
             service.arm()
         elif frame.type == "release_control":
-            service.release()
+            await service.release()
         elif frame.type == "stop":
             await service.stop()
         elif frame.type == "slew":

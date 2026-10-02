@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 
 from ..config import Settings
@@ -78,14 +79,28 @@ class ControlService:
         # after autopilot pre-positioned leaves it "manual" either way.
         self.command_seq: int = 0
         self.last_origin: str = "none"
+        self._origins: dict[int, str] = {}
         # Incremented per track started, so a track can be named rather than
         # inferred from "mode == track".
         self.track_id: int = 0
         self.track_end_reason: str = ""
 
-    def _journal(self, origin: str) -> None:
+    def _journal(self, origin: str) -> int:
+        """Record an accepted command. Always called synchronously at the
+        moment of acceptance, before any await — so the entry belongs to the
+        caller even if other commands land while this one's write is in
+        flight, and a caller can know its own entry is `seq_before + 1`."""
         self.command_seq += 1
         self.last_origin = origin
+        self._origins[self.command_seq] = origin
+        if len(self._origins) > 64:
+            for old in sorted(self._origins)[:-64]:
+                self._origins.pop(old, None)
+        return self.command_seq
+
+    def origin_of(self, seq: int) -> str | None:
+        """Who issued journal entry `seq`, if it is still remembered."""
+        return self._origins.get(seq)
 
     # --- lease -------------------------------------------------------------
     @property
@@ -110,15 +125,29 @@ class ControlService:
         log.info("control armed until %s", self._lease_expires.isoformat())
         return self.publish()
 
-    def release(self, origin: str = "operator") -> ControlState:
+    async def release(self, origin: str = "operator") -> ControlState:
+        """Give up the lease, and stop anything moving on the strength of it.
+
+        Release revokes consent exactly as expiry does, so it stops motion the
+        same way: a lease that lapses mid-slew stops the antenna, and one that
+        is handed back mid-slew must not leave it running. Only if this
+        service was driving — mode track or manual — because if it was idle,
+        whatever is moving the rotator is not us, and a stop could fight it.
+
+        Journaled synchronously, so anything running on the old lease notices
+        even if a new arm follows before it next looks.
+        """
+        was_driving = self._mode in ("track", "manual")
         self._lease_expires = None
         self._stop_track()
         self._mode = "idle"
-        # Release revokes consent, so it is journaled: anything running on the
-        # strength of the old lease must notice, even if a new arm follows
-        # before it next looks.
         self._journal(origin)
         log.info("control released")
+        if was_driving and self.rotator.verified:
+            try:
+                await self._write(self.rotator.client.stop, "stop (lease released)")
+            except Exception:
+                log.exception("could not stop the antenna on release")
         return self.publish()
 
     # --- gates -------------------------------------------------------------
@@ -199,17 +228,53 @@ class ControlService:
         blocked = self.blocked_by()
         if blocked:
             raise ControlRefused(blocked, "gate closed while the command was queued")
+        # The same "can we" checks _require_clear makes, made again here. The
+        # track loop writes for minutes after its one entry check, and if the
+        # poll loop marks the link down — or the rotator unidentified — while
+        # it runs, its next set_pos would reconnect to rotctld on its own and
+        # command a rotator nobody has verified since.
+        if not self.rotator.verified:
+            raise ControlRefused([], "rotator is not identified; refusing to command it")
+        if self.rotator.last is None or self.rotator.last.link != "up":
+            raise ControlRefused([], "rotator link is down")
 
     async def goto(self, az: float, el: float,
                    origin: str = "operator") -> ControlState:
+        # NaN survives every comparison and min/max clamp unchanged, and would
+        # reach rotctld as `set_pos nan nan`. Refuse it here, once, for every
+        # caller — HTTP, WebSocket and autopilot alike.
+        if not (math.isfinite(az) and math.isfinite(el)):
+            raise ControlRefused([], f"position must be finite, got az={az!r} el={el!r}")
         self._require_clear()
         self._stop_track()
-        await self._write(
-            lambda: self.rotator.client.set_position(az, el, guard=self._guard),
-            f"goto az={az:.1f} el={el:.1f}",
-        )
+        return await self._absolute(az, el, f"goto az={az:.1f} el={el:.1f}", origin)
+
+    async def _absolute(self, az: float, el: float, what: str,
+                        origin: str) -> ControlState:
+        """An accepted absolute move: journal and set the mode *now*, then write.
+
+        Both used to happen after the awaited write. While the write waited on
+        the rotctld lock, an operator's STOP or track could be journaled, and
+        this move's entry then landed on top of it — so autopilot read the
+        operator's command as its own, and the mode was overwritten to
+        "manual" with the operator's track still running.
+
+        If the write fails and nothing newer has been accepted since, nothing
+        is commanded: the track (if any) was already cancelled, so the mode is
+        idle — not "track" with no task, and not "manual" for a move never made.
+        """
         self._mode = "manual"
-        self._journal(origin)
+        seq = self._journal(origin)
+        try:
+            await self._write(
+                lambda: self.rotator.client.set_position(az, el, guard=self._guard),
+                what,
+            )
+        except BaseException:
+            if self.command_seq == seq:
+                self._mode = "idle"
+                self.publish()
+            raise
         return self.publish()
 
     async def stop(self, origin: str = "operator") -> ControlState:
@@ -237,14 +302,10 @@ class ControlService:
         """
         self._require_clear()
         self._stop_track()
-        await self._write(
-            lambda: self.rotator.client.set_position(
-                self.s.park_az, self.s.park_el, guard=self._guard),
-            f"park az={self.s.park_az:.1f} el={self.s.park_el:.1f}",
+        return await self._absolute(
+            self.s.park_az, self.s.park_el,
+            f"park az={self.s.park_az:.1f} el={self.s.park_el:.1f}", origin,
         )
-        self._mode = "manual"
-        self._journal(origin)
-        return self.publish()
 
     async def track(self, norad: int | None = None,
                     origin: str = "operator") -> ControlState:
@@ -308,6 +369,14 @@ class ControlService:
                 pos = self.predictor.position(norad)
                 if pos is None:
                     self.track_end_reason = f"no position for {norad}"
+                    break
+                if not (math.isfinite(pos.az) and math.isfinite(pos.el)):
+                    # Decayed or corrupt elements propagate to NaN, and NaN
+                    # fails `el < 0` as surely as it passes every clamp: it
+                    # would go to rotctld as `set_pos nan nan`. End the track.
+                    self.track_end_reason = f"non-finite position for {norad}"
+                    log.warning("track %s: non-finite position %r/%r — stopping",
+                                norad, pos.az, pos.el)
                     break
                 if pos.el < TRACK_MIN_EL_DEG:
                     # Below the horizon: hold position rather than chase a

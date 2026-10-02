@@ -12,12 +12,13 @@ before anyone plugs in a real antenna:
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 
 from ..config import Settings
 from .predictor import Predictor
-from .rotctld_client import RPRT_ETIMEOUT, Caps, RotctldError
+from .rotctld_client import RPRT_EINVAL, RPRT_ETIMEOUT, Caps, RotctldError
 
 SLEW_RATE_DEG_S = 4.0
 PARK_AZ_TRACKING_MARGIN = 2.0
@@ -86,6 +87,8 @@ class MockRotator:
     async def set_position(self, az: float, el: float, guard=None) -> None:
         if guard is not None:
             guard()
+        if not (math.isfinite(az) and math.isfinite(el)):
+            raise RotctldError(RPRT_EINVAL, f"non-finite position az={az!r} el={el!r}")
         self._commanded = self.clamp(az, el)
 
     async def stop(self) -> None:
