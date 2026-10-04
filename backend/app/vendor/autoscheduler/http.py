@@ -181,9 +181,20 @@ def request(
         if attempt < MAX_RETRIES - 1:
             time.sleep(BACKOFF_BASE_S * (attempt + 1))
 
+    # The last attempt's status is carried, not dropped. Without it a read
+    # that got 5xx every time looked exactly like one that never connected
+    # (status None) - the 2026-10-04 11:00Z chain died on "GET .../stations/
+    # failed after 3 attempts: ... -> HTTP 500" with no status to classify it
+    # by. Only a read reaches this point with a status (its 5xx): a write's
+    # last_exc is always a never-sent transport error, so a write still
+    # reports status None, which NetworkClient.schedule() reads as "nothing
+    # reached the server".
+    final = last_exc if isinstance(last_exc, SatnogsHTTPError) else None
     raise SatnogsHTTPError(
-        f"{method} {url} failed after {MAX_RETRIES} attempts: {last_exc}"
-    )
+        f"{method} {url} failed after {MAX_RETRIES} attempts: {last_exc}",
+        status=final.status if final is not None else None,
+        body=final.body if final is not None else "",
+    ) from last_exc
 
 
 def next_link(resp: requests.Response) -> str | None:

@@ -10,8 +10,9 @@ exactly that preview under the campaign's own caps, recorded with trigger
   on the busy path, where the slot has not happened and is retried;
 * it runs whatever the station's own run did (5024's run failing says nothing
   about the community stations; the own-station gate covers an Offline 5024);
-* a campaign failure never breaks the station loop, never touches the slot
-  mark, and is never retried;
+* a campaign failure never breaks the station loop and never touches the slot
+  mark; only a preview that failed on a transient SatNOGS error is retried,
+  in the background (tests/test_slot_retry.py), never a commit;
 * the toggle is its own consent: campaign_auto_commit_enabled is not consulted.
 
 Nothing here touches the network.
@@ -250,13 +251,19 @@ async def test_a_chained_cycle_does_not_queue_behind_a_manual_run(tmp_path, monk
     assert commits == []
 
 
-@pytest.mark.parametrize("preview, reason", [
-    ({"status": "error", "error": "DB down"}, "the campaign preview failed: DB down"),
-    ({"status": "ok", "items": []}, "the preview found nothing to book"),
+@pytest.mark.parametrize("preview, reason, retryable", [
+    ({"status": "error", "error": "DB down"}, "the campaign preview failed: DB down", False),
+    ({"status": "error", "error": "HTTP 500", "retryable": True},
+     "the campaign preview failed: HTTP 500", True),
+    ({"status": "error", "error": "HTTP 400", "retryable": False},
+     "the campaign preview failed: HTTP 400", False),
+    ({"status": "ok", "items": []}, "the preview found nothing to book", False),
     ({"status": "ok", "items": [], "stopped_early": {"reason": "rate limited"}},
-     "the preview was cut short before it planned anything (rate limited)"),
+     "the preview was cut short before it planned anything (rate limited)", False),
 ])
-async def test_nothing_to_commit_is_skipped(tmp_path, monkeypatch, preview, reason):
+async def test_nothing_to_commit_is_skipped(tmp_path, monkeypatch, preview, reason, retryable):
+    """Skipped, and retryable only when the preview itself said its failure
+    was transient - nothing to book is an answer, not a failure."""
     svc = make_campaign(tmp_path, monkeypatch)
 
     async def fake_preview():
@@ -264,4 +271,5 @@ async def test_nothing_to_commit_is_skipped(tmp_path, monkeypatch, preview, reas
     monkeypatch.setattr(svc, "preview_campaign", fake_preview)
     monkeypatch.setattr(svc, "commit_campaign", lambda **k: pytest.fail("nothing to commit"))
 
-    assert await svc.run_chained_cycle() == {"status": "skipped", "reason": reason}
+    assert await svc.run_chained_cycle() == {
+        "status": "skipped", "reason": reason, "retryable": retryable}

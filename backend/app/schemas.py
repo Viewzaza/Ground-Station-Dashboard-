@@ -330,6 +330,10 @@ class ScheduleRun(BaseModel):
     booked_state: Literal[
         "confirmed", "partial", "unconfirmed", "failed"
     ] = "unconfirmed"
+    # autoscheduler_cli's cause code ("network_download", "station_offline",
+    # ...) when the tool's transcript named one. The auto-run loop retries
+    # on it - see schedule_service.run_is_retryable.
+    failure_code: str | None = None
     # Passes the run found already on the station's calendar. The tool prints
     # these with zeroed azimuth/elevation, so they are kept apart rather than
     # rendered as if they were planned now.
@@ -419,6 +423,9 @@ class CampaignPreview(BaseModel):
     # Absent on previews cached before it existed.
     own_station: CampaignOwnStation | None = None
     error: str | None = None
+    # On an "error" preview only: whether it failed on a transient SatNOGS
+    # error (unreachable, 5xx) that the auto-run chain and the timer retry.
+    retryable: bool = False
 
 
 class CampaignCommitRequest(BaseModel):

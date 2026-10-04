@@ -89,6 +89,37 @@ _REAL_ONLY_MARKER = "schedule_real_only"
 # one on the board reads as a booking that never happened.
 _NOT_REAL_BOOKED_STATES = ("mock", "dry_run")
 
+# The one station-run failure the auto-run loop runs again by itself
+# (Scheduler._station_retry_loop). See run_is_retryable for why only this.
+RETRYABLE_RUN_FAILURE = "network_download"
+
+
+def run_is_retryable(result: dict) -> bool:
+    """Whether a finished run_plan() result may simply be run again.
+
+    Only a run that could not read the station's existing schedule from
+    SatNOGS Network, and booked nothing. That refusal is the official
+    auto-scheduler's own safety check: it downloads the station's calendar
+    BEFORE planning and exits (sys.exit(1), both upstream call sites) rather
+    than book blind, so no booking POST can have gone out - and a flaky
+    SatNOGS usually answers the next try (2026-10-04: 12 of 126 requests got
+    HTTP 500, the 11:00Z slot was lost to one of them, and the next slot was
+    12 hours away). booked_state "failed" is _reconcile's word for "the tool
+    never reached its booking step"; it is required too, as a backstop to the
+    transcript match.
+
+    Every other failure is either not SatNOGS being flaky or may have
+    booked: station_offline / no_permission / token_* are answers about the
+    station or the account, and batch_failed / pass_failed / crashed /
+    killed_* can all come after a POST.
+    """
+    return (
+        result.get("status") == "error"
+        and result.get("booked") == 0
+        and result.get("booked_state") == "failed"
+        and result.get("failure_code") == RETRYABLE_RUN_FAILURE
+    )
+
 
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
@@ -600,6 +631,9 @@ class ScheduleService:
             "planned": 0,
             "booked": 0,
             "booked_state": "failed",
+            # Refused before the tool ran, interrupted, or an exception here:
+            # no transcript was classified.
+            "failure_code": None,
             "already_scheduled": [],
             "efficiency": None,
             "exit_code": None,
@@ -823,6 +857,11 @@ class ScheduleService:
             "planned": len(parsed.planned),
             "booked": booked,
             "booked_state": booked_state,
+            # The cause classify_failure() read from the transcript (or
+            # killed_*), whatever the status: a pass_failed run with a table
+            # is "ok_with_warnings" and still says why. What the auto-run loop
+            # decides retries on - see run_is_retryable.
+            "failure_code": outcome.failure[0] if outcome.failure is not None else None,
             "already_scheduled": already,
             "efficiency": parsed.efficiency,
             "exit_code": outcome.exit_code,

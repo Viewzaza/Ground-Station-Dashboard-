@@ -322,11 +322,22 @@ one, and a local editable install would break the Docker build context
     Pinned by `tests/test_jobs_calendar.py`, `tests/test_booking_writes.py`
     and `tests/test_transport_safety.py`.
 
+19. **`http.py`: a read that failed on every attempt keeps the last status.**
+    The final "failed after N attempts" error used to carry no status, so a
+    read that got HTTP 500 three times was indistinguishable from one that
+    never connected. It now carries the last attempt's status and body (and
+    chains it as `__cause__`), which is what lets `CampaignService` call a
+    flaky SatNOGS (5xx) worth retrying and a 4xx not - on 2026-10-04 a
+    `/stations/` read answered 500 three times running and cost the whole
+    11:00Z campaign slot. Writes are unaffected: their last failure is always
+    a never-sent transport error, so they still report `status=None`.
+    Pinned by `tests/test_slot_retry.py`.
+
 ## TODO
 
 - Push `satnogs-autoscheduler` to a real GitHub remote and replace this
   vendored copy with a normal dependency (submodule or pinned pip package).
-- Upstream patches 1-6, 8-11, 14, 16 and 18 above to that repo. 7, 12, 13, 15
+- Upstream patches 1-6, 8-11, 14, 16, 18 and 19 above to that repo. 7, 12, 13, 15
   and 17 are `campaign.py`, which upstream does not have (see 7), so they are
   not upstream material. 8 in particular is a plain bug for any consumer that
   books on a station it does not own; 11 and 16 matter to any consumer that

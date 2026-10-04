@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+import requests
+
 from ..config import Settings
 from ..vendor.autoscheduler.cache import Cache
 from ..vendor.autoscheduler.campaign import (
@@ -28,6 +30,7 @@ from ..vendor.autoscheduler.campaign import (
 )
 from ..vendor.autoscheduler.config import Settings as AutoSettings
 from ..vendor.autoscheduler.db_client import DbClient
+from ..vendor.autoscheduler.http import SatnogsHTTPError, SatnogsOutcomeUnknown
 from ..vendor.autoscheduler.network_client import (
     NetworkClient, RateLimitedError, to_schedule_item,
 )
@@ -87,6 +90,11 @@ _NO_PERMISSION = "No permission to schedule observations"
 # or a cross-check) held the single-flight guard. The timer retries soon on it
 # instead of sleeping a whole campaign_poll_s - see Scheduler._campaign_loop.
 AUTO_CYCLE_BUSY = "busy"
+
+# What run_auto_cycle() returns when its preview failed on a transient SatNOGS
+# error (is_transient_error): nothing was sent, so the timer runs the cycle
+# again in minutes rather than a day - see Scheduler._campaign_loop.
+AUTO_CYCLE_RETRY = "retry"
 
 # How a stale-commit refusal names the commit that booked in the meantime.
 _TRIGGER_LABELS = {
@@ -217,6 +225,39 @@ def _chunks_by_transmitter(items: list[dict], preference: list[str],
         group = groups[uuid]
         chunks.extend(group[i:i + size] for i in range(0, len(group), size))
     return chunks
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    """Whether a failed campaign preview is worth running again in a few
+    minutes: SatNOGS was unreachable or answered 5xx.
+
+    Decided on the exception, never its text. SatNOGS is flaky rather than
+    down: in the 90 minutes after the 2026-10-04 11:00Z slot lost its chain
+    to "GET .../stations/ failed after 3 attempts: ... -> HTTP 500", 12 of our
+    126 requests got a 500 and the rest a 200. That error reaches
+    preview_campaign as http.request's own SatnogsHTTPError, now carrying
+    the last attempt's status and chained from the last attempt's error
+    (VENDORED.md patch 19). Status None counts only when that cause is a
+    requests transport error - the last attempt got no answer at all. A
+    status-less SatnogsHTTPError without one is paginate's "expected a list
+    from ..., got dict": SatNOGS did answer 200, just not with a list, and
+    the same read gets the same answer in ten minutes.
+
+    Not transient: RateLimitedError (the budget, or a Retry-After, applies to
+    every request still to come - asking again in ten minutes is exactly what
+    it says not to do), any other 4xx (the request itself is wrong), and
+    anything that is not a transport failure at all (ValueError, KeyError, a
+    RuntimeError from the cache or catalogue). SatnogsOutcomeUnknown is a
+    write's and cannot come out of a preview; it is excluded anyway, since
+    "may have booked" must never lead to anything being repeated.
+    """
+    if isinstance(exc, (RateLimitedError, SatnogsOutcomeUnknown)):
+        return False
+    if isinstance(exc, SatnogsHTTPError):
+        if exc.status is not None:
+            return exc.status >= 500
+        return isinstance(exc.__cause__, requests.exceptions.RequestException)
+    return isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
 
 
 def _calendar_sources(network) -> dict[str, int]:
@@ -499,6 +540,10 @@ class CampaignService:
                 "status": "error", "error": str(exc),
                 "generated_utc": datetime.now(timezone.utc).isoformat(),
                 "own_station": self.own_station_state(),
+                # A preview sends nothing, so any failure here is safe to
+                # repeat; this says whether repeating it soon can help. The
+                # auto-run chain and the timer retry on it.
+                "retryable": is_transient_error(exc),
             }
             self._write_json(self.preview_path, result)
             self.on_state("campaign", "degraded", str(exc))
@@ -669,6 +714,12 @@ class CampaignService:
         self._write_json(self.last_submit_path, {
             "at": datetime.now(timezone.utc).isoformat(), "trigger": trigger,
         })
+
+    def last_submit_at(self) -> datetime | None:
+        """When this process last started a booking POST (see _note_submit),
+        or None if it never has - or the record is unreadable."""
+        last = self._read_json(self.last_submit_path, None)
+        return _parse_utc(last.get("at")) if isinstance(last, dict) else None
 
     def stale_commit(self, preview_generated_utc: str | None,
                      trigger: str = "manual") -> dict | None:
@@ -1296,19 +1347,25 @@ class CampaignService:
 
         Returns AUTO_CYCLE_BUSY when the preview was refused because another
         campaign operation held the guard - nothing ran, so the timer retries
-        shortly instead of writing the cycle off - and "done" otherwise."""
+        shortly instead of writing the cycle off - AUTO_CYCLE_RETRY when the
+        preview failed on a transient SatNOGS error (it sent nothing, and a
+        flaky SatNOGS usually answers the next try), and "done" otherwise."""
         preview = await self.preview_campaign()
         if preview.get("status") == "running":
             return AUTO_CYCLE_BUSY
         # Whatever came of the preview, the timer's cycle happened: this is
-        # what the next restart's delay is measured from.
+        # what the next restart's delay is measured from. A retry writes it
+        # again, so a reload mid-retry waits a full period from the latest
+        # attempt: retries live in this process only and never fire at boot.
         self._write_json(self.auto_cycle_path, {
             "generated_utc": preview.get("generated_utc")
             or datetime.now(timezone.utc).isoformat(),
         })
+        if preview.get("status") == "error":
+            return AUTO_CYCLE_RETRY if preview.get("retryable") else "done"
         if not self.schedule_service.campaign_auto_commit_enabled():
             return "done"
-        if preview.get("status") == "error" or not preview.get("items"):
+        if not preview.get("items"):
             return "done"
         await self.commit_campaign(items=preview["items"], trigger="auto",
                                    preview_generated_utc=preview.get("generated_utc"))
@@ -1342,14 +1399,19 @@ class CampaignService:
             # covers the window.
             return {"status": "running"}
         if status == "error":
+            # The one skip worth retrying, and only on a transient SatNOGS
+            # error: the preview failed before anything was sent (see
+            # Scheduler._chain_retry_loop).
             return {"status": "skipped",
-                    "reason": f"the campaign preview failed: {preview.get('error')}"}
+                    "reason": f"the campaign preview failed: {preview.get('error')}",
+                    "retryable": bool(preview.get("retryable"))}
         if not preview.get("items"):
             early = preview.get("stopped_early") or {}
             return {"status": "skipped",
                     "reason": ("the preview was cut short before it planned anything "
                                f"({early.get('reason', 'unknown reason')})") if early
-                    else "the preview found nothing to book"}
+                    else "the preview found nothing to book",
+                    "retryable": False}
         return await self.commit_campaign(items=preview["items"], trigger="chained",
                                           preview_generated_utc=preview.get("generated_utc"))
 
