@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 
 from ..config import Settings
 from ..hub import hub
@@ -107,6 +108,7 @@ class RotatorService:
             stale_s=0.0,
         )
         self.last = sample
+        self._last_ok_mono = time.monotonic()
         self.on_state("rotctld", "ok")
         hub.publish("rotator", sample.model_dump(mode="json"))
         self._publish_pointing(sample)
@@ -140,7 +142,25 @@ class RotatorService:
         })
 
     def _down(self, detail: str) -> None:
+        """Mark the link down — in `last`, not only on the wire.
+
+        The down copy used to be published and dropped, so `last` went on
+        saying "up" through the outage, and everything that reads it believed
+        that: the interlock's "rotator link is down" check, the track loop's
+        under-lock guard, the planner's origin. The one remaining protection
+        was `verified`, and a reconnect sets that again as soon as dump_caps
+        answers — which rotctld does from compiled-in capabilities with the
+        SPID controller powered off. For the 2.8-4.6 s a failing get_pos then
+        takes, a command passed both checks. Assigning it here means a refusal
+        until the next position actually read, which is the only evidence that
+        the rotator is there.
+
+        `stale_s` is how long since that last good read; the position itself
+        is kept, so a reader can still say where the antenna was.
+        """
         if self.last is not None:
-            stale = self.last.model_copy(update={"link": "down", "stale_s": 0.0})
-            hub.publish("rotator", stale.model_dump(mode="json"))
+            ok_at = getattr(self, "_last_ok_mono", None)
+            stale_s = round(time.monotonic() - ok_at, 1) if ok_at is not None else 0.0
+            self.last = self.last.model_copy(update={"link": "down", "stale_s": stale_s})
+            hub.publish("rotator", self.last.model_dump(mode="json"))
         self.on_state("rotctld", "down", detail)

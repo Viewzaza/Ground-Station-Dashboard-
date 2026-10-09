@@ -128,6 +128,33 @@ class ControlService:
         log.info("control armed until %s", self._lease_expires.isoformat())
         return self.publish()
 
+    def extend(self) -> ControlState:
+        """Push a lease that is held *now* out to a full GS_CONTROL_LEASE_S.
+
+        What re-arming already did, under a name that cannot be mistaken for
+        an arm: it is refused unless a lease is live. An EXTEND click from a
+        panel that has not yet seen the lease lapse therefore lands as a
+        refusal, not as a fresh lease nobody consciously took — an operator
+        who let it run out presses ARM, and sees that they did.
+
+        Not journaled, exactly as re-arming is not. Extending consent is not a
+        command to the antenna, and autopilot reads the journal to decide
+        whether an operator has taken over; an extend that moved it would
+        disengage the autopilot it was pressed to keep running. And, like
+        arm(), it does not check the other gates: a lease kept while a gate is
+        shut is how an operator waits a SatNOGS job out.
+        """
+        if not self.s.rotator_control_enabled:
+            raise ControlRefused(["kill_switch"],
+                                 "rotator control is disabled in configuration")
+        if not self.armed:
+            raise ControlRefused(["armed"], "no lease to extend — press ARM")
+        self._lease_expires = datetime.now(timezone.utc) + timedelta(
+            seconds=self.s.control_lease_s
+        )
+        log.info("control lease extended until %s", self._lease_expires.isoformat())
+        return self.publish()
+
     async def release(self, origin: str = "operator") -> ControlState:
         """Give up the lease, and stop anything moving on the strength of it.
 

@@ -55,13 +55,52 @@ async def get_control(request: Request) -> dict:
     payload["lease_s"] = service.s.control_lease_s
     payload["deadband_deg"] = service.s.track_deadband_deg
     payload["park"] = {"az": service.s.park_az, "el": service.s.park_el}
+    payload["limits"] = _limits(service)
     return payload
+
+
+def _limits(service) -> dict | None:
+    """The travel limits in force, for the panel's click-to-fill.
+
+    The client's own limits(): the configured station limits
+    (GS_ROT_LIMIT_*), narrowed by the compiled caps once dump_caps has
+    answered — on station 5024, -90..450 inside the -180..540 dump_caps
+    claims. Before it has answered, RotctldClient reports the configured
+    limits alone, and MockRotator always has caps, so with either shipped
+    client this is never None, identified or not. A click on the polar plot
+    is a compass bearing, and the panel turns it into the representation
+    nearest where the antenna is *inside these*; chosen against the compiled
+    range, it would fill in a branch the clamp then silently moves.
+
+    The caps and None answers are for a client without limits(), and none
+    ships today. The panel falls back to the station's range for None.
+    """
+    client = service.rotator.client
+    limits = getattr(client, "limits", None)
+    if callable(limits):
+        min_az, max_az, min_el, max_el = limits()[:4]
+    elif client.caps is not None:
+        caps = client.caps
+        min_az, max_az, min_el, max_el = caps.min_az, caps.max_az, caps.min_el, caps.max_el
+    else:
+        return None
+    return {"min_az": min_az, "max_az": max_az, "min_el": min_el, "max_el": max_el}
 
 
 @router.post("/control/arm")
 async def arm(request: Request) -> dict:
     try:
         return _service(request).arm().model_dump(mode="json")
+    except ControlRefused as exc:
+        raise _refused(exc)
+
+
+@router.post("/control/extend")
+async def extend(request: Request) -> dict:
+    """A live lease, pushed out to a full one. Refused with `armed` while there
+    is none: it never becomes an arm — see ControlService.extend."""
+    try:
+        return _service(request).extend().model_dump(mode="json")
     except ControlRefused as exc:
         raise _refused(exc)
 

@@ -9,6 +9,7 @@
 
 import { api } from './core/api.js';
 import { ws } from './core/ws.js';
+import { mountKeys } from './core/keys.js';
 import { store, set, setStatus } from './core/store.js';
 import { Orbit } from './lib/orbit.js';
 import { Map2D } from './panels/map2d.js';
@@ -47,6 +48,7 @@ async function boot() {
   mountGrafana();
   mountPasses();
   mountSatnogs();
+  mountKeys();
   mountControl();
   mountPlan();
   mountRadio();

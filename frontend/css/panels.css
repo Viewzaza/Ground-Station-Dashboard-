@@ -722,3 +722,67 @@ a.tlm-row:focus-visible { outline: 2px solid var(--track); outline-offset: -2px;
   .pl-list { max-height: 60vh; }
   .pl-row { column-gap: 5px; padding: 3px 4px; }
 }
+
+/* ── rotator control: EXTEND, the lease, click-to-fill, the keyboard ──────
+   EXTEND sits between RELEASE and TRACK while a lease is held. It keeps
+   consent alive rather than changing what the antenna does, so it borrows
+   the lease's amber as a ring only — never a fill, which on this row belongs
+   to STOP alone. */
+.ctl-btn.extend { border-color: var(--warn); }
+.ctl-btn.extend:hover:not(:disabled) { border-color: var(--ink); }
+
+/* The countdown escalates: amber with three minutes left, while there is
+   still time to decide to EXTEND, red in the last minute. `expiring` was
+   amber until there was a step before it. */
+.ctl-lease.warn { color: var(--warn); }
+.ctl-lease.expiring { color: var(--bad); font-weight: 600; }
+/* While autopilot is engaged the lease line also says when it stands down,
+   which is too long for the end of the gate row: it takes a line of its own
+   and wraps there, and only the countdown carries the colour. */
+.ctl-lease.ap { flex-basis: 100%; margin-left: 0; white-space: normal; }
+.ctl-lease .ctl-lease-ap { color: var(--muted); font-weight: 400; }
+
+/* "filled from plot — press GO to move" is information, not a refusal, so it
+   is ink rather than the notice's red. */
+.ctl-notice.ctl-fill-note { color: var(--ink-2); }
+/* The notice keeps its line when it has nothing to say. The plot above is
+   flex:1, so a notice that came and went took its height from the plot —
+   and a fill note comes the moment the plot is clicked, moving the sky out
+   from under the pointer that is about to click it again to refine. */
+.ctl-notice { min-height: 1.3em; }
+.polar.fillable { cursor: crosshair; }
+
+/* The command row may wrap rather than clip. Five buttons, one of them
+   "TRACK KNACKSAT-2", are wider than the right-hand column at its 360px
+   floor, and nowrap labels on flex:1 buttons cannot shrink below their text:
+   without wrap, STOP is the button that goes off the edge. */
+.ctl-row.ctl-cmds { flex-wrap: wrap; }
+
+/* The key list. A native modal dialog, so it is in the top layer above every
+   panel and Esc is the browser's own. */
+.keys-help {
+  max-width: 420px; width: calc(100% - 32px); padding: 0;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--rule); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.keys-help::backdrop { background: rgba(14, 26, 31, .28); }
+.keys-help-body { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.keys-help h2 {
+  margin: 0; font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+.keys-help-list { border-collapse: collapse; font-size: 12px; width: 100%; }
+.keys-help-list td { padding: 4px 6px; border-top: 1px solid var(--rule-soft); vertical-align: baseline; }
+.keys-help-list kbd {
+  font-family: var(--mono); font-size: 11px; white-space: nowrap;
+  padding: 1px 5px; border: 1px solid var(--rule); border-radius: 3px; background: var(--sunk);
+}
+.keys-help-list .keys-help-when { color: var(--ok); text-align: right; white-space: nowrap; font-size: 11px; }
+.keys-help-list tr.idle td { color: var(--ink-3); }
+.keys-help-list tr.idle .keys-help-when { color: var(--ink-4); }
+.keys-help-note { margin: 0; font-size: 11px; color: var(--ink-3); line-height: 1.4; }
+.keys-help-close { flex: none; align-self: flex-end; padding: 3px 14px; }
+
+@media (max-width: 1000px) {
+  .ctl-row { flex-wrap: wrap; }
+}

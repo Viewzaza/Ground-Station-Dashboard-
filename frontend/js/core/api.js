@@ -70,6 +70,7 @@ export const api = {
   park:         ()            => post('/api/control/park'),
   track:        (norad)       => post('/api/control/track', { norad }),
   stopRotator:  ()            => post('/api/control/stop'),
+  extend:       ()            => post('/api/control/extend'),
 
   // Reading the plan is always safe; engaging autopilot is refused with a 409
   // unless an operator already holds a lease, which arrives as a Refused.

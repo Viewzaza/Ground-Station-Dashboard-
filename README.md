@@ -580,6 +580,78 @@ On site this refuses correctly today: station 5024 is connected, so
 has yet commanded the real antenna to move. Before it does, someone should have
 eyes on the mast and the station should be out of the SatNOGS schedule.
 
+### EXTEND, the keyboard, and a link that is down
+
+**EXTEND keeps a lease without tearing anything down.** Once armed, ARM becomes
+RELEASE, and RELEASE stops the antenna and disengages autopilot — so with no
+other button, autopilot could not outlive one `GS_CONTROL_LEASE_S`. EXTEND sits
+between RELEASE and TRACK while a lease is held. `POST /api/control/extend`
+pushes a *live* lease out to a full one and is refused with `armed` when there
+is none, so a click that raced the expiry is told "no lease to extend — press
+ARM" instead of quietly becoming an arm nobody consciously took. Like re-arming
+it is not journaled, so it neither disengages autopilot nor reads as an
+operator taking over; like ARM it does not check the other gates, which is how
+an operator waits a SatNOGS job out. Only a press extends — no timer, reconnect
+or key repeat calls it, and a lease nobody is watching runs out. The countdown
+turns amber with three minutes left and red in the last one. While autopilot is
+engaged it also says when autopilot will stand down and, if that is before the
+LOS of the pass it is working (or else the next planned one), by how long.
+
+**A typed position survives live frames.** The panel used to be rebuilt from a
+template on every `control` frame — ARM, a gate flip, any autopilot command —
+and the template said `value="0"`. A typed AZ/EL became 0/0 between typing it
+and pressing GO, and focus dropped to the page. It is now built once and
+updated in place. Enter in AZ or EL is GO, and only when GO is enabled.
+
+**Clicking the polar plot fills AZ/EL and sends nothing.** GO is still a
+separate press. AZ is filled with the representation of the clicked bearing
+nearest where the antenna is now, inside the limits in force — `GET
+/api/control` reports them as `limits` — because a compass bearing sends a SPID
+the long way round: due west from an antenna at 0 is −90, not 270.
+The note that says so does not move the plot: the notice line under the
+buttons is kept whether or not it has anything to say, so a second click to
+refine lands on the same sky as the first.
+
+**The keyboard reaches only the safe direction.** `?` lists every binding and
+whether it would do anything right now.
+
+| Key | Does |
+|---|---|
+| Shift+S | STOP. While satnogs-client is connected — SatNOGS may be the one driving — a second Shift+S within 2 s is needed |
+| Shift+E | EXTEND, only while armed |
+| Shift+D | DISENGAGE autopilot, only while engaged |
+| F | full screen on / off |
+
+No shortcut arms, engages, goes, tracks or parks. Keys match the physical key
+(`KeyboardEvent.code`), so they keep working with the Thai layout active; they
+are ignored while typing in a text field but not in the AZ/EL number boxes, and
+key auto-repeat is never a second press.
+
+Past the shortcuts, a key reaches a control in two ways only, both on purpose:
+Enter in AZ or EL is GO, and a control button the operator has Tabbed to
+answers Enter or Space — Tab rings it, so the key presses what they can see it
+will, once however long it is held. A button clicked with the mouse keeps focus
+as well, with no ring to show it, and the browser would make the next stray
+Enter another press of it: a RELEASE clicked an hour ago became an ARM, the
+same key again a RELEASE. So a button that was clicked — even after Tab
+reached it — pressed and dragged off, or handed focus back by the key list
+answers no key: the key is swallowed, and the focus goes with it.
+`tests/test_control_panel_keys.py` drives the panel through each of those in
+Node, on a fake page that does what Chromium does with a click or a key; it is
+skipped where Node is not installed.
+
+**A rotator link that is down reads as down, to everything.**
+`RotatorService` used to publish a link-down sample and go on saying "up" in
+`last`, which is what the interlock, the track loop's guard and the planner
+read. A reconnect sets `verified` again as soon as `dump_caps` answers — which
+rotctld does from compiled-in capabilities with the SPID controller powered off
+— so for the 2.8–4.6 s a failing `get_pos` takes, a command passed both checks.
+Now `last` stays down, with `stale_s` counting from the last good read, until a
+position has actually been read: `GET /api/rotator` reports `link: "down"`,
+every move is refused with "rotator link is down", and the planner treats the
+antenna's position as unknown. `tests/test_rotator_link.py` drives that window
+through the real poll loop.
+
 ## Observation planner
 
 One rotator and one radio means passes compete. The planner decides which ones
