@@ -30,6 +30,7 @@ since closed.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import math
 from datetime import datetime, timedelta, timezone
@@ -80,6 +81,10 @@ class ControlService:
         self.command_seq: int = 0
         self.last_origin: str = "none"
         self._origins: dict[int, str] = {}
+        # The same journal with what each command was and when it was
+        # accepted, for the station logbook. History only: nothing here reads
+        # it to decide anything, which is why it can be longer than _origins.
+        self._journal_log: collections.deque = collections.deque(maxlen=256)
         # Incremented per track started, so a track can be named rather than
         # inferred from "mode == track".
         self.track_id: int = 0
@@ -88,22 +93,40 @@ class ControlService:
         # so each lapse is acted on once.
         self._lapse_handled: datetime | None = None
 
-    def _journal(self, origin: str) -> int:
+    def _journal(self, origin: str, what: str = "") -> int:
         """Record an accepted command. Always called synchronously at the
         moment of acceptance, before any await — so the entry belongs to the
         caller even if other commands land while this one's write is in
-        flight, and a caller can know its own entry is `seq_before + 1`."""
+        flight, and a caller can know its own entry is `seq_before + 1`.
+
+        `what` and the time are kept for the logbook. They are stamped here,
+        at acceptance, not when the write lands: a goto queued behind a slow
+        poll was still accepted when the operator pressed GO."""
         self.command_seq += 1
         self.last_origin = origin
         self._origins[self.command_seq] = origin
         if len(self._origins) > 64:
             for old in sorted(self._origins)[:-64]:
                 self._origins.pop(old, None)
+        self._journal_log.append({
+            "seq": self.command_seq,
+            "origin": origin,
+            "what": what,
+            "at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        })
         return self.command_seq
 
     def origin_of(self, seq: int) -> str | None:
         """Who issued journal entry `seq`, if it is still remembered."""
         return self._origins.get(seq)
+
+    def journal_since(self, seq: int) -> list[dict]:
+        """Every remembered journal entry after `seq`, oldest first, as copies.
+
+        For the logbook, which reads it after each control frame to say what
+        each new command was. An entry older than the last 256 is gone, and
+        the caller can see that from the gap in `seq`."""
+        return [dict(entry) for entry in self._journal_log if entry["seq"] > seq]
 
     # --- lease -------------------------------------------------------------
     @property
@@ -172,7 +195,7 @@ class ControlService:
         self._lease_expires = None
         self._stop_track()
         self._mode = "idle"
-        self._journal(origin)
+        self._journal(origin, "release")
         log.info("control released")
         if was_driving and self.rotator.verified and not self.satnogs_may_drive():
             try:
@@ -206,7 +229,7 @@ class ControlService:
         if self.satnogs_may_drive() or not self.rotator.verified:
             self.publish()
             return
-        self._journal("lease")
+        self._journal("lease", "stop (lease expired)")
         try:
             await self._write(self.rotator.client.stop, "stop (lease expired)")
         except Exception:
@@ -342,7 +365,7 @@ class ControlService:
         idle — not "track" with no task, and not "manual" for a move never made.
         """
         self._mode = "manual"
-        seq = self._journal(origin)
+        seq = self._journal(origin, what)
         try:
             await self._write(
                 lambda: self.rotator.client.set_position(az, el, guard=self._guard),
@@ -364,7 +387,7 @@ class ControlService:
         """
         self._stop_track()
         self._mode = "idle"
-        self._journal(origin)
+        self._journal(origin, "stop")
         if self.rotator.verified:
             await self._write(self.rotator.client.stop, "stop")
         return self.publish()
@@ -397,7 +420,7 @@ class ControlService:
         self._target_norad = norad
         self._mode = "track"
         self._track_task = asyncio.create_task(self._track_loop(norad, self.track_id))
-        self._journal(origin)
+        self._journal(origin, f"track {norad}")
         log.info("tracking %s (track %d, %s)", norad, self.track_id, origin)
         return self.publish()
 

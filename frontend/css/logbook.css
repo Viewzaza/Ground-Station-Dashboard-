@@ -1,0 +1,178 @@
+/* The station logbook page.
+
+   Mobile first, because the likeliest time to read this is on a phone in the
+   middle of something going wrong: one column, 16px gutters, every line wraps
+   rather than scrolling sideways. Wider screens get the time, kind and text
+   side by side in fixed columns, so a run of entries scans as a table.
+
+   It reuses tokens.css and nothing else of the dashboard's: the vocabulary
+   (chrome bar, sunk wells, the three state inks) is the same, the layout is
+   not, and pulling in layout.css would bring the wall's fixed grid with it. */
+
+/* tokens.css pins the document to the viewport for the wall display. This
+   page is a document and scrolls like one. */
+html, body { height: auto; overflow: visible; }
+body { background: var(--surface); min-width: 0; }
+
+/* ---------- top bar ---------- */
+.lb-top {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px;
+  padding: 10px 16px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--rule);
+  box-shadow: var(--shadow);
+}
+.lb-id { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; min-width: 0; margin-right: auto; }
+.lb-id h1 { font-size: 14px; letter-spacing: .14em; white-space: nowrap; }
+.lb-station { color: var(--ink-3); font-size: 11px; letter-spacing: .08em; }
+
+/* Whether the tail is live. "reconnecting" is the state that matters: a page
+   that silently stopped updating would read as a quiet station. */
+.lb-live { display: flex; align-items: center; gap: 6px; font-size: 10px; letter-spacing: .1em; color: var(--ink-3); white-space: nowrap; }
+.lb-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-4); }
+.lb-live[data-state="live"] { color: var(--ok); }
+.lb-live[data-state="live"] .lb-dot { background: var(--ok); }
+.lb-live[data-state="reconnecting"] { color: var(--warn); }
+.lb-live[data-state="reconnecting"] .lb-dot { background: var(--warn); }
+
+.lb-wall { color: var(--ink-3); font-size: 11px; text-decoration: none; white-space: nowrap; }
+.lb-wall:hover { color: var(--track); text-decoration: underline; }
+.lb-wall:focus-visible, .lb-dl:focus-visible, .lb-chip:focus-visible,
+#lb-older:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
+
+/* ---------- filters ---------- */
+.lb-tools {
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: 1100px; margin: 0 auto; padding: 12px 16px 4px;
+}
+.lb-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* The dashboard's header chips, as buttons: a pressed one is the track tint
+   the selector uses for its selection, so "which one is on" reads the same. */
+.lb-chip {
+  font: inherit; font-size: 11px; letter-spacing: .06em;
+  padding: 4px 10px; border-radius: 3px; cursor: pointer;
+  border: 1px solid var(--rule); background: var(--panel); color: var(--ink-2);
+}
+.lb-chip:hover { background: var(--sunk); }
+.lb-chip[aria-pressed="true"] {
+  color: var(--track); border-color: var(--track);
+  background: rgba(0, 134, 173, .10);
+  font-weight: 600;
+}
+
+.lb-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#lb-q, #lb-day {
+  font: inherit; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 4px;
+  padding: 6px 8px; min-width: 0;
+}
+#lb-q { flex: 1 1 12em; }
+#lb-day { flex: 0 1 auto; max-width: 100%; }
+#lb-q:focus, #lb-day:focus { outline: none; border-color: var(--track); }
+.lb-dl {
+  font-size: 11px; color: var(--track); text-decoration: none; white-space: nowrap;
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+}
+.lb-dl:hover { text-decoration: underline; }
+.lb-note { margin: 0; font-size: 11px; color: var(--ink-3); }
+
+/* ---------- the list ---------- */
+.lb-main { max-width: 1100px; margin: 0 auto; padding: 4px 16px 32px; }
+.lb-error {
+  margin: 8px 0; padding: 8px 10px; border-radius: 4px;
+  color: var(--bad); border: 1px solid var(--bad);
+  background: color-mix(in srgb, var(--bad) 8%, var(--panel));
+  overflow-wrap: anywhere;
+}
+.lb-empty { color: var(--ink-3); padding: 24px 0; }
+
+.lb-day { margin-top: 14px; }
+.lb-day h2 {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-3);
+  padding: 0 2px 6px; border-bottom: 1px solid var(--rule);
+}
+.lb-count { margin-left: auto; font-weight: 400; letter-spacing: 0; color: var(--ink-4); }
+.lb-day ol {
+  list-style: none; margin: 0; padding: 0;
+  background: var(--panel); border: 1px solid var(--rule); border-top: 0;
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
+/* Phone: time and kind on the first line, the sentence under them at full
+   width. Severity is the left edge, so a column of entries can be scanned for
+   colour before a word of it is read. */
+.ev {
+  padding: 7px 10px 7px 12px;
+  border-bottom: 1px solid var(--rule-soft);
+  box-shadow: inset 3px 0 0 transparent;
+  min-width: 0;
+}
+.ev:last-child { border-bottom: 0; }
+.ev-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 1px 10px;
+  min-width: 0;
+}
+.ev time { font-family: var(--mono); font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.ev-kind {
+  font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+  overflow-wrap: anywhere; align-self: center;
+}
+.ev-text, .ev-meta { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
+.ev-text { color: var(--ink); }
+.ev-meta { font-size: 11px; color: var(--ink-3); }
+
+.ev.sev-warn { box-shadow: inset 3px 0 0 var(--warn); background: color-mix(in srgb, var(--warn) 5%, var(--panel)); }
+.ev.sev-warn .ev-kind { color: var(--warn); }
+.ev.sev-bad { box-shadow: inset 3px 0 0 var(--bad); background: color-mix(in srgb, var(--bad) 6%, var(--panel)); }
+.ev.sev-bad .ev-kind { color: var(--bad); }
+/* Boots and shutdowns are the page's punctuation: where one run of the
+   backend ends and the next begins. */
+.ev.k-boot, .ev.k-shutdown { background: var(--sunk); }
+.ev.k-boot .ev-text, .ev.k-shutdown .ev-text { font-weight: 600; }
+
+/* A row with data is its own <summary>: the whole row opens it, and a small
+   caret at the end of the first line says that it can. */
+summary.ev-row { cursor: pointer; list-style: none; }
+summary.ev-row::-webkit-details-marker { display: none; }
+summary.ev-row:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; border-radius: 2px; }
+.ev-more { grid-column: 3; grid-row: 1; align-self: center; font-style: normal; color: var(--ink-4); font-size: 10px; }
+.ev-more::before { content: "▸"; }
+details[open] > summary .ev-more::before { content: "▾"; }
+summary.ev-row:hover .ev-more { color: var(--track); }
+.ev pre {
+  margin: 6px 0 2px; padding: 6px 8px; border-radius: 3px;
+  background: var(--sunk); color: var(--ink-2);
+  font: 11px/1.45 var(--mono);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 40vh; overflow-y: auto;
+}
+
+.lb-foot { display: flex; align-items: center; gap: 12px; padding: 14px 2px; }
+#lb-older {
+  font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--rule); background: var(--chrome); color: var(--ink);
+}
+#lb-older:hover { background: var(--chrome-2); }
+#lb-older:disabled { color: var(--ink-4); cursor: default; }
+.lb-end { font-size: 11px; color: var(--ink-4); }
+
+/* Wider: one line per entry, as a table — time, kind, then the sentence
+   running on and wrapping in its own column. */
+@media (min-width: 720px) {
+  .lb-top { padding: 10px 24px; }
+  .lb-tools, .lb-main { padding-left: 24px; padding-right: 24px; }
+  .ev { padding: 5px 12px 5px 14px; }
+  .ev-row {
+    grid-template-columns: 72px 150px minmax(0, 1fr) 12px;
+    align-items: baseline;
+  }
+  .ev-kind, .ev-more { align-self: baseline; }
+  .ev-text, .ev-meta { grid-column: 3; }
+  .ev-more { grid-column: 4; }
+  /* Under the sentence, not under the time: the two columns and their gaps. */
+  .ev pre { margin-left: calc(72px + 150px + 20px); }
+}

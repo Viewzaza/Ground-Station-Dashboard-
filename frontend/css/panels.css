@@ -786,3 +786,10 @@ a.tlm-row:focus-visible { outline: 2px solid var(--track); outline-offset: -2px;
 @media (max-width: 1000px) {
   .ctl-row { flex-wrap: wrap; }
 }
+
+/* The station logbook's way in, after the station name: a quiet link, the
+   weight of Grafana's "open full". --ink-3, not that link's --ink-4, because
+   on chrome at 10px --ink-4 is a ghost and this is the only door to the log. */
+.hdr-log { color: var(--ink-3); font-size: 10px; letter-spacing: .1em; text-decoration: none; white-space: nowrap; }
+.hdr-log:hover { color: var(--track); color: color-mix(in srgb, var(--track) 75%, var(--ink)); text-decoration: underline; }
+.hdr-log:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }

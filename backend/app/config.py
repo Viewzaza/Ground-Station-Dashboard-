@@ -141,6 +141,14 @@ class Settings(BaseSettings):
     satnogs_station_poll_s: int = 60
     satnogs_db_token: str = ""
 
+    # --- events -------------------------------------------------------------
+    # The station logbook, GS_DATA_DIR/events/YYYY-MM-DD.jsonl. Both limits
+    # apply at once: day files older than this are deleted, and then the
+    # oldest days go until the directory is under the size cap. A busy day is
+    # tens of kilobytes, so at these values the age limit is the one that bites.
+    events_retain_days: int = 180
+    events_max_mb: float = 200.0
+
     # --- derived ------------------------------------------------------------
     @property
     def pinned_norad_ids(self) -> list[int]:

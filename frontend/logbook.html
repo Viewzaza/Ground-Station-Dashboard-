@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Station Log · KNACKSAT-2</title>
+<link rel="icon" href="assets/favicon.svg">
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/logbook.css">
+</head>
+<body>
+
+<!-- The station logbook: what the station did, who told it to, and what was
+     refused by which gate. A page of its own rather than a panel, because it
+     is read after the fact — at a desk, or on a phone during an incident — and
+     not from across the room. It only reads: nothing on it can move anything. -->
+
+<header class="lb-top">
+  <div class="lb-id">
+    <h1>STATION LOG</h1>
+    <span class="lb-station" id="lb-station">SatNOGS 5024</span>
+  </div>
+  <div class="lb-live" id="lb-live" data-state="connecting">
+    <i class="lb-dot"></i><span id="lb-live-text">connecting</span>
+  </div>
+  <a class="lb-wall" href="index.html">← wall</a>
+</header>
+
+<section class="lb-tools" aria-label="Filters">
+  <div class="lb-chips" id="lb-chips" role="group" aria-label="Show"></div>
+  <div class="lb-row">
+    <input id="lb-q" type="search" placeholder="search text or kind"
+           autocomplete="off" spellcheck="false" aria-label="Search the log">
+    <select id="lb-day" aria-label="Day (UTC)">
+      <option value="">latest</option>
+    </select>
+    <a class="lb-dl" id="lb-dl" download hidden>download day</a>
+  </div>
+  <p class="lb-note" id="lb-note"></p>
+</section>
+
+<main class="lb-main">
+  <p class="lb-error" id="lb-error" hidden></p>
+  <div id="lb-list" class="lb-list" aria-live="polite"></div>
+  <div class="lb-foot">
+    <button type="button" id="lb-older" hidden>load older</button>
+    <span id="lb-end" class="lb-end"></span>
+  </div>
+</main>
+
+<script type="module" src="js/pages/logbook.js"></script>
+</body>
+</html>

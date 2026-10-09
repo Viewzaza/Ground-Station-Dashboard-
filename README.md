@@ -780,6 +780,96 @@ and the executor publishes its state when it starts, so a wall display that
 outlives a backend restart shows the new process's "off" rather than the old
 one's "engaged".
 
+## Station logbook
+
+Before the first hardware run somebody will ask who armed, from which machine,
+what was refused and by which gate, and what autopilot did about it. Nothing
+could answer: the journal kept the origin of the last 64 commands in memory,
+autopilot overwrote `disengaged_because` each time, a lapsed lease or a restart
+that quietly left autopilot off left no trace, and docker rotates the backend's
+own log at 10 MB × 3 behind a request line per poll. `LOG` in the header opens
+`logbook.html`, which reads `GS_DATA_DIR/events/YYYY-MM-DD.jsonl` — one JSON
+record per line, one file per UTC day:
+
+```json
+{"id": "1791534731123-42", "ts": "2026-10-09T07:12:11.123+00:00",
+ "kind": "control.cmd", "sev": "warn", "text": "operator: stop", "data": {...}}
+```
+
+The id is when the line was recorded and `ts` is when the thing happened, which
+can be a little earlier; a record is filed under the day of its `ts`. Something
+noticed more than an hour after it happened — a recording's end seen only once
+SatNOGS answers again after an outage — is dated when it was noticed, with
+`happened_at` beside it. That bound is what lets paging find a record dated
+23:59 but noticed after midnight without opening every file.
+
+**Most of it is derived, not reported.** The services already publish every
+change to the hub, so the log subscribes like a browser does and works out
+what changed between two consecutive frames. The one change to the services is
+that `ControlService`'s journal now records *what* each command was and when it
+was accepted, beside who sent it. Each rule is a pure function, pinned by
+`tests/test_events.py` against payloads the real services publish:
+
+| Kind | Read from |
+|---|---|
+| `control.cmd` | each new journal entry: `operator: goto az=120.0 el=0.0`, `autopilot: track 67683`, `lease: stop (lease expired)` |
+| `control.lease` | `armed` and the journal together — armed going false with a journaled release is a release; without one, the lease *expired*. A later expiry while still armed is an extension, not a command |
+| `control.gate` | a gate's boolean flipping, e.g. `satnogs_idle closed` |
+| `control.track_end` | a new `track_end_reason`: `track of 67683 ended — gate closed: satnogs_idle` |
+| `autopilot.*` | engaging, standing down with its reason, and each change of phase. `blocked` is one line until it clears, however often its detail changes |
+| `satnogs.*` | the station's client connecting or not, and recordings starting and ending, dated by their own window |
+| `plan.change` | one line per rebuild that changes what is planned in the next 6 h, matching passes the way autopilot does, so the 1 s re-key between rebuilds is not news |
+| `status.*`, `log.*` | component state changes, and the backend's own warnings; the same warning within 10 min is one line, then a count |
+| `audit` | every POST, PUT, PATCH or DELETE under `/api/control/`, `/api/plan/`, `/api/commissioning/` and `/api/alerts/`: status, client, browser family, and the gates of a refusal — `POST /api/control/goto 409 blocked_by satnogs_idle from 192.168.1.20`. Dated by when the request arrived, so it reads before the lease line or journal entry it caused |
+| `boot`, `shutdown`, `unclean_restart`, `config_change` | each start records a redacted settings snapshot, and every setting that differs from the last boot's (`rot_limit_max_az 450 → 540`, a warning for anything the interlock reads). No shutdown record before a boot means the last run did not end cleanly |
+
+Five things it is careful about:
+
+- **History, never permission.** Nothing reads the log to decide anything.
+  After a restart it *says* that autopilot was engaged and is now off —
+  re-engaging is a human decision — and that is all it does. Leases, autopilot
+  state and gate freshness are never restored from it.
+- **It cannot slow control down.** It reads from its own bounded hub queue,
+  which drops the oldest frame of a type when full, so a stall costs log lines,
+  never commands. Disk work runs in a worker thread. Each record is flushed;
+  `control.*`, `boot` and `shutdown` are also fsynced, because those are what an
+  investigation after a power cut wants.
+- **No secret reaches a file.** Any setting whose name contains token, password,
+  secret, key, webhook, ntfy, telegram, auth or credential is recorded only as
+  `<set>` or `<unset>`; every other URL loses its userinfo and query string; and
+  the secret values themselves are scrubbed from warnings and audit text. An
+  audit line keeps only the body fields `az`, `el`, `norad`, `enabled`,
+  `eyes_on_mast` and `hours`.
+- **It survives what it records.** A torn last line from a power cut is skipped
+  on reading and the next record starts on a fresh line. Text no UTF-8 encoder
+  will take — a lone surrogate in a request body, or in a setting whose bytes
+  are not UTF-8 — becomes `?` before it is recorded. If the directory cannot
+  be written the log keeps its 2,000-record ring in memory and reports
+  `events degraded`, rather than taking anything else down with it. A boot reads
+  back only as far as the ring and the last run's autopilot state need, so a
+  long history does not hold up the start.
+- **The client is the first `X-Forwarded-For` hop**, which Caddy sets, with the
+  socket peer kept beside it when they differ. Commands sent over the WebSocket
+  bypass the HTTP audit; they still appear, through the journal, without a
+  client.
+
+```ini
+GS_EVENTS_RETAIN_DAYS=180   # day files older than this go first
+GS_EVENTS_MAX_MB=200        # then the oldest, until the directory is under this
+```
+
+`GET /api/events?since=&until=&kinds=control,autopilot&min_sev=warn&q=&limit=`
+returns records newest first with `more` set when there are older matches —
+page with `until=<oldest id>`. `GET /api/events/days` lists the files and
+`GET /api/events/day/YYYY-MM-DD.jsonl` downloads one as written. The page groups
+by the station's own day, filters by chip (`faults` is everything at warn or
+worse), keeps the filter in the URL (`logbook.html#faults`), and tails live over
+its own WebSocket, re-reading from its newest record every time the socket
+opens, so a restart's `boot` and `unclean_restart` lines appear on a page left
+open. Times are the station's; a sentence that names a time in UTC — a lease's
+expiry, the last record before an unclean restart — gets it in station time on
+the line beneath.
+
 ## Tests
 
 ```bash

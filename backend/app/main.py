@@ -17,7 +17,9 @@ from .routes import (
     cameras, control, health, passes, plan, radio, rig, rotator, satellites,
     satnogs, ws,
 )
+from .routes import events as event_routes
 from .scheduler import Scheduler
+from .services.events import AuditMiddleware, EventLog, warning_capture
 from .services.predictor import Predictor
 from .services.telemetry import TelemetryStore
 from .services.tle_store import TleStore
@@ -59,11 +61,25 @@ async def lifespan(app: FastAPI):
     app.state.planner = scheduler.planner
     app.state.executor = scheduler.executor
 
+    # The logbook is built before the scheduler starts, so that the frames
+    # published while it starts are already being captured, and it records
+    # the boot before anything else happens.
+    events = EventLog(
+        settings, scheduler.control, scheduler.executor, scheduler.satnogs,
+        scheduler.planner, on_state=scheduler.set_state, version=app.version,
+    )
+    app.state.events = events
+    await events.start()
+
     await scheduler.start()
+    scheduler._spawn("events", events.run)
     try:
         yield
     finally:
         await scheduler.stop()
+        # After the scheduler, so the shutdown record is the last line: its
+        # absence is how the next boot knows this one did not end cleanly.
+        await events.close()
         log.info("ground station backend stopped")
 
 
@@ -78,6 +94,11 @@ app = FastAPI(
 # No CORS middleware on purpose: Caddy serves the frontend and the API from one
 # origin, so a cross-origin request should fail rather than be quietly allowed.
 
+# The logbook's request audit, and its capture of the backend's own warnings.
+# Both forward to app.state.events and do nothing while there is none.
+app.add_middleware(AuditMiddleware)
+logging.getLogger("app").addHandler(warning_capture)
+
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(satellites.router, prefix="/api", tags=["satellites"])
 app.include_router(passes.router, prefix="/api", tags=["passes"])
@@ -88,4 +109,5 @@ app.include_router(satnogs.router, prefix="/api", tags=["satnogs"])
 app.include_router(radio.router, prefix="/api", tags=["radio"])
 app.include_router(rig.router, prefix="/api", tags=["rig"])
 app.include_router(plan.router, prefix="/api", tags=["plan"])
+app.include_router(event_routes.router, prefix="/api", tags=["events"])
 app.include_router(ws.router, tags=["ws"])
