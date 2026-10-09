@@ -713,7 +713,7 @@ one's "engaged".
 ```bash
 cd backend
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest              # offline: 533 tests
+.venv/Scripts/python -m pytest              # offline: 539 tests
 .venv/Scripts/python -m pytest -m network   # cross-checks against live SatNOGS
 ```
 

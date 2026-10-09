@@ -472,6 +472,14 @@ class PlanExecutor:
     def _ours_is_latest(self) -> bool:
         return self._seq is not None and self._journal() == self._seq
 
+    def _satnogs_may_drive(self) -> bool:
+        # ControlService's own rule for stops nobody pressed; see there.
+        check = getattr(self.control, "satnogs_may_drive", None)
+        try:
+            return bool(check()) if callable(check) else False
+        except Exception:
+            return True     # cannot tell: do not risk stopping SatNOGS's track
+
     async def _command(self, fn, *args) -> bool:
         """Issue one command as autopilot. Returns False if it was refused.
 
@@ -580,8 +588,14 @@ class PlanExecutor:
         antenna is doing — tracking, or a minutes-long pre-position slew at
         1.5°/s — it is doing because autopilot said so, and it is stopped. If
         anyone else has commanded it since, their command stands.
+
+        Not while SatNOGS may have the antenna. "Latest in our journal" cannot
+        see satnogs-client, which commands rotctld directly: autopilot
+        pre-positions, the client reconnects and starts a job, the lease then
+        expires — and the stop meant for autopilot's long-finished slew lands
+        in the middle of SatNOGS's recording.
         """
-        mine = self._ours_is_latest()
+        mine = self._ours_is_latest() and not self._satnogs_may_drive()
         self.state = ExecutorState(enabled=False, phase="off", detail=because,
                                    disengaged_because=because)
         self._seq = None
@@ -634,7 +648,7 @@ class PlanExecutor:
                 # assignment, so that even a failure inside the stop below
                 # cannot leave autopilot engaged.
                 log.exception("autopilot step failed")
-                mine = self._ours_is_latest()
+                mine = self._ours_is_latest() and not self._satnogs_may_drive()
                 self.state = ExecutorState(
                     enabled=False, phase="off",
                     detail=f"internal error: {exc}",

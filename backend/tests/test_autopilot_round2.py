@@ -675,3 +675,98 @@ def test_a_rekeyed_pass_is_published_though_phase_and_detail_are_unchanged(make_
         assert _autopilot_frames(conn) == []
     finally:
         hub.unregister(conn)
+
+
+# --------------------------------------------------------------------------
+# 11. stops nobody pressed: a lapsed lease, a release, a stand-down
+# --------------------------------------------------------------------------
+
+def _expire(control):
+    control._lease_expires = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+
+def _stops(client):
+    return [c for c in client.commands if c[0] == "stop"]
+
+
+@pytest.mark.asyncio
+async def test_a_lapsed_lease_stops_a_manual_slew_once(make_rig):
+    """A goto issued under a lease kept slewing after the lease ran out; only
+    a track noticed. The lapse now stops it, once, under its own origin."""
+    rig = make_rig([])
+    rig.control.arm()
+    await rig.control.goto(200.0, 20.0)
+    _expire(rig.control)
+    await rig.control.check_lease()
+    assert rig.client.commands[-1] == ("stop",)
+    assert rig.control.state().mode == "idle"
+    assert rig.control.last_origin == "lease"
+    await rig.control.check_lease()
+    assert len(_stops(rig.client)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lapsed_lease_sends_no_stop_while_satnogs_may_drive(make_rig):
+    rig = make_rig([])
+    rig.control.arm()
+    await rig.control.goto(200.0, 20.0)
+    rig.satnogs.connected = True          # satnogs-client is back
+    _expire(rig.control)
+    await rig.control.check_lease()
+    assert _stops(rig.client) == []
+    assert rig.control.state().mode == "idle"
+
+
+@pytest.mark.asyncio
+async def test_a_lapsed_lease_leaves_a_track_to_its_own_loop(make_rig):
+    rig = make_rig([])
+    rig.control.arm()
+    await rig.control.track(NORAD_A)
+    _expire(rig.control)
+    await rig.control.check_lease()
+    assert _stops(rig.client) == [], "the track loop stops its own track"
+    assert rig.control.state().mode == "track"
+
+
+@pytest.mark.asyncio
+async def test_release_sends_no_stop_while_satnogs_may_drive(make_rig):
+    rig = make_rig([])
+    rig.control.arm()
+    await rig.control.goto(200.0, 20.0)
+    rig.satnogs.connected = True
+    await rig.control.release()
+    assert _stops(rig.client) == []
+    assert rig.control.state().mode == "idle"
+
+
+@pytest.mark.asyncio
+async def test_autopilots_stand_down_does_not_stop_satnogss_track(make_rig):
+    """Autopilot pre-positions, satnogs-client reconnects and starts a job, then
+    the lease expires. The stand-down used to send STOP — autopilot's entry was
+    still the latest in our journal, which cannot see satnogs-client — and it
+    landed in the middle of SatNOGS's recording."""
+    aos = NOW + timedelta(minutes=2)
+    rig = make_rig([cand("p", NORAD_A, aos)])
+    rig.control.arm()
+    rig.ex.enable()
+    await rig.ex.step(aos - timedelta(seconds=60))
+    assert rig.control.state().mode == "manual"
+    rig.satnogs.connected = True
+    _expire(rig.control)
+    await rig.ex.step(aos - timedelta(seconds=59))
+    assert not rig.ex.state.enabled
+    assert _stops(rig.client) == []
+
+
+@pytest.mark.asyncio
+async def test_autopilots_stand_down_still_stops_its_own_slew_when_satnogs_is_idle(make_rig):
+    aos = NOW + timedelta(minutes=2)
+    rig = make_rig([cand("p", NORAD_A, aos)])
+    rig.control.arm()
+    rig.ex.enable()
+    await rig.ex.step(aos - timedelta(seconds=60))
+    _expire(rig.control)
+    await rig.ex.step(aos - timedelta(seconds=59))
+    await rig.control.check_lease()     # the scheduler's tick, same second
+    assert not rig.ex.state.enabled
+    assert len(_stops(rig.client)) == 1, "one stop, from whichever saw the lapse first"

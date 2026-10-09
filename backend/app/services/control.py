@@ -84,6 +84,9 @@ class ControlService:
         # inferred from "mode == track".
         self.track_id: int = 0
         self.track_end_reason: str = ""
+        # The expiry time of the last lease whose lapse check_lease() acted on,
+        # so each lapse is acted on once.
+        self._lapse_handled: datetime | None = None
 
     def _journal(self, origin: str) -> int:
         """Record an accepted command. Always called synchronously at the
@@ -129,10 +132,11 @@ class ControlService:
         """Give up the lease, and stop anything moving on the strength of it.
 
         Release revokes consent exactly as expiry does, so it stops motion the
-        same way: a lease that lapses mid-slew stops the antenna, and one that
-        is handed back mid-slew must not leave it running. Only if this
-        service was driving — mode track or manual — because if it was idle,
-        whatever is moving the rotator is not us, and a stop could fight it.
+        same way: a lease that lapses mid-slew stops the antenna (check_lease),
+        and one that is handed back mid-slew must not leave it running. Only if
+        this service was driving — mode track or manual — because if it was
+        idle, whatever is moving the rotator is not us, and a stop could fight
+        it; and not while SatNOGS may have the antenna (satnogs_may_drive).
 
         Journaled synchronously, so anything running on the old lease notices
         even if a new arm follows before it next looks.
@@ -143,12 +147,44 @@ class ControlService:
         self._mode = "idle"
         self._journal(origin)
         log.info("control released")
-        if was_driving and self.rotator.verified:
+        if was_driving and self.rotator.verified and not self.satnogs_may_drive():
             try:
                 await self._write(self.rotator.client.stop, "stop (lease released)")
             except Exception:
                 log.exception("could not stop the antenna on release")
         return self.publish()
+
+    async def check_lease(self) -> None:
+        """Act on a lease that has run out. Called once a second by the scheduler.
+
+        The track loop stops its own track when consent lapses, but nothing
+        did the same for an absolute move: a goto or park issued under a lease
+        kept slewing after the lease ran out — at 1.5°/s, for minutes — though
+        release() already promised that a lapsed lease stops the antenna.
+
+        `mode == "manual"` only says the last command was an absolute move, not
+        that the antenna is still moving, so the stop may land on a rotator
+        that has already arrived. That is harmless, unless SatNOGS has the
+        antenna, and then it is skipped (see satnogs_may_drive). The stop is
+        journaled under its own origin, so autopilot, finding its command no
+        longer the latest, does not send a second one.
+        """
+        expires = self._lease_expires
+        if expires is None or self.armed or self._lapse_handled == expires:
+            return
+        self._lapse_handled = expires
+        if self._mode != "manual":
+            return          # track: its own loop sees the gate; idle: nothing to stop
+        self._mode = "idle"
+        if self.satnogs_may_drive() or not self.rotator.verified:
+            self.publish()
+            return
+        self._journal("lease")
+        try:
+            await self._write(self.rotator.client.stop, "stop (lease expired)")
+        except Exception:
+            log.exception("could not stop the antenna when the lease expired")
+        self.publish()
 
     # --- gates -------------------------------------------------------------
     def gates(self) -> dict[str, bool]:
@@ -176,6 +212,21 @@ class ControlService:
 
     def blocked_by(self) -> list[str]:
         return [name for name, ok in self.gates().items() if not ok]
+
+    def satnogs_may_drive(self) -> bool:
+        """Whether SatNOGS could be commanding the antenna right now.
+
+        True whenever either SatNOGS gate is shut: the client is connected, its
+        status is unknown or stale, or a job is within the guard window. This
+        decides every stop nobody pressed — a lease lapsing, a release,
+        autopilot standing down. Each of those stops our own motion, and our
+        last move is bounded and was consented to when it was made; a STOP
+        written while satnogs-client is tracking halts its recording instead.
+        So when SatNOGS may have the antenna, those stops are not sent. An
+        operator's STOP is never subject to this: that is their call.
+        """
+        gates = self.gates()
+        return not (gates["satnogs_idle"] and gates["no_imminent_pass"])
 
     def _require_clear(self) -> None:
         blocked = self.blocked_by()
@@ -356,10 +407,11 @@ class ControlService:
                     self.track_end_reason = f"gate closed: {', '.join(blocked)}"
                     # Consent gone — lease lapsed, or control switched off —
                     # means the antenna should not keep finishing a move this
-                    # loop commanded, so stop it. Not for the SatNOGS gates:
-                    # there SatNOGS may be the one about to drive, and a stop
-                    # from us could fight it.
-                    if "armed" in blocked or "kill_switch" in blocked:
+                    # loop commanded, so stop it. Not if a SatNOGS gate is
+                    # shut too: there SatNOGS may be the one about to drive,
+                    # and a stop from us could fight it.
+                    if (("armed" in blocked or "kill_switch" in blocked)
+                            and not self.satnogs_may_drive()):
                         try:
                             await self.rotator.client.stop()
                         except Exception:

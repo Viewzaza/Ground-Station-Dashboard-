@@ -164,6 +164,12 @@ class Scheduler:
         """
         previous: tuple | None = None
         while True:
+            # Before reading the state, so a lapse that stops a slew is in the
+            # state published this tick.
+            try:
+                await self.control.check_lease()
+            except Exception:
+                log.exception("lease check failed")
             state = self.control.state()
             fingerprint = (
                 state.armed,
