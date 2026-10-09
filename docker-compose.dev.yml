@@ -1,0 +1,27 @@
+# Windows development overlay. This machine cannot reach 10.90.36.x, so the
+# rotator is simulated and the cameras are generated test patterns.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# The mock go2rtc config declares the SAME stream names as production, so no
+# frontend or backend code differs between dev and prod.
+
+services:
+  caddy:
+    ports:
+      - "8080:80"
+      - "8443:443"
+
+  backend:
+    environment:
+      GS_MOCK: "1"
+      GS_LOG_LEVEL: debug
+    volumes:
+      # live-reload the source while developing
+      - ./backend/app:/app/app:ro
+      - ./backend/data:/data
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  video:
+    volumes:
+      - ./deploy/go2rtc/go2rtc.mock.yaml:/config/go2rtc.yaml:ro

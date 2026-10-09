@@ -1,0 +1,23 @@
+# Development: generated test patterns, same stream names as production.
+# Mounted over go2rtc.yaml by docker-compose.dev.yml.
+
+api:
+  listen: ":1984"
+  origin: "*"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
+  candidates:
+    - stun:8555
+
+streams:
+  cam_main:
+    - "ffmpeg:virtual?video=testsrc&size=1280x720#video=h264#hardware=false"
+  cam_sub:
+    - "ffmpeg:virtual?video=smptebars&size=640x360#video=h264#hardware=false"
+
+log:
+  level: info

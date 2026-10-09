@@ -1,0 +1,565 @@
+/* The whole layout is one grid. Every reflow is a grid-template-areas swap —
+   no JavaScript is involved in responsiveness.
+
+   The cameras are the middle column and the widest track, because that is the
+   operator's primary view. */
+
+.wall {
+  display: grid;
+  height: 100vh;
+  gap: var(--gap);
+  padding: var(--gap);
+  grid-template-columns: minmax(340px, 4fr) minmax(520px, 5fr) minmax(360px, 3fr);
+  /* The footer's floor is what keeps the frame list from collapsing to a header
+     and one row, which is not worth the space it costs the map and the globe
+     above it. It is lower than it was while the two panels were stacked — they
+     now share this height rather than dividing it. */
+  grid-template-rows:
+    var(--hdr-h) 1fr 1fr minmax(110px, 150px) minmax(200px, var(--graf-h));
+  /* One camera instead of two frees the whole middle column, so the tile now
+     spans both rows and the map and globe get a full row each rather than
+     sharing one.
+
+     Radio and the waterfall share a row because they are two halves of one
+     question: radio is what to tune to on the next pass, the waterfall is what
+     was actually heard on the last one. The waterfall is a wide short strip —
+     time runs across it — and the middle column is still wider than the
+     760px image SatNOGS gives us, so one column is all it can use.
+
+     The observation plan continues the right-hand column downwards, through
+     the radio row and the footer, rather than squeezing into it: the rotator
+     above has a control row that must never be clipped, and the camera is
+     not giving up width for anything. In return it gets the height a list of
+     reasons needs, directly under the ARM button that ENGAGE depends on.
+     What it costs is the footer's last quarter: at 1920 the four footer
+     panels share about 1430px instead of 1900, and narrower walls are tighter
+     still. The footer rebalances its shares to keep Grafana readable — see
+     .graf below. */
+  grid-template-areas:
+    "hdr   hdr   hdr"
+    "map   cam   track"
+    "globe cam   track"
+    "radio wf    plan"
+    "graf  graf  plan";
+}
+
+.track-col {
+  grid-area: track;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-height: 0;
+  overflow: hidden;
+}
+.track-col .panel { flex: none; }
+/* The rotator panel carries the control row, which is a fixed height and must
+   never be clipped — a GO button the operator cannot see is worse than a small
+   polar plot. With the selector and the activity feed moved to the footer it
+   is no longer competing with them for this column, so it simply takes what is
+   left below the next-pass card. */
+.track-col .panel.grow { flex: 1 1 auto; min-height: 240px; }
+
+/* ---------- 4K wall: more frames, taller globe ---------- */
+/* The extra room here buys rows in the frame list, not a bigger Grafana: four
+   stat panels given half a 4K wall are four enormous numbers with nothing more
+   to say, while the list can always show another pass. So the height goes up
+   and Grafana's share of the width comes down. */
+@media (min-width: 2400px) {
+  :root { --hdr-h: 74px; --graf-h: 340px; --gap: 12px; }
+  .wall {
+    grid-template-rows:
+      var(--hdr-h) 1fr 1.15fr minmax(140px, 190px) minmax(240px, var(--graf-h));
+  }
+}
+
+/* ---------- laptop: camera goes full width under the header ---------- */
+/* The plan takes a full-width row of its own here. Two columns leave nowhere
+   tall enough beside anything, and a full row suits it: the strip gets the
+   whole width for its day, and panels.css turns the inside into two columns so
+   the list keeps one line per pass. */
+@media (max-width: 1400px) {
+  .wall {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows:
+      var(--hdr-h) minmax(240px, 1.2fr) 1fr 1fr minmax(110px, 150px)
+      minmax(170px, 200px) minmax(200px, var(--graf-h));
+    grid-template-areas:
+      "hdr   hdr"
+      "cam   cam"
+      "map   track"
+      "globe track"
+      "radio wf"
+      "plan  plan"
+      "graf  graf";
+  }
+}
+
+/* ---------- short screens: stop squeezing, start scrolling ----------
+
+   The wall grid assumes roughly 1080p. On a 720p laptop the fixed minimums for
+   the header, camera row and Grafana strip eat the budget and the map and
+   globe collapse to about 50 px each — present, but useless. Below that height
+   give every panel a floor and let the page scroll instead. 1080p and above is
+   unaffected and still fits without scrolling. */
+@media (min-width: 1000px) and (max-height: 900px) {
+  /* height:auto as well as overflow:auto — tokens.css pins these to 100%, and
+     a document that cannot grow clips the overflow instead of scrolling it. */
+  html, body { overflow: auto; height: auto; }
+  .wall { height: auto; min-height: 100vh; }
+  .track-col { overflow: visible; }
+}
+
+/* Three-column wall layout: five rows since radio and the waterfall gained
+   their own. A row template here must have exactly as many entries as the
+   grid-template-areas above, or every row below the mismatch is misplaced. */
+@media (min-width: 1401px) and (max-height: 900px) {
+  .wall {
+    grid-template-rows:
+      var(--hdr-h)
+      minmax(300px, 1fr)
+      minmax(300px, 1fr)
+      minmax(130px, 150px)
+      minmax(200px, var(--graf-h));
+  }
+}
+
+/* Two-column laptop layout: seven rows, the camera and the plan in their own.
+
+   Everything here at its floor — and the right-hand column needs the map and
+   the globe rows at about 225px each to hold the next-pass card and an
+   unclipped rotator — adds up to roughly 1450px of height. The plan's row is
+   200px of that this layout did not have to spend before, and below the total
+   the fr rows used to give way first: at 1366x1200 the map and the globe were
+   slivers and the rotator was down to its own heading. So this layout keeps
+   the same floors and scrolls whenever it is shorter than that, rather than
+   only below 900. Above it, min-height lets the rows fill the screen exactly
+   as they did without scrolling. */
+@media (min-width: 1000px) and (max-width: 1400px) and (max-height: 1440px) {
+  html, body { overflow: auto; height: auto; }
+  .wall {
+    height: auto;
+    min-height: 100vh;
+    grid-template-rows:
+      var(--hdr-h)
+      minmax(240px, 1.1fr)
+      minmax(260px, 1fr)
+      minmax(260px, 1fr)
+      minmax(130px, 150px)
+      minmax(170px, 200px)
+      minmax(200px, var(--graf-h));
+  }
+  .track-col { overflow: visible; }
+}
+
+/* ---------- tablet and phone: one scrolling column ---------- */
+@media (max-width: 1000px) {
+  html, body { overflow: auto; height: auto; }
+  .wall {
+    height: auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    /* The plan follows the rotator here as it does on the wall: whether
+       autopilot is working, and what it will do next, is the thing worth
+       checking from a phone after the picture and the antenna. */
+    grid-template-areas:
+      "hdr"
+      "cam"
+      "track"
+      "plan"
+      "radio"
+      "wf"
+      "map"
+      "globe"
+      "graf";
+  }
+  /* Panels want room on a phone; the header and the footer do not, and forcing
+     it on them just wastes the first screenful. The footer is still exempt now
+     that it carries the frame list as well — that list has as many rows as it
+     has rows, and a floor under it would only pad out a quiet week. */
+  .wall > *:not(.hdr):not(.graf) { min-height: 240px; }
+  .track-col { overflow: visible; }
+  /* the globe is the heaviest thing on the page; let the browser skip it
+     entirely until it is scrolled near */
+  [style*="grid-area:globe"] { content-visibility: auto; contain-intrinsic-size: 320px; }
+}
+
+/* ---------- header ---------- */
+/* The header is chrome, not a card: one step darker than the page rather than
+   lighter, ruled off from the wall below it, and lifted by the single shadow
+   this theme owns. --panel-2 used to make it a dark bar; it now resolves to an
+   inset well, which reads as a sunk readout instead of a title bar. */
+.hdr {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 0 14px;
+  background: var(--chrome);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.hdr-id { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.hdr-id h1 { font-size: 16px; letter-spacing: .14em; white-space: nowrap; }
+/* --track at 11px on chrome is only ~3.4:1. Mixed toward ink it clears AA
+   without leaving the hue, so the NORAD id still reads as track-coloured.
+   The plain token is declared first as the fallback for engines without
+   color-mix(); it is exactly what this line rendered before. */
+.hdr-id .norad {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  font-size: 11px; letter-spacing: .1em;
+}
+.hdr-id .station { color: var(--ink-3); font-size: 11px; letter-spacing: .08em; white-space: nowrap; }
+
+.hdr-clocks { display: flex; gap: 18px; }
+.clock { display: flex; flex-direction: column; line-height: 1.15; }
+.clock span { font-size: 9px; letter-spacing: .16em; color: var(--muted); }
+.clock b { font-size: 17px; font-variant-numeric: tabular-nums; font-weight: 500; }
+
+.hdr-aos { display: flex; flex-direction: column; line-height: 1.15; }
+.hdr-aos > span:first-child { font-size: 9px; letter-spacing: .16em; color: var(--muted); }
+.hdr-aos b { font-size: 20px; font-variant-numeric: tabular-nums; color: var(--accent); }
+.hdr-aos.imminent b { color: var(--warn); }
+.hdr-aos.in-pass b { color: var(--ok); }
+/* --dim is the disabled/placeholder ink; at 10px on chrome it is a ghost
+   (~2.9:1), and this line carries the AOS detail, which is not decoration. */
+.aos-sub { font-size: 10px; color: var(--ink-3); }
+
+/* ANTENNA: who has it. Three lines, like NEXT AOS beside it — eyebrow, the
+   owner, what it is doing — so the header keeps one rhythm; the follow chip
+   rides on the eyebrow line, where there is room. It is the one block here
+   whose text has no natural length, so it is the one that gives way: an
+   ellipsis on the activity, and the full sentence in its title. */
+.hdr-ant {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas: "label follow" "owner owner" "act act";
+  align-items: center;
+  column-gap: 8px;
+  line-height: 1.15;
+  /* It takes what is left over rather than asking for its sentence's width.
+     Sized from its content, it made every other block shrink with it — and
+     the chips and the NORAD id wrap at a fraction of a pixel short, so at 1366
+     the chips broke onto a second row and the AOS detail in two. From a zero
+     basis it never pushes: it grows into the free space up to its cap, and
+     only below its floor does anything else give way. */
+  flex: 1 1 0;
+  min-width: 150px;
+  max-width: 320px;
+}
+.hdr-ant-label { grid-area: label; font-size: 9px; letter-spacing: .16em; color: var(--muted); }
+.hdr-ant > b { grid-area: owner; justify-self: start; margin: 2px 0; }
+.ant-sub {
+  grid-area: act; display: flex; gap: 6px; min-width: 0;
+  font-size: 10px; color: var(--ink-3);
+}
+.ant-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The countdown never truncates: the sentence beside it gives way first. */
+.ant-cd { flex: none; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.ant-follow {
+  grid-area: follow; justify-self: start; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 9px; letter-spacing: .04em; color: var(--ink-3);
+  padding: 0 5px; border: 1px solid var(--rule); border-radius: 3px;
+  background: var(--panel);
+}
+.ant-follow[role="button"] { cursor: pointer; }
+.ant-follow[role="button"]:hover { border-color: var(--ink-4); }
+.ant-follow:focus-visible { outline: 2px solid var(--track); outline-offset: 1px; }
+.ant-follow.following {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  border-color: color-mix(in srgb, var(--track) 55%, var(--panel));
+}
+/* Held by a lease reads like a pin: in both, someone's choice keeps the view. */
+.ant-follow.pinned,
+.ant-follow.held { color: var(--ink-2); border-color: var(--ink-4); }
+/* Cannot follow: dashed, like everything on this page that is a gap rather
+   than a value. */
+.ant-follow.blind { border-style: dashed; }
+
+/* The owner badge. Same construction as the chips — a pale tint of the hue,
+   a border solid enough to hold an edge, the hue mixed toward ink for the
+   label — in the three data hues this theme already gives meaning: SatNOGS
+   is the track's colour, autopilot is happening-now, an operator is us.
+
+   tokens.css gives --warn the same value as --contact, and --bad the same as
+   --observer, so hue alone cannot tell UNKNOWN from AUTOPILOT or a warning
+   from OPERATOR. Construction does: unknown is dashed and unfilled, a warning
+   is filled solid, and standby — SatNOGS connected but not recording — is the
+   track hue in outline only. */
+.ant-badge {
+  font-size: 11px; font-weight: 600; letter-spacing: .12em;
+  padding: 1px 6px; border-radius: 3px; white-space: nowrap;
+  border: 1px solid var(--rule); color: var(--ink-3); background: var(--panel);
+}
+.ant-badge.own-satnogs {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  border-color: var(--track);
+  border-color: color-mix(in srgb, var(--track) 55%, var(--panel));
+  background: color-mix(in srgb, var(--track) 10%, var(--panel));
+}
+.ant-badge.own-autopilot {
+  color: var(--contact);
+  color: color-mix(in srgb, var(--contact) 80%, var(--ink));
+  border-color: var(--contact);
+  border-color: color-mix(in srgb, var(--contact) 55%, var(--panel));
+  background: color-mix(in srgb, var(--contact) 10%, var(--panel));
+}
+.ant-badge.own-operator,
+.ant-badge.own-commissioning {
+  color: var(--observer);
+  color: color-mix(in srgb, var(--observer) 80%, var(--ink));
+  border-color: var(--observer);
+  border-color: color-mix(in srgb, var(--observer) 55%, var(--panel));
+  background: color-mix(in srgb, var(--observer) 10%, var(--panel));
+}
+.ant-badge.own-unknown {
+  color: var(--warn);
+  color: color-mix(in srgb, var(--warn) 80%, var(--ink));
+  border: 1px dashed var(--warn);
+  background: var(--panel);
+}
+.ant-badge.standby { background: var(--panel); }
+.ant-badge.warn { color: #fff; background: var(--bad); border-color: var(--bad); }
+
+@media (min-width: 1920px) { .hdr-ant { max-width: 380px; } }
+@media (min-width: 1401px) and (max-width: 1919px) { .hdr-ant { max-width: 260px; } }
+/* Between the phone layout and 1400 the header was already full: at 1024 the
+   four blocks before this one left it no room at all. The gaps close up, and
+   below 1160 the station's own callsign goes — it never changes, and the
+   header is the one place that says who has the antenna. */
+@media (min-width: 1001px) and (max-width: 1400px) { .hdr { gap: 18px; } }
+@media (min-width: 1001px) and (max-width: 1160px) { .hdr-id .station { display: none; } }
+
+/* The phone strip: the same line, for a header that has scrolled away. Never
+   shown on the wall. */
+.ant-strip { display: none; }
+
+.hdr-chips { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+/* Chips were dark wells with translucent borders, which only carry on a dark
+   page: on chrome a 35%-alpha border washes out to nothing. Each state is now
+   a pale tint of its own colour with a border solid enough to hold an edge,
+   and the darkened state inks from tokens.css for the label. Where color-mix()
+   is unavailable the chip falls back to a white pill with a solid state border
+   — still legible, still the right three colours. */
+.chip {
+  font-size: 10px; letter-spacing: .1em; padding: 3px 8px; border-radius: 3px;
+  border: 1px solid var(--rule); color: var(--ink-3); background: var(--panel);
+  white-space: nowrap;
+}
+.chip.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--panel));
+  background: color-mix(in srgb, var(--ok) 10%, var(--panel));
+}
+.chip.degraded {
+  color: var(--warn);
+  border-color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--panel));
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+}
+.chip.down {
+  color: var(--bad);
+  border-color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--panel));
+  background: color-mix(in srgb, var(--bad) 10%, var(--panel));
+}
+
+/* On a phone the header's fixed-width blocks overlap each other. These rules
+   must live AFTER the base .hdr rules above: same specificity, so source order
+   is what decides. */
+@media (max-width: 1000px) {
+  .hdr {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: start;
+    gap: 4px 12px;
+    padding: 10px 12px;
+    height: auto;
+  }
+  .hdr-id { grid-column: 1 / -1; flex-wrap: wrap; gap: 4px 8px; }
+  .hdr-id h1 { font-size: 14px; }
+  .hdr-clocks { gap: 14px; }
+  .hdr-aos { text-align: right; }
+  .hdr-aos b { font-size: 16px; }
+  /* A row of its own: on a phone there is the width for the whole sentence,
+     so it wraps rather than truncating. */
+  .hdr-ant { grid-column: 1 / -1; min-width: 0; max-width: none; }
+  .hdr-ant .ant-text { white-space: normal; }
+  .hdr-chips { grid-column: 1 / -1; margin-left: 0; }
+}
+
+/* The strip owns the top edge on a phone; the station-alerts banner, when
+   there is one, sits at the bottom. */
+@media (max-width: 1000px) {
+  .ant-strip {
+    position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 40;
+    padding: 0 16px;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--chrome);
+    border-bottom: 1px solid var(--rule);
+    box-shadow: var(--shadow);
+    font-size: 11px; color: var(--ink-3);
+  }
+  .ant-strip .ant-text { flex: 0 1 auto; }
+  .ant-strip .ant-cd { margin-left: auto; }
+}
+.ant-strip[hidden] { display: none; }
+
+/* ---------- footer: one band, four panels ----------
+   Decoded frames, the satellite selector, the 5024 activity feed, and the
+   Grafana embeds, left to right. They are one card rather than four because
+   they are one question at increasing remove — which spacecraft, what our
+   station did about it, what came out of the air, and what eventually reached
+   the team's database — and a rule between them says that better than four
+   separate borders would.
+
+   The four share the band equally — one grid, four identical columns. They are
+   read as a set rather than ranked, and an even rhythm across the bottom of the
+   wall is easier to scan from a distance than four different widths. Every
+   panel inside is built to give something up as it narrows: the frame rows
+   ellipsize their hex, the selector's list scrolls, the feed scrolls, and the
+   embeds wrap two-by-two.
+
+   DOM order is left-to-right order, so a screen reader takes the same path the
+   eye does. */
+.graf {
+  display: grid; gap: var(--gap);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: var(--panel); border: 1px solid var(--rule);
+  border-radius: var(--radius); padding: 8px; min-height: 0;
+  box-shadow: var(--shadow);
+}
+/* A hairline instead of a border box: these are divisions of one card, not
+   cards of their own. */
+.graf > * + * { border-left: 1px solid var(--rule-soft); padding-left: var(--gap); }
+
+/* On the three-column wall the plan takes the footer's last quarter, and equal
+   shares then left Grafana's stat panels about 170px each at 1920 — "TIME
+   SINCE LAST BEACON" cut to "TIMI". Grafana is cross-origin and cannot reflow,
+   while the selector and the activity feed are short lists that read fine
+   narrower, so they give it the width back: about the 475px it had before the
+   plan arrived. Not on a 4K wall, which deliberately keeps Grafana's share
+   down (above), nor on a laptop, whose footer is still full width. */
+@media (min-width: 1401px) and (max-width: 2399px) {
+  .graf { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) minmax(0, .8fr) minmax(0, 1.4fr); }
+}
+/* Its heading is three things on one line; narrow, it wrapped into two lines
+   and pushed the frame list down. The hint gives way first. */
+.tlm h2 { white-space: nowrap; min-width: 0; }
+.tlm h2 .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+.graf .tlm { min-width: 0; }
+.fpanel {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  overflow: hidden;
+}
+/* In the right-hand column this list was capped so it could not push the
+   search box out of a panel that was already losing the fight for height.
+   Here it has its own band and simply takes what is left under the box. */
+.graf .sat-list { max-height: none; flex: 1 1 auto; min-height: 38px; }
+/* Five rows of feed in a fixed band: scroll rather than clip, like every other
+   list on this page. */
+.graf #satnogs-activity { overflow-y: auto; min-height: 0; flex: 1 1 auto; }
+.graf-top .graf-strip { flex: 1 1 auto; min-height: 0; }
+/* Two columns rather than four in a line. Sharing the band with three other
+   panels leaves these about 200px each, and a stat panel that narrow clips its
+   own title and wraps "No data" mid-word — Grafana is cross-origin, so its
+   text is not ours to reflow. Wrapping them into a square uses the band's
+   height, which is otherwise spent on nothing, and each panel gets back twice
+   the width. A fifth panel would flow onto a third row and be cut off, so the
+   count in GS_GRAFANA_PANELS wants to stay even and small. */
+.graf-strip {
+  display: grid; gap: var(--gap); flex: 1; min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+}
+/* grafana.js requests these panels with theme=dark, and it is cross-origin, so
+   each iframe is a near-black rectangle we cannot restyle — the only honest
+   thing to do is treat it as an instrument window, like the globe and the
+   camera, and let the white strip be its bezel.
+   --graf-panel is Grafana's OWN dark-theme panel background, not a palette
+   colour, which is why it is a literal here rather than a token: it has to
+   track whatever that instance renders, and it is the colour the ::after mask
+   below must match. (Grafana 8 and later paint #181b1f; if the team's instance
+   is older, or its theme changes, this one value is what to change.) It is
+   kin to --void — near-black, out of the page's ramp — for the same reason.
+   The cell is painted with it too, so a lazy iframe that has not loaded yet
+   is the same colour as one that has, and the edge is a dark step rather than
+   a light hairline: a --rule border here would draw exactly the bright seam
+   between white bezel and black panel that we are trying to avoid. The shadow
+   seats the dark tile on the card instead of letting it butt up against it. */
+.graf-cell {
+  --graf-panel: #181b1f;
+  --graf-edge:  #2a3239;
+  position: relative; min-width: 0; overflow: hidden;
+  border: 1px solid var(--graf-edge); border-radius: 4px;
+  background: var(--graf-panel);
+  box-shadow: var(--shadow);
+}
+.graf-strip iframe {
+  width: 100%; height: 100%; border: 0; display: block; background: transparent;
+}
+/* Grafana draws its own "Powered by Grafana" badge inside the panel, and the
+   iframe is cross-origin, so no stylesheet or script of ours can reach it. The
+   only thing left is to cover it. The badge sits top-right; the panel title is
+   top-left and the value is centred, so nothing readable is behind this.
+
+   The mask has to match the IFRAME, not the page. It used --panel-2, which was
+   a dark well and blended in; that alias now resolves to a near-white inset,
+   which would stamp a bright rectangle into the corner of a black panel — far
+   louder than the badge it is hiding. So it takes --graf-panel, the same value
+   the cell is painted with. */
+.graf-cell::after {
+  content: "";
+  position: absolute; top: 0; right: 0;
+  width: 116px; height: 26px;
+  background: var(--graf-panel);
+  pointer-events: none;
+}
+/* Sits in the heading now rather than beside the embeds, so it is a quiet link
+   at the right end of that line — the same place and weight as the `.hint` the
+   other three panels carry. A bordered button up here would be the loudest
+   thing in the band and it is the least urgent. */
+.graf-open {
+  margin-left: auto; color: var(--ink-4); text-decoration: none;
+  font-size: 10px; letter-spacing: 0; font-weight: 400; white-space: nowrap;
+}
+.graf-open:hover {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  text-decoration: underline;
+}
+.graf-open:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; }
+
+/* Four panels abreast need a wall to be abreast on. On a laptop the footer is
+   the width of a two-column grid rather than a three-column one — and on the
+   wall it is now two columns of three, the plan having the third — so
+   everything that is allowed to shrink does, and the frame rows keep their
+   columns. */
+/* The embeds stay two-by-two here. A quarter of a laptop's footer is about
+   340px, and four panels in a single file inside that are 80px each — narrower
+   than the number they are drawing. Two columns of 160 is the readable shape at
+   every width that still has four panels abreast. */
+
+/* Below this there is no width to put four things beside each other, so the
+   footer becomes a column in the same order: frames, selector, activity,
+   Grafana. The rule between them turns with them — a left border on stacked
+   blocks is a stripe down the side of nothing. The stat panels also get more
+   height each here than on the wall, because a single-column phone has the
+   width to spare and nothing else is competing for the fold. */
+@media (max-width: 1000px) {
+  .graf { grid-template-columns: 1fr; }
+  .graf > * + * {
+    border-left: 0; padding-left: 0;
+    border-top: 1px solid var(--rule-soft); padding-top: var(--gap);
+  }
+  .graf-strip { grid-template-columns: 1fr; grid-auto-rows: 120px; }
+  /* On the wall this list is capped so it cannot push the search box off the
+     panel. Stacked, there is nothing below it to protect. */
+  .graf .sat-list { max-height: 40vh; }
+}

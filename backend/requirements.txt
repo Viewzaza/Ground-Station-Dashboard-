@@ -1,0 +1,14 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+skyfield==1.49
+sgp4==2.23
+Pillow==12.3.0
+# Declared because waterfall.py imports it directly, not because anything new
+# pulled it in: it was already here as skyfield's dependency, which is exactly
+# the kind of thing that holds until the day skyfield changes its mind. Every
+# other line in this file is pinned to the version the tests ran against and
+# this is no different.
+numpy==2.5.3
