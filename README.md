@@ -652,6 +652,88 @@ every move is refused with "rotator link is down", and the planner treats the
 antenna's position as unknown. `tests/test_rotator_link.py` drives that window
 through the real poll loop.
 
+### Who has the antenna
+
+Four things can drive the antenna — satnogs-client recording a SatNOGS job,
+autopilot working the plan, an operator at the control panel, or nothing — and
+from across the room they look the same. The ANTENNA line in the header, between
+NEXT AOS and the chips, says which, what it is doing, and how long for:
+`SATNOGS recording ISS (ZARYA) until 12:06Z`, `AUTOPILOT positioning: …`,
+`OPERATOR manual: goto az=120.0 el=30.0`, `NOBODY idle`. `GET /api/antenna`
+returns the same state; the control loop publishes it as the `antenna` frame, on
+change only. The rules live in `backend/app/services/antenna.py` and are tried
+in order:
+
+1. SatNOGS's status is missing or older than `GS_GATE_MAX_STALE_S`, and we are
+   not tracking: **unknown**, never idle. Unknown is not permission, on the wall
+   any more than at the gate.
+2. A SatNOGS job inside its window: **SatNOGS**, recording until its end — or,
+   with the client disconnected, a warning that nothing is recording it.
+3. Our own track: whoever started it, until LOS.
+4. Autopilot engaged: autopilot, in its own words (waiting, positioning, …).
+5. A manual move, **only while the lease it was made under holds**. A goto from
+   an hour ago leaves the mode "manual" for ever; it does not make anyone the
+   owner.
+6. satnogs-client connected: SatNOGS on standby, with its next job.
+7. Otherwise nobody.
+
+It is display only. Nothing that decides whether the antenna may move reads it
+— a test pins that `control.py` and `planner_service.py` do not import it — and
+the interlock still asks SatNOGS for itself on every command.
+
+The same module works out the antenna's **focus**, the satellite it is working:
+the track target, then a running SatNOGS job, then the pass autopilot is
+positioning for, then a SatNOGS job within ten minutes, then the default
+satellite. Two things follow it:
+
+- **The ERR readout.** It used to measure against KNACKSAT-2 whatever the
+  antenna was doing, as √(Δaz² + Δel²) on compass azimuth — so at 85° elevation
+  a 40° azimuth difference read 40° for a beam about 3.5° off. It now shows the
+  great-circle beam error (the planner's own formula) against the focus, names
+  that satellite when it is not the one on screen, and gives Δaz and Δel in its
+  tooltip. SatNOGS schedules some objects under temporary catalogue numbers no
+  public element set carries; for those the error is measured against the job's
+  own TLE, which the backend keeps after the job leaves `/api/jobs/`. With no
+  elements anywhere, ERR shows "—" and its tooltip says why. ControlService's
+  track loop computes its own error and is unaffected.
+- **The display, if this screen follows.** Follow mode is per device (the
+  `gs.followAntenna` key in localStorage) and on by default: the selection moves
+  to the focus, with a "following antenna" chip. Picking a satellite in the
+  selector pins the view instead — the operator who chose ISS keeps ISS — and
+  the chip offers to resume; following also resumes by itself after ten minutes
+  with no pointer or key input (`?followIdleMs=` shortens that for testing). A
+  focus the catalogue cannot draw is never selected, so there is no `/api/tle`
+  404; the chip says the antenna is on it and what is shown instead. Following
+  changes only this browser's selection — the backend ignores
+  `select_satellite`, and nothing here can move the antenna.
+
+  But the selection is what TRACK sends. So while an operator holds the lease
+  and drives by hand, the selection moves only when someone at the screen
+  moves it: the view is held, with an "armed: holding …" chip that offers to
+  follow, and a pin does not lift by itself until the lease is given back.
+  An adversarial review found the idle resume swapping an armed operator's
+  ISS for KNACKSAT-2 — with no chip, since the default needs none — so that
+  TRACK tracked KNACKSAT-2. Engaged, autopilot is what the antenna is doing
+  (it cannot run without a lease), and an unpinned screen still follows it.
+
+  A follow asks again whether it is still wanted once its elements arrive,
+  so one that a pick, a lease or the antenna has overtaken never lands; and a
+  focus that moved while it was loading is followed when it finishes. A
+  follow that failed is retried after 5 s, 30 s, then every two minutes, at
+  once on a reconnect, or when its chip is clicked. If the link to the
+  backend is lost, the ANTENNA line says the owner is unknown until the next
+  frame — the last one is not news. `tests/test_antenna_follow.py` runs the
+  panel in Node and pins each of these.
+
+`pass_next` frames now say which satellite they are about, and each browser
+applies only the ones about the satellite it shows. They used to be applied
+unconditionally, so an operator who selected ISS saw the next-pass card and the
+header's AOS snap back to KNACKSAT-2 within five seconds, under a map still
+showing ISS.
+
+At 1000 px and below the ANTENNA line takes a header row of its own, and once
+the header has scrolled away a 36 px strip along the top edge repeats it.
+
 ## Observation planner
 
 One rotator and one radio means passes compete. The planner decides which ones

@@ -214,3 +214,22 @@ async def test_the_planner_does_not_plan_from_a_position_it_cannot_read():
     rot._down("RPRT -5")
     assert origin(holder) is None
 
+
+
+@pytest.mark.asyncio
+async def test_a_failing_pointing_readout_does_not_take_the_link_down():
+    """The pointing frame is a readout. When it raised, the exception left
+    _poll_once as if the read had failed — the link marked down and the
+    interlock refusing every command, over a display bug."""
+    service = rotator((10.0, 5.0))
+
+    class Broken:
+        def position(self, norad, when=None):
+            raise RuntimeError("elements unreadable")
+
+        def satellite(self, norad):
+            return None
+
+    service.predictor = Broken()
+    await service._poll_once()
+    assert service.last is not None and service.last.link == "up"

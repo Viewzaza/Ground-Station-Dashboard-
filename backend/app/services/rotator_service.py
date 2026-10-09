@@ -2,7 +2,7 @@
 
 Owns the single connection, the 1 Hz poll and the backoff. Publishes a
 `rotator` frame to the hub, plus a `pointing` frame with the error against the
-satellite the display is tracking.
+satellite the antenna is working (see `focus` below).
 
 1 Hz is deliberate, not lazy. A SPID ROT2PROG runs its serial link at 600 baud
 with a 300 ms post-write delay, so one position read occupies the line for the
@@ -21,6 +21,7 @@ import time
 from ..config import Settings
 from ..hub import hub
 from ..schemas import RotatorSample
+from .antenna import beam_error_deg, focus_look, is_finite_look
 from .predictor import Predictor
 from .rotator_mock import MockRotator
 from .rotctld_client import NotARotator, RotctldClient, RotctldError
@@ -50,6 +51,15 @@ class RotatorService:
         self.last: RotatorSample | None = None
         self.verified = False
         self._fatal: str | None = None      # wrong peer: stop, do not retry
+        # What the pointing error is measured against: a callable returning
+        # (norad, override), where override is an EarthSatellite built from a
+        # SatNOGS job's own elements, or None to use the catalogue. The
+        # scheduler points this at the antenna's focus once the services that
+        # decide it exist. Built alone — in tests and tools — it is the default
+        # satellite, which is all it ever used to be. It moves only the ERR
+        # readout: ControlService's track loop computes its own error, and the
+        # mock rotator and the rig service stay on the default satellite.
+        self.focus = lambda: (settings.default_norad, None)
 
     # --- lifecycle ---------------------------------------------------------
     async def run(self) -> None:
@@ -111,7 +121,13 @@ class RotatorService:
         self._last_ok_mono = time.monotonic()
         self.on_state("rotctld", "ok")
         hub.publish("rotator", sample.model_dump(mode="json"))
-        self._publish_pointing(sample)
+        try:
+            self._publish_pointing(sample)
+        except Exception:
+            # A readout, and nothing more. Raised from here it would reach the
+            # poll loop as a failed read: the link marked down, and the
+            # interlock refusing every command, over a display bug.
+            log.exception("pointing readout failed")
 
     def _wrap_state(self, az_raw: float) -> str:
         """Whether the rotator is wound past a full turn, and which way.
@@ -126,19 +142,50 @@ class RotatorService:
         return "none"
 
     def _publish_pointing(self, sample: RotatorSample) -> None:
-        """Error against the satellite, but only while it is actually up."""
-        pos = self.predictor.position(self.s.default_norad)
-        if pos is None or pos.el <= 0:
-            hub.publish("pointing", {"valid": False})
+        """Error against the satellite the antenna is working, while it is up.
+
+        Two measures, because they answer different questions. Δaz and Δel are
+        what each axis would have to turn; the beam error is how far off the
+        beam actually points, and near zenith the two part company — at 85°
+        elevation a 40° azimuth difference is a 3.5° beam error, which the old
+        sqrt(Δaz² + Δel²) reported as 40. total_error_deg is that old number,
+        kept for anything still reading it.
+
+        An invalid frame says why — no elements, below the horizon — because a
+        bare "—" cannot tell a satellite that has set from one nobody can see.
+        """
+        try:
+            norad, override = self.focus()
+        except Exception:
+            log.exception("pointing focus failed; measuring against the default")
+            norad, override = self.s.default_norad, None
+        look = focus_look(self.predictor, norad, override)
+        if look is None:
+            hub.publish("pointing", {"valid": False, "norad": norad,
+                                     "reason": f"no elements for #{norad}"})
+            return
+        name, sat_az, sat_el = look
+        label = name or f"#{norad}"
+        if not is_finite_look(look):
+            hub.publish("pointing", {"valid": False, "norad": norad, "name": name,
+                                     "reason": f"no usable position for {label}"})
+            return
+        if sat_el <= 0:
+            hub.publish("pointing", {"valid": False, "norad": norad, "name": name,
+                                     "reason": f"{label} is below the horizon"})
             return
 
-        az_error = abs(((sample.az_rose - pos.az + 540.0) % 360.0) - 180.0)
-        el_error = abs(sample.el - pos.el)
+        az_error = abs(((sample.az_rose - sat_az + 540.0) % 360.0) - 180.0)
+        el_error = abs(sample.el - sat_el)
         hub.publish("pointing", {
             "valid": True,
+            "norad": norad,
+            "name": name,
             "az_error_deg": round(az_error, 2),
             "el_error_deg": round(el_error, 2),
             "total_error_deg": round((az_error ** 2 + el_error ** 2) ** 0.5, 2),
+            "beam_error_deg": round(
+                beam_error_deg(sample.az_rose, sample.el, sat_az, sat_el), 2),
         })
 
     def _down(self, detail: str) -> None:

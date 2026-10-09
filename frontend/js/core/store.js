@@ -23,6 +23,7 @@ export const store = {
   control: null,       // interlock state: gates, lease, mode
   plan: null,          // the observation plan, with a reason for every pass
   autopilot: null,     // whether the executor is working the plan, and why not
+  antenna: null,       // who has the antenna, and which satellite it is working
   cameras: [],
   cameraBridge: null,  // why the video bridge is or is not reachable
 };

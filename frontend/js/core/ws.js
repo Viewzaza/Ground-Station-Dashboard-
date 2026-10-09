@@ -151,7 +151,9 @@ function apply(frame) {
       break;
 
     case 'pointing':
-      set('pointing', frame.data.valid ? frame.data : null);
+      // An invalid frame that says why — no elements, below the horizon — is
+      // kept, so the ERR readout can show the reason rather than a bare dash.
+      set('pointing', frame.data.valid || frame.data.reason ? frame.data : null);
       break;
 
     case 'satpos':
@@ -161,7 +163,12 @@ function apply(frame) {
       break;
 
     case 'pass_next':
-      set('nextPass', frame.data && frame.data.pass_id ? frame.data : null);
+      // The backend's next pass is for the satellite the antenna is on, which
+      // need not be the one this screen shows. Applied unconditionally, it
+      // put KNACKSAT-2's pass under an operator's ISS within five seconds.
+      if (!frame.data?.norad || frame.data.norad === store.satellite?.norad) {
+        set('nextPass', frame.data?.pass_id ? frame.data : null);
+      }
       break;
 
     case 'tle':
@@ -174,6 +181,12 @@ function apply(frame) {
 
     case 'autopilot':
       set('autopilot', frame.data);
+      break;
+
+    case 'antenna':
+      // Who has the antenna and which satellite it is working. Sent on
+      // change only, like control and autopilot.
+      set('antenna', frame.data);
       break;
 
     case 'satnogs':

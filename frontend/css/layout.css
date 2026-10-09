@@ -226,6 +226,118 @@
    (~2.9:1), and this line carries the AOS detail, which is not decoration. */
 .aos-sub { font-size: 10px; color: var(--ink-3); }
 
+/* ANTENNA: who has it. Three lines, like NEXT AOS beside it — eyebrow, the
+   owner, what it is doing — so the header keeps one rhythm; the follow chip
+   rides on the eyebrow line, where there is room. It is the one block here
+   whose text has no natural length, so it is the one that gives way: an
+   ellipsis on the activity, and the full sentence in its title. */
+.hdr-ant {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas: "label follow" "owner owner" "act act";
+  align-items: center;
+  column-gap: 8px;
+  line-height: 1.15;
+  /* It takes what is left over rather than asking for its sentence's width.
+     Sized from its content, it made every other block shrink with it — and
+     the chips and the NORAD id wrap at a fraction of a pixel short, so at 1366
+     the chips broke onto a second row and the AOS detail in two. From a zero
+     basis it never pushes: it grows into the free space up to its cap, and
+     only below its floor does anything else give way. */
+  flex: 1 1 0;
+  min-width: 150px;
+  max-width: 320px;
+}
+.hdr-ant-label { grid-area: label; font-size: 9px; letter-spacing: .16em; color: var(--muted); }
+.hdr-ant > b { grid-area: owner; justify-self: start; margin: 2px 0; }
+.ant-sub {
+  grid-area: act; display: flex; gap: 6px; min-width: 0;
+  font-size: 10px; color: var(--ink-3);
+}
+.ant-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The countdown never truncates: the sentence beside it gives way first. */
+.ant-cd { flex: none; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.ant-follow {
+  grid-area: follow; justify-self: start; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 9px; letter-spacing: .04em; color: var(--ink-3);
+  padding: 0 5px; border: 1px solid var(--rule); border-radius: 3px;
+  background: var(--panel);
+}
+.ant-follow[role="button"] { cursor: pointer; }
+.ant-follow[role="button"]:hover { border-color: var(--ink-4); }
+.ant-follow:focus-visible { outline: 2px solid var(--track); outline-offset: 1px; }
+.ant-follow.following {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  border-color: color-mix(in srgb, var(--track) 55%, var(--panel));
+}
+/* Held by a lease reads like a pin: in both, someone's choice keeps the view. */
+.ant-follow.pinned,
+.ant-follow.held { color: var(--ink-2); border-color: var(--ink-4); }
+/* Cannot follow: dashed, like everything on this page that is a gap rather
+   than a value. */
+.ant-follow.blind { border-style: dashed; }
+
+/* The owner badge. Same construction as the chips — a pale tint of the hue,
+   a border solid enough to hold an edge, the hue mixed toward ink for the
+   label — in the three data hues this theme already gives meaning: SatNOGS
+   is the track's colour, autopilot is happening-now, an operator is us.
+
+   tokens.css gives --warn the same value as --contact, and --bad the same as
+   --observer, so hue alone cannot tell UNKNOWN from AUTOPILOT or a warning
+   from OPERATOR. Construction does: unknown is dashed and unfilled, a warning
+   is filled solid, and standby — SatNOGS connected but not recording — is the
+   track hue in outline only. */
+.ant-badge {
+  font-size: 11px; font-weight: 600; letter-spacing: .12em;
+  padding: 1px 6px; border-radius: 3px; white-space: nowrap;
+  border: 1px solid var(--rule); color: var(--ink-3); background: var(--panel);
+}
+.ant-badge.own-satnogs {
+  color: var(--track);
+  color: color-mix(in srgb, var(--track) 75%, var(--ink));
+  border-color: var(--track);
+  border-color: color-mix(in srgb, var(--track) 55%, var(--panel));
+  background: color-mix(in srgb, var(--track) 10%, var(--panel));
+}
+.ant-badge.own-autopilot {
+  color: var(--contact);
+  color: color-mix(in srgb, var(--contact) 80%, var(--ink));
+  border-color: var(--contact);
+  border-color: color-mix(in srgb, var(--contact) 55%, var(--panel));
+  background: color-mix(in srgb, var(--contact) 10%, var(--panel));
+}
+.ant-badge.own-operator,
+.ant-badge.own-commissioning {
+  color: var(--observer);
+  color: color-mix(in srgb, var(--observer) 80%, var(--ink));
+  border-color: var(--observer);
+  border-color: color-mix(in srgb, var(--observer) 55%, var(--panel));
+  background: color-mix(in srgb, var(--observer) 10%, var(--panel));
+}
+.ant-badge.own-unknown {
+  color: var(--warn);
+  color: color-mix(in srgb, var(--warn) 80%, var(--ink));
+  border: 1px dashed var(--warn);
+  background: var(--panel);
+}
+.ant-badge.standby { background: var(--panel); }
+.ant-badge.warn { color: #fff; background: var(--bad); border-color: var(--bad); }
+
+@media (min-width: 1920px) { .hdr-ant { max-width: 380px; } }
+@media (min-width: 1401px) and (max-width: 1919px) { .hdr-ant { max-width: 260px; } }
+/* Between the phone layout and 1400 the header was already full: at 1024 the
+   four blocks before this one left it no room at all. The gaps close up, and
+   below 1160 the station's own callsign goes — it never changes, and the
+   header is the one place that says who has the antenna. */
+@media (min-width: 1001px) and (max-width: 1400px) { .hdr { gap: 18px; } }
+@media (min-width: 1001px) and (max-width: 1160px) { .hdr-id .station { display: none; } }
+
+/* The phone strip: the same line, for a header that has scrolled away. Never
+   shown on the wall. */
+.ant-strip { display: none; }
+
 .hdr-chips { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
 /* Chips were dark wells with translucent borders, which only carry on a dark
    page: on chrome a 35%-alpha border washes out to nothing. Each state is now
@@ -274,8 +386,29 @@
   .hdr-clocks { gap: 14px; }
   .hdr-aos { text-align: right; }
   .hdr-aos b { font-size: 16px; }
+  /* A row of its own: on a phone there is the width for the whole sentence,
+     so it wraps rather than truncating. */
+  .hdr-ant { grid-column: 1 / -1; min-width: 0; max-width: none; }
+  .hdr-ant .ant-text { white-space: normal; }
   .hdr-chips { grid-column: 1 / -1; margin-left: 0; }
 }
+
+/* The strip owns the top edge on a phone; the station-alerts banner, when
+   there is one, sits at the bottom. */
+@media (max-width: 1000px) {
+  .ant-strip {
+    position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 40;
+    padding: 0 16px;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--chrome);
+    border-bottom: 1px solid var(--rule);
+    box-shadow: var(--shadow);
+    font-size: 11px; color: var(--ink-3);
+  }
+  .ant-strip .ant-text { flex: 0 1 auto; }
+  .ant-strip .ant-cd { margin-left: auto; }
+}
+.ant-strip[hidden] { display: none; }
 
 /* ---------- footer: one band, four panels ----------
    Decoded frames, the satellite selector, the 5024 activity feed, and the

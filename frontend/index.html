@@ -34,6 +34,12 @@
       <span class="aos-sub" id="aos-detail">awaiting elements</span>
     </div>
 
+    <!-- Who has the antenna — SatNOGS, autopilot, an operator, nobody — and
+         what it is doing. Painted by panels/antenna.js; display only, nothing
+         that gates a command reads it. The follow chip says when this screen
+         is following the antenna, pinned to a pick, or cannot follow it. -->
+    <div class="hdr-ant" id="hdr-ant" aria-live="polite"><span class="hdr-ant-label">ANTENNA</span><b id="ant-owner">—</b><span class="ant-sub" id="ant-activity"></span><span class="ant-follow" id="ant-follow" hidden></span></div>
+
     <div class="hdr-chips" id="chips">
       <span class="chip" data-chip="api">API</span>
       <span class="chip" data-chip="cam">CAM</span>
@@ -212,6 +218,9 @@
   </footer>
 
 </div>
+<!-- The ANTENNA line again, for a phone scrolled past the header: shown only
+     at 1000 px and below, and only while the header is out of view. -->
+<div class="ant-strip" id="ant-strip" hidden></div>
 
 <script type="module" src="js/main.js"></script>
 </body>

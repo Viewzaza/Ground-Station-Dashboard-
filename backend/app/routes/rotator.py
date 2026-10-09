@@ -33,3 +33,20 @@ async def rotator(request: Request) -> dict:
             "max_el": caps.max_el,
         },
     }
+
+
+@router.get("/antenna")
+async def antenna(request: Request) -> dict:
+    """Who has the antenna, and which satellite it is working.
+
+    Read-only, like everything on this router, and display-only: nothing that
+    gates a command reads it. The control loop publishes it as the `antenna`
+    frame; this is the same state for anything that would rather ask, computed
+    fresh if the loop has not ticked yet.
+    """
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is None:
+        return {"owner": "unknown", "activity": "scheduler not running",
+                "focus_norad": None, "focus_has_elements": False,
+                "focus_source": "none"}
+    return scheduler.antenna_last or scheduler.compute_antenna()

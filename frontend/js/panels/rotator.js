@@ -130,6 +130,7 @@ export function paintRotatorReadout() {
     $('rot-az').textContent = '—';
     $('rot-el').textContent = '—';
     $('rot-err').textContent = '—';
+    $('rot-err').title = '';
     $('rot-source').textContent = 'offline';
     return;
   }
@@ -153,15 +154,25 @@ export function paintRotatorReadout() {
 
   // The pointing error is computed by the backend, against the same schedule
   // the antenna is driven from — not re-derived here from a different source.
+  // It is measured against the satellite the antenna is working, which need
+  // not be the one this screen shows, so it names its target when they differ.
   const err = store.pointing;
   const errEl = $('rot-err');
-  if (!err) {
+  if (!err || !err.valid) {
     errEl.textContent = '—';
     errEl.className = '';
+    errEl.title = err?.reason || '';
   } else {
-    errEl.textContent = deg(err.total_error_deg, 1);
+    // The great-circle angle, not √(Δaz²+Δel²): near zenith a large azimuth
+    // difference is a small beam error, and the old number read 40° for 3.5°.
+    const beam = err.beam_error_deg ?? err.total_error_deg;
+    const target = err.name || (err.norad != null ? `#${err.norad}` : 'the satellite');
+    const elsewhere = err.norad != null && err.norad !== store.satellite?.norad;
+    errEl.textContent = deg(beam, 1) + (elsewhere ? ` · ${target}` : '');
+    errEl.title = `great-circle beam error · Δaz ${deg(err.az_error_deg, 1)} `
+      + `Δel ${deg(err.el_error_deg, 1)} · vs ${target}`;
     // SatNOGS itself tracks with a 4-degree deadband, so anything under about
     // 5 degrees is normal operation, not a fault worth colouring red.
-    errEl.className = err.total_error_deg > 5 ? 'err-bad' : '';
+    errEl.className = beam > 5 ? 'err-bad' : '';
   }
 }

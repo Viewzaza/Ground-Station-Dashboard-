@@ -16,6 +16,7 @@ import { Map2D } from './panels/map2d.js';
 import { PolarPlot, paintRotatorReadout } from './panels/rotator.js';
 import { mountCameras } from './panels/cameras.js';
 import { mountHeader } from './panels/header.js';
+import { mountAntenna, pauseFollow } from './panels/antenna.js';
 import { mountSatSelect } from './panels/satselect.js';
 import { mountPasses } from './panels/passes.js';
 import { mountGrafana } from './panels/grafana.js';
@@ -45,6 +46,9 @@ async function boot() {
   ws.connect();
 
   mountHeader();
+  // Follows the antenna by calling selectSatellite itself — the unwrapped
+  // one, so following is never mistaken for a manual pick.
+  mountAntenna({ select: selectSatellite });
   mountGrafana();
   mountPasses();
   mountSatnogs();
@@ -71,7 +75,9 @@ async function boot() {
     }).catch((err) => console.warn('[globe3d]', err));
   }
 
-  await mountSatSelect(selectSatellite);
+  // A pick in the selector is a person choosing what to look at, so it pins
+  // the view rather than being overridden by the next antenna frame.
+  await mountSatSelect((n) => { pauseFollow(n); return selectSatellite(n); });
   await selectSatellite(store.config.default_norad);
 
   // --- loops -------------------------------------------------------------
@@ -85,9 +91,12 @@ async function boot() {
   tick();
 }
 
-async function selectSatellite(norad) {
+async function selectSatellite(norad, { wanted } = {}) {
   try {
     const tle = await api.tle(norad);
+    // Following the antenna asks again once the elements are here: seconds
+    // can pass, and a pick made meanwhile is newer than the follow.
+    if (wanted && !wanted()) return;
     set('tle', tle);
     set('satellite', { norad, name: tle.name });
     setStatus('tle', tle.state === 'stale' ? 'down'
@@ -111,9 +120,12 @@ async function refreshPass() {
   if (!norad) return;
   try {
     const next = await api.nextPass(norad);
+    // A selection that moved on while this was loading has its own.
+    if (store.satellite?.norad !== norad) return;
     set('nextPass', next);
     if (next) {
       const track = await api.passTrack(next.pass_id);
+      if (store.satellite?.norad !== norad) return;
       polar?.setTrack(track.samples);
     } else {
       polar?.setTrack(null);

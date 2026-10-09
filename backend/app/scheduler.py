@@ -10,10 +10,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
+
+from skyfield.api import EarthSatellite
 
 from .config import Settings
 from .hub import hub
+from .services.antenna import TleCache, antenna_state
+from .services.antenna import fingerprint as antenna_fingerprint
 from .services.control import ControlService
 from .services.planner_service import PlanExecutor, PlannerService
 from .services.predictor import Predictor
@@ -50,6 +55,18 @@ class Scheduler:
         )
         self.planner.rotator = self.rotator
         self.executor = PlanExecutor(settings, self.planner, self.control, self.rotator)
+
+        # Who has the antenna, for the display. Read from everything above and
+        # fed back into none of it: the gates, the track loop and the executor
+        # never see it (services/antenna.py says why).
+        self.antenna_tles = TleCache()
+        self.antenna_last: dict | None = None
+        self._antenna_key: tuple | None = None
+        self._antenna_los: dict = {}
+        self._job_sat: tuple | None = None      # (job_id, EarthSatellite | None)
+        # The ERR readout measures against the satellite the antenna is
+        # working, not the one this process happens to default to.
+        self.rotator.focus = self._focus
 
     # --- lifecycle ---------------------------------------------------------
     async def start(self) -> None:
@@ -131,21 +148,33 @@ class Scheduler:
             await self._safe_refresh_tles()
 
     async def _satpos_loop(self) -> None:
-        """Publish the tracked satellite's state and its next pass.
+        """Publish the state and next pass of the satellite the antenna is on.
 
         The browser propagates its own position for the smooth 1 Hz render, so
         this exists for clients that do not (and to keep every consumer working
         from the same schedule the antenna does).
+
+        Which satellite is the antenna's focus when the catalogue has it, and
+        the default satellite otherwise: a job's own elements are enough for a
+        pointing error, but not for a pass card the browser could not also
+        draw an orbit for.
         """
         while True:
-            norad = self.s.default_norad
+            norad = self._display_norad()
             pos = self.predictor.position(norad)
             if pos is not None:
                 hub.publish("satpos", pos.model_dump(mode="json"))
                 self.set_state("predictor", "ok")
 
             nxt = self.predictor.next_pass(norad)
-            hub.publish("pass_next", nxt.model_dump(mode="json") if nxt else {})
+            # Always say which satellite this is about, "no pass" included.
+            # Every browser shows whichever satellite its operator picked, and
+            # each applies this only when it is about that one. An unlabelled
+            # frame used to be applied by all of them, so an operator who chose
+            # ISS saw the next-pass card and the header's AOS snap back to
+            # KNACKSAT-2 within five seconds, under a map still showing ISS.
+            hub.publish("pass_next",
+                        nxt.model_dump(mode="json") if nxt else {"norad": norad})
 
             # 1 Hz while the satellite is up, otherwise every 5 s.
             fast = pos is not None and pos.el > -2.0
@@ -180,4 +209,84 @@ class Scheduler:
             if fingerprint != previous:
                 self.control.publish()
                 previous = fingerprint
+            # After the interlock, from the same state, and never the other
+            # way round: who has the antenna is worked out from the gates,
+            # never fed into them.
+            self._publish_antenna(state)
             await asyncio.sleep(1.0)
+
+    # --- antenna ownership (display only) -----------------------------------
+    def compute_antenna(self, control_state=None) -> dict:
+        """Who has the antenna and which satellite it is working, now.
+
+        Pure reads, no publish — which is what lets GET /api/antenna answer
+        before the control loop's first tick without becoming a second writer.
+        """
+        return antenna_state(
+            control_state=control_state if control_state is not None
+            else self.control.state(),
+            control=self.control,
+            executor_state=self.executor.state,
+            satnogs=self.satnogs,
+            plan=self.planner.plan,
+            settings=self.s,
+            predictor=self.predictor,
+            tlecache=self.antenna_tles,
+            now=datetime.now(timezone.utc),
+            los_cache=self._antenna_los,
+        )
+
+    def _publish_antenna(self, control_state=None) -> dict | None:
+        """Recompute, and publish only when something other than the clock
+        moved — at 1 Hz an unchanging owner would otherwise be a frame a
+        second to every screen, which is what the interlock's own publish
+        above avoids too."""
+        try:
+            self.antenna_tles.update(self.satnogs.commitments)
+            current = self.compute_antenna(control_state)
+        except Exception:
+            # A display line failing must never take the control loop with it:
+            # the lease check above is the one thing here that stops motion.
+            log.exception("antenna state failed")
+            return None
+        key = antenna_fingerprint(current)
+        if key != self._antenna_key:
+            hub.publish("antenna", current)
+            self._antenna_key = key
+        self.antenna_last = current
+        return current
+
+    def _focus(self) -> tuple[int, EarthSatellite | None]:
+        """(norad, override) for the pointing readout.
+
+        The override is an EarthSatellite built from a SatNOGS job's own
+        elements, and only when the catalogue lacks the satellite — a job under
+        a temporary catalogue number. It is built once per job, not once a
+        second.
+        """
+        state = self.antenna_last
+        if not state or state.get("focus_norad") is None:
+            return self.s.default_norad, None
+        norad = int(state["focus_norad"])
+        if state.get("focus_source") != "job_tle":
+            return norad, None
+        job_id = state.get("focus_job_id")
+        if self._job_sat is None or self._job_sat[0] != job_id:
+            entry = self.antenna_tles.get(job_id)
+            sat = None
+            if entry is not None:
+                try:
+                    sat = EarthSatellite(entry.tle1, entry.tle2,
+                                         entry.tle0 or f"#{norad}", self.predictor.ts)
+                except Exception:
+                    log.warning("job %s carries elements that do not parse", job_id)
+            self._job_sat = (job_id, sat)
+        return norad, self._job_sat[1]
+
+    def _display_norad(self) -> int:
+        """The focus, when the catalogue can draw it; the default otherwise."""
+        state = self.antenna_last
+        norad = state.get("focus_norad") if state else None
+        if norad is not None and state.get("focus_source") == "catalogue":
+            return int(norad)
+        return self.s.default_norad
